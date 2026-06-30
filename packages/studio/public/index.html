@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mycelium Studio</title>
+  <script>
+    // Apply theme/density before first paint to avoid a flash.
+    try {
+      var t = localStorage.getItem("mycelium:theme") || "dark";
+      var dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+      document.documentElement.setAttribute("data-density", localStorage.getItem("mycelium:density") || "comfortable");
+    } catch (e) { document.documentElement.setAttribute("data-theme", "dark"); }
+  </script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- ── Top bar ─────────────────────────────────────────────────────────────── -->
+<header id="topbar">
+  <div class="topbar-logo">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+    Mycelium Studio
+  </div>
+  <div class="topbar-sep"></div>
+  <span id="project-name">—</span>
+  <div class="topbar-spacer"></div>
+  <button id="dirty-badge" title="Review unsaved changes">unsaved</button>
+  <button id="error-pill" class="error-pill" title="Validation issues — click for details" aria-label="Validation issues">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <span id="error-pill-count">0</span>
+  </button>
+  <button id="btn-validate" class="btn btn-outline" title="Validate project (Ctrl+Shift+V)">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    Validate
+  </button>
+  <button id="btn-sim" class="btn btn-outline" title="Sim selected mission">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+    Sim
+  </button>
+  <button id="btn-save" class="btn btn-save" title="Save all changes (Ctrl+S)" disabled>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+    Save
+  </button>
+  <button id="btn-theme" class="btn-icon" title="Toggle light / dark theme" aria-label="Toggle theme"></button>
+  <button id="btn-help" class="btn-icon" title="Help &amp; keyboard shortcuts" aria-label="Help">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+  </button>
+  <div class="topbar-sep"></div>
+  <span id="status-msg">Loading…</span>
+</header>
+
+<div id="layout">
+  <!-- ── Sidebar navigation ─────────────────────────────────────────────────── -->
+  <nav id="sidebar" role="navigation">
+    <div class="nav-group">
+      <div class="nav-group-label">Content</div>
+      <button class="nav-tab active" data-tab="waves" role="tab" aria-selected="true">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <span>Waves</span>
+      </button>
+      <button class="nav-tab" data-tab="enemies" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="14.31" y1="8" x2="20.05" y2="17.94"/><line x1="9.69" y1="8" x2="21.17" y2="8"/><line x1="7.38" y1="12" x2="13.12" y2="2.06"/><line x1="9.69" y1="16" x2="3.95" y2="6.06"/><line x1="14.31" y1="16" x2="2.83" y2="16"/><line x1="16.62" y1="12" x2="10.88" y2="21.94"/></svg>
+        <span>Enemies</span>
+      </button>
+      <button class="nav-tab" data-tab="towers" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+        <span>Towers</span>
+      </button>
+      <button class="nav-tab" data-tab="missions" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        <span>Missions</span>
+      </button>
+      <button class="nav-tab" data-tab="worldmap" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+        <span>World Map</span>
+      </button>
+      <button class="nav-tab" data-tab="maps" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+        <span>Maps</span>
+      </button>
+      <button class="nav-tab" data-tab="playtest" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span>Playtest</span>
+      </button>
+      <button class="nav-tab" data-tab="balance" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8a6 6 0 1 1-11.4 0"/><path d="M13 12.5 16 9"/></svg>
+        <span>Balance</span>
+      </button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Project</div>
+      <button class="nav-tab" data-tab="assets" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        <span>Assets</span>
+      </button>
+      <button class="nav-tab" data-tab="settings" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>Settings</span>
+      </button>
+      <button class="nav-tab" data-tab="buildtargets" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+        <span>Build Targets</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ── Main content area ──────────────────────────────────────────────────── -->
+  <main id="main-content">
+
+    <!-- ── WAVES TAB ─────────────────────────────────────────────────────────── -->
+    <section id="tab-waves" class="tab-panel active" role="tabpanel">
+      <div class="panel-header">
+        <h2>Wave Editor</h2>
+        <button id="btn-add-wave" class="btn btn-outline">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Wave
+        </button>
+      </div>
+      <div class="panel-layout" id="panel-waves">
+        <aside class="mission-list-pane">
+          <div class="pane-label">Missions</div>
+          <div class="mission-list-body" id="wave-mission-list"></div>
+        </aside>
+        <div class="waveset-pane">
+          <div class="waveset-header" id="waveset-header" style="display:none">
+            <span class="waveset-title" id="waveset-title">—</span>
+            <span class="waveset-id" id="waveset-id"></span>
+            <div class="waveset-metrics" id="waveset-metrics"></div>
+          </div>
+          <div class="waves-area" id="waves-area">
+            <div class="waves-empty" id="waves-empty">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              <p>Select a mission from the left to edit its waves.</p>
+            </div>
+          </div>
+        </div>
+        <aside class="entity-list" style="width:185px;border-right:none;border-left:1px solid var(--border)">
+          <div class="entity-list-header">
+            <input type="text" id="enemy-ref-search" placeholder="Filter enemies…">
+          </div>
+          <div class="entity-list-body" id="enemy-ref-list"></div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ── ENEMIES TAB ───────────────────────────────────────────────────────── -->
+    <section id="tab-enemies" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Enemy Editor</h2>
+        <button id="btn-add-enemy" class="btn btn-outline">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Enemy
+        </button>
+      </div>
+      <div class="panel-layout">
+        <aside class="entity-list">
+          <div class="entity-list-header">
+            <input type="text" id="enemy-search" placeholder="Search…">
+          </div>
+          <div class="entity-list-body" id="enemy-list"></div>
+        </aside>
+        <div class="detail-panel" id="enemy-detail">
+          <div class="empty-state">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>
+            <p>Select an enemy to edit its properties.</p>
+            <button class="btn btn-outline empty-cta" data-add="enemy">+ New Enemy</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── TOWERS TAB ────────────────────────────────────────────────────────── -->
+    <section id="tab-towers" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Tower Editor</h2>
+        <button id="btn-add-tower" class="btn btn-outline">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Tower
+        </button>
+      </div>
+      <div class="panel-layout">
+        <aside class="entity-list">
+          <div class="entity-list-header">
+            <input type="text" id="tower-search" placeholder="Search…">
+          </div>
+          <div class="entity-list-body" id="tower-list"></div>
+        </aside>
+        <div class="detail-panel" id="tower-detail">
+          <div class="empty-state">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+            <p>Select a tower to edit its properties.</p>
+            <button class="btn btn-outline empty-cta" data-add="tower">+ New Tower</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── MISSIONS TAB ──────────────────────────────────────────────────────── -->
+    <section id="tab-missions" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Mission Editor</h2>
+        <button id="btn-add-mission" class="btn btn-outline">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Mission
+        </button>
+      </div>
+      <div class="panel-layout">
+        <aside class="entity-list">
+          <div class="entity-list-header">
+            <input type="text" id="mission-search" placeholder="Search…">
+          </div>
+          <div class="entity-list-body" id="mission-list"></div>
+        </aside>
+        <div class="detail-panel" id="mission-detail">
+          <div class="empty-state">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/></svg>
+            <p>Select a mission to edit its properties.</p>
+            <button class="btn btn-outline empty-cta" data-add="mission">+ New Mission</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── WORLD MAP TAB ─────────────────────────────────────────────────────── -->
+    <section id="tab-worldmap" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>World Map Editor</h2>
+        <button id="btn-add-region" class="btn btn-outline">+ Region</button>
+        <button id="btn-add-node" class="btn btn-outline">+ Node</button>
+      </div>
+      <div class="worldmap-body">
+        <div class="worldmap-canvas-pane">
+          <div class="worldmap-canvas-toolbar">
+            <span class="text-muted">Map preview</span>
+            <span style="flex:1"></span>
+            <span id="worldmap-dims" class="mono text-muted"></span>
+          </div>
+          <canvas id="worldmap-canvas"></canvas>
+        </div>
+        <div class="worldmap-props">
+          <div class="worldmap-props-section">
+            <div class="worldmap-props-title">
+              Regions
+              <button class="add-btn" id="btn-add-region-2">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Add
+              </button>
+            </div>
+            <div class="worldmap-list" id="region-list"></div>
+          </div>
+          <div class="worldmap-props-section">
+            <div class="worldmap-props-title">
+              Mission Nodes
+              <button class="add-btn" id="btn-add-node-2">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Add
+              </button>
+            </div>
+            <div class="worldmap-list" id="node-list"></div>
+          </div>
+          <div class="worldmap-props-section" style="flex:1">
+            <div id="worldmap-detail">
+              <div class="empty-state" style="padding:20px;text-align:center;color:var(--text-dim);font-size:12px">
+                Click a region or node to edit.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── MAPS TAB ─────────────────────────────────────────────────────────── -->
+    <section id="tab-maps" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Map Authoring</h2>
+        <button id="btn-map-compile" class="btn btn-outline">Compile Maps</button>
+      </div>
+      <div class="panel-layout">
+        <aside class="entity-list">
+          <div class="entity-list-header">
+            <button id="btn-add-map-source" class="btn btn-outline" style="width:100%">Add Map</button>
+          </div>
+          <div class="entity-list-body" id="map-source-list"></div>
+        </aside>
+        <div class="map-editor">
+          <div class="map-canvas-pane">
+            <div class="worldmap-canvas-toolbar">
+              <span id="map-editor-title" class="mono text-muted">—</span>
+              <span style="flex:1"></span>
+              <span class="map-layers" id="map-layers" title="Layer visibility">
+                <label><input type="checkbox" id="layer-terrain" checked> Terrain</label>
+                <label><input type="checkbox" id="layer-markers" checked> Markers</label>
+                <label><input type="checkbox" id="layer-path" checked> Path</label>
+              </span>
+              <label style="display:flex;align-items:center;gap:6px;margin:0">Paint
+                <select id="map-paint-mode" style="width:130px">
+                  <option value="inspect">inspect</option>
+                  <option value="buildable">buildable</option>
+                  <option value="path">path</option>
+                  <option value="blocked">blocked</option>
+                  <option value="water">water</option>
+                  <option value="spawn">spawn (marker)</option>
+                  <option value="core">core (marker)</option>
+                </select>
+              </label>
+            </div>
+            <canvas id="map-editor-canvas"></canvas>
+          </div>
+          <div class="map-props detail-panel">
+            <div id="map-source-detail"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ASSETS TAB ───────────────────────────────────────────────────────── -->
+    <section id="tab-assets" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Asset Catalog</h2>
+      </div>
+      <div class="detail-panel">
+        <div class="asset-grid">
+          <section class="tool-card">
+            <div class="form-section-title">Import Project Asset</div>
+            <div class="form-row">
+              <div class="field"><label>Source path</label><input id="asset-source-path" class="mono" placeholder="imports/spore.png"></div>
+              <div class="field"><label>Target path under assets/</label><input id="asset-target-path" class="mono" placeholder="sprites/spore.png"></div>
+            </div>
+            <div class="form-row">
+              <div class="field"><label>ID</label><input id="asset-id" class="mono" placeholder="spore"></div>
+              <div class="field"><label>Kind</label><select id="asset-kind"><option value="sprite">sprite</option><option value="atlas">atlas</option></select></div>
+              <button id="btn-import-asset" class="btn btn-outline" style="align-self:flex-end">Import</button>
+            </div>
+          </section>
+          <section class="tool-card">
+            <div class="form-section-title">Visual Catalog JSON</div>
+            <textarea id="visuals-json" class="mono json-editor" spellcheck="false"></textarea>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── SETTINGS TAB ──────────────────────────────────────────────────────── -->
+    <section id="tab-settings" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Constants &amp; Settings</h2>
+      </div>
+      <div class="detail-panel">
+        <div style="max-width:680px">
+          <div class="form-section">
+            <div class="form-section-title">Global Game Constants</div>
+            <table class="constants-table" id="constants-table"></table>
+          </div>
+          <div class="form-section">
+            <div class="form-section-title">Project Manifest</div>
+            <div class="form-row">
+              <div class="field">
+                <label>Project Name</label>
+                <input type="text" id="setting-project-name">
+              </div>
+              <div class="field">
+                <label>Default Mission ID</label>
+                <input type="text" id="setting-default-mission" class="mono">
+              </div>
+            </div>
+            <div class="field">
+              <label>Description</label>
+              <textarea id="setting-project-desc" rows="3"></textarea>
+            </div>
+          </div>
+          <div class="form-section">
+            <div class="form-section-title">Appearance</div>
+            <div class="appearance-row">
+              <div class="field"><label>Theme</label>
+                <select id="setting-theme">
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                  <option value="system">System</option>
+                </select>
+              </div>
+              <div class="field"><label>Density</label>
+                <select id="setting-density">
+                  <option value="comfortable">Comfortable</option>
+                  <option value="compact">Compact</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="form-section">
+            <div class="form-section-title">AI Agent Integration (MCP)</div>
+            <label style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+              <input type="checkbox" id="mcp-enabled">
+              <span>Enable MCP server — let any MCP-capable AI agent drive this project's constructor tools (validate, simulate, compile maps, build, patch balance).</span>
+            </label>
+            <p class="text-muted" id="mcp-hint" style="font-size:12px;margin:0 0 10px"></p>
+            <div class="field">
+              <label>Agent config — written to <span class="mono" id="mcp-path">.mcp.json</span></label>
+              <textarea id="mcp-config" class="mono" rows="9" readonly spellcheck="false" style="width:100%"></textarea>
+            </div>
+            <button class="btn btn-outline" id="btn-copy-mcp" type="button" style="margin-top:8px">Copy config</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── BUILD TARGETS TAB ─────────────────────────────────────────────────── -->
+    <section id="tab-buildtargets" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Build Targets</h2>
+        <button id="btn-add-target" class="btn btn-outline">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Target
+        </button>
+      </div>
+      <div class="detail-panel">
+        <div style="max-width:700px" id="buildtargets-body"></div>
+      </div>
+    </section>
+
+    <!-- ── PLAYTEST TAB ──────────────────────────────────────────────────────── -->
+    <section id="tab-playtest" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Playtest</h2>
+        <span class="text-muted" style="font-size:11.5px">Live preview of your unsaved project — place towers, run waves.</span>
+      </div>
+      <div class="playtest-body" id="playtest-body">
+        <div class="pt-empty" id="playtest-empty">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <p>Loading playtest engine…</p>
+        </div>
+        <div class="playtest-stage" id="playtest-stage" style="display:none">
+          <div class="playtest-toolbar">
+            <label>Mission <select id="pt-mission"></select></label>
+            <button id="pt-start" class="btn btn-primary">Start wave</button>
+            <button id="pt-reset" class="btn btn-outline">Reset</button>
+            <label class="pt-speed">Speed
+              <input id="pt-speed" type="range" min="0" max="4" step="0.5" value="1">
+              <output id="pt-speed-out">1×</output>
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;margin:0;color:var(--text-muted)"><input type="checkbox" id="pt-sound" checked> Sound</label>
+          </div>
+          <canvas id="playtest-canvas"></canvas>
+        </div>
+        <aside class="playtest-side" id="playtest-side" style="display:none">
+          <div class="pt-stat"><span class="k">Outcome</span><span class="v" id="pt-outcome">—</span></div>
+          <div class="pt-stat"><span class="k">Core HP</span><span class="v" id="pt-core">—</span></div>
+          <div class="pt-stat"><span class="k">Resources</span><span class="v" id="pt-res">—</span></div>
+          <div class="pt-stat"><span class="k">Wave</span><span class="v" id="pt-wave">—</span></div>
+          <div class="pt-stat"><span class="k">Enemies</span><span class="v" id="pt-enemies">—</span></div>
+          <div class="pt-stat"><span class="k">Towers</span><span class="v" id="pt-towers-count">—</span></div>
+          <div class="form-section-title" style="margin-top:6px">Build (click tower, then a tile)</div>
+          <div class="pt-towers" id="pt-tower-list"></div>
+          <div class="pt-msg" id="pt-msg">Choose a tower, click a buildable tile, then start the wave.</div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ── BALANCE TAB ───────────────────────────────────────────────────────── -->
+    <section id="tab-balance" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>Balance</h2>
+        <span class="text-muted" style="font-size:11.5px">Runs many strategies headlessly and grades each mission — the deterministic core an AI co-designer drives.</span>
+        <span style="flex:1"></span>
+        <button id="btn-run-balance" class="btn btn-primary">Run analysis</button>
+      </div>
+      <div class="detail-panel" id="balance-results"></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ── Toast container ──────────────────────────────────────────────────────── -->
+<div id="toast-container" aria-live="assertive" aria-atomic="true"></div>
+
+<!-- ── Welcome / onboarding ─────────────────────────────────────────────────── -->
+<div id="welcome-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Welcome to Mycelium Studio">
+  <div class="overlay-panel welcome-panel">
+    <div class="overlay-header">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+      <h3>Welcome to Mycelium Studio</h3>
+      <button id="btn-close-welcome" class="btn-icon" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="overlay-body">
+      <p class="text-muted" style="margin-bottom:14px">Design a complete tower-defense game from data — then play it instantly. Here's the loop:</p>
+      <div class="welcome-grid">
+        <div class="welcome-card"><div class="wc-title">1 · Author</div><div class="wc-body">Edit <strong>Enemies</strong>, <strong>Towers</strong>, <strong>Waves</strong> and <strong>Missions</strong> in the sidebar. Sliders, level ladders and pickers — no JSON.</div></div>
+        <div class="welcome-card"><div class="wc-title">2 · Playtest</div><div class="wc-body">Open <strong>Playtest</strong> to drop towers and run waves live on your unsaved project.</div></div>
+        <div class="welcome-card"><div class="wc-title">3 · Tune</div><div class="wc-body"><strong>Sim</strong> charts the difficulty curve; the top-bar pill flags broken references as you type.</div></div>
+        <div class="welcome-card"><div class="wc-title">4 · Ship</div><div class="wc-body"><strong>Build Targets</strong> emits a playable web bundle. Enable <strong>MCP</strong> in Settings to let AI agents help.</div></div>
+      </div>
+      <div class="welcome-shortcuts">
+        <div class="ws-title">Keyboard</div>
+        <div class="ws-row"><kbd>⌘</kbd><kbd>K</kbd> command palette</div>
+        <div class="ws-row"><kbd>⌘</kbd><kbd>S</kbd> save</div>
+        <div class="ws-row"><kbd>⌘</kbd><kbd>Z</kbd> undo · <kbd>⌘</kbd><kbd>⇧</kbd><kbd>Z</kbd> redo</div>
+        <div class="ws-row"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>V</kbd> validate</div>
+      </div>
+    </div>
+    <div class="confirm-actions">
+      <button class="btn btn-primary" id="btn-welcome-start">Start building</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Command palette (⌘K) ─────────────────────────────────────────────────── -->
+<div id="cmdk-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="cmdk-panel">
+    <input id="cmdk-input" type="text" placeholder="Jump to an enemy, tower, mission… or run a command" autocomplete="off" spellcheck="false" aria-label="Command palette search">
+    <div id="cmdk-results" class="cmdk-results" role="listbox"></div>
+    <div class="cmdk-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> run</span><span><kbd>esc</kbd> close</span></div>
+  </div>
+</div>
+
+<!-- ── Confirm dialog ───────────────────────────────────────────────────────── -->
+<div id="confirm-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Confirm">
+  <div class="overlay-panel confirm-panel">
+    <div class="confirm-body" id="confirm-body"></div>
+    <div class="confirm-actions">
+      <button class="btn btn-outline" id="confirm-cancel">Cancel</button>
+      <button class="btn btn-danger" id="confirm-ok">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Validation overlay ───────────────────────────────────────────────────── -->
+<div id="validation-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Validation Results">
+  <div class="overlay-panel">
+    <div class="overlay-header">
+      <svg id="val-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"></svg>
+      <h3 id="val-title">Validation Results</h3>
+      <button id="btn-close-validation" class="btn-icon" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="overlay-body" id="validation-results"></div>
+  </div>
+</div>
+
+<!-- ── Sim overlay ──────────────────────────────────────────────────────────── -->
+<div id="sim-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Simulation Results">
+  <div class="overlay-panel">
+    <div class="overlay-header">
+      <h3 id="sim-title">Mission Simulation</h3>
+      <button id="btn-close-sim" class="btn-icon" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="overlay-body" id="sim-results"></div>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

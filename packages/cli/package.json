@@ -1,0 +1,12 @@
+{
+  "name": "@mycelium/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "mycelium": "./bin/mycelium.mjs"
+  },
+  "scripts": {
+    "validate": "node validate.mjs",
+    "sim": "node sim.mjs"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "assetsRoot": "assets",
+  "atlases": {
+    "external": {
+      "src": "https://example.com/sprite-atlas.png"
+    },
+    "escape": {
+      "src": "../private.png"
+    }
+  },
+  "sprites": {},
+  "bindings": {
+    "towers": {},
+    "enemies": {},
+    "tiles": {},
+    "ui": {}
+  }
+}

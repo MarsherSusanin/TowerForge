@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "assetsRoot": "assets",
+  "terrainTextureSize": 128,
+  "creatureFrameSize": 512,
+  "atlases": {},
+  "sprites": {},
+  "bindings": {
+    "towers": {
+      "arrow_tower": "arrow_tower",
+      "cannon_tower": "cannon_tower"
+    },
+    "enemies": {
+      "basic_grunt": "basic_grunt",
+      "armored_brute": "armored_brute",
+      "swift_runner": "swift_runner"
+    },
+    "tiles": {},
+    "ui": {}
+  },
+  "frames": {
+    "creatures": {
+      "basic_grunt": 0,
+      "armored_brute": 1,
+      "arrow_tower": 2,
+      "cannon_tower": 3
+    }
+  },
+  "spriteAnimationClips": {},
+  "enemyMoveClips": {},
+  "towerAttackClips": {},
+  "towerSpriteSpecs": {
+    "arrow_tower": {
+      "texture": "creatures",
+      "frame": 2,
+      "width": 5.1,
+      "pulse": 0.04,
+      "rotation": 0.025
+    },
+    "cannon_tower": {
+      "texture": "creatures",
+      "frame": 3,
+      "width": 5.5,
+      "pulse": 0.03,
+      "rotation": 0.02
+    }
+  },
+  "enemySpriteSpecs": {
+    "basic_grunt": {
+      "texture": "creatures",
+      "frame": 0,
+      "width": 3.05,
+      "bob": 0.06,
+      "bobSpeed": 0.008,
+      "rotation": 0.05
+    },
+    "armored_brute": {
+      "texture": "creatures",
+      "frame": 1,
+      "width": 4.2,
+      "bob": 0.03,
+      "bobSpeed": 0.005,
+      "rotation": 0.02
+    },
+    "swift_runner": {
+      "texture": "creatures",
+      "frame": 0,
+      "width": 2.6,
+      "bob": 0.1,
+      "bobSpeed": 0.016,
+      "rotation": 0.08
+    }
+  },
+  "entityVisuals": {
+    "basic_grunt": {
+      "id": "basic_grunt",
+      "atlas": "creatures",
+      "frame": 0,
+      "frameSize": 512,
+      "accent": "#f5c84b",
+      "animation": "plant-sway"
+    },
+    "armored_brute": {
+      "id": "armored_brute",
+      "atlas": "creatures",
+      "frame": 1,
+      "frameSize": 512,
+      "accent": "#a86c4b",
+      "animation": "heavy-sway"
+    },
+    "swift_runner": {
+      "id": "swift_runner",
+      "atlas": "creatures",
+      "frame": 0,
+      "frameSize": 512,
+      "accent": "#d4d95d",
+      "animation": "spin"
+    },
+    "arrow_tower": {
+      "id": "arrow_tower",
+      "atlas": "creatures",
+      "frame": 2,
+      "frameSize": 512,
+      "accent": "#f8d67a",
+      "animation": "idle"
+    },
+    "cannon_tower": {
+      "id": "cannon_tower",
+      "atlas": "creatures",
+      "frame": 3,
+      "frameSize": 512,
+      "accent": "#8ecfbb",
+      "animation": "idle"
+    },
+    "core": {
+      "id": "core",
+      "atlas": "creatures",
+      "frame": 4,
+      "frameSize": 512,
+      "accent": "#b578ff",
+      "animation": "core-pulse"
+    }
+  }
+}

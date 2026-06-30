@@ -1,0 +1,29 @@
+{
+  "name": "mycelium",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "studio": "node packages/studio/server.mjs",
+    "mcp": "node packages/mcp/server.mjs",
+    "validate": "node packages/cli/validate.mjs",
+    "sim": "node packages/cli/sim.mjs",
+    "balance": "node packages/cli/balance.mjs",
+    "build": "node packages/cli/build.mjs",
+    "maps:compile": "node packages/cli/maps-compile.mjs",
+    "migrate": "node packages/cli/migrate.mjs",
+    "build:engine": "tsc -p packages/engine/tsconfig.build.json",
+    "test:e2e": "playwright test",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json",
+    "data:validate": "node packages/cli/validate.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.8"
+  }
+}

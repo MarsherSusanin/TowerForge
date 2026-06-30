@@ -1,0 +1,11 @@
+{
+  "name": "@mycelium/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Model Context Protocol server exposing the Mycelium .tdproj constructor tools to AI agents.",
+  "bin": {
+    "mycelium-mcp": "server.mjs"
+  },
+  "main": "tools.mjs"
+}

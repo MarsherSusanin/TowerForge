@@ -1,0 +1,91 @@
+{
+  "id": "tutorial_map",
+  "type": "map",
+  "tiledversion": "1.10.0",
+  "orientation": "hexagonal",
+  "hexsidelength": 18,
+  "staggeraxis": "y",
+  "staggerindex": "odd",
+  "width": 15,
+  "height": 20,
+  "tilewidth": 64,
+  "tileheight": 64,
+  "infinite": false,
+  "nextlayerid": 2,
+  "nextobjectid": 1,
+  "properties": [
+    { "name": "id", "type": "string", "value": "tutorial_map" },
+    { "name": "defaultTerrain", "type": "string", "value": "buildable" },
+    { "name": "spawnCoord", "type": "string", "value": "{\"q\":7,\"r\":0}" },
+    { "name": "coreCoord", "type": "string", "value": "{\"q\":7,\"r\":19}" },
+    {
+      "name": "pathCenterline",
+      "type": "string",
+      "value": "[{\"q\":7,\"r\":0},{\"q\":7,\"r\":1},{\"q\":7,\"r\":2},{\"q\":7,\"r\":3},{\"q\":7,\"r\":4},{\"q\":7,\"r\":5},{\"q\":7,\"r\":6},{\"q\":7,\"r\":7},{\"q\":7,\"r\":8},{\"q\":7,\"r\":9},{\"q\":7,\"r\":10},{\"q\":7,\"r\":11},{\"q\":7,\"r\":12},{\"q\":7,\"r\":13},{\"q\":7,\"r\":14},{\"q\":7,\"r\":15},{\"q\":7,\"r\":16},{\"q\":7,\"r\":17},{\"q\":7,\"r\":18},{\"q\":7,\"r\":19}]"
+    }
+  ],
+  "layers": [
+    {
+      "id": 1,
+      "name": "terrain",
+      "type": "tilelayer",
+      "x": 0,
+      "y": 0,
+      "width": 15,
+      "height": 20,
+      "visible": true,
+      "opacity": 1,
+      "data": [
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1
+      ],
+      "properties": []
+    }
+  ],
+  "tilesets": [
+    {
+      "firstgid": 1,
+      "source": "terrain.tsj"
+    }
+  ],
+  "terrainOverrides": [
+    { "q": 7, "r": 0,  "terrain": "spawn" },
+    { "q": 7, "r": 1,  "terrain": "path" },
+    { "q": 7, "r": 2,  "terrain": "path" },
+    { "q": 7, "r": 3,  "terrain": "path" },
+    { "q": 7, "r": 4,  "terrain": "path" },
+    { "q": 7, "r": 5,  "terrain": "path" },
+    { "q": 7, "r": 6,  "terrain": "path" },
+    { "q": 7, "r": 7,  "terrain": "path" },
+    { "q": 7, "r": 8,  "terrain": "path" },
+    { "q": 7, "r": 9,  "terrain": "path" },
+    { "q": 7, "r": 10, "terrain": "path" },
+    { "q": 7, "r": 11, "terrain": "path" },
+    { "q": 7, "r": 12, "terrain": "path" },
+    { "q": 7, "r": 13, "terrain": "path" },
+    { "q": 7, "r": 14, "terrain": "path" },
+    { "q": 7, "r": 15, "terrain": "path" },
+    { "q": 7, "r": 16, "terrain": "path" },
+    { "q": 7, "r": 17, "terrain": "path" },
+    { "q": 7, "r": 18, "terrain": "path" },
+    { "q": 7, "r": 19, "terrain": "core" }
+  ]
+}

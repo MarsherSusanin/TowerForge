@@ -1,0 +1,188 @@
+{
+  "constants": {
+    "timeUnitSeconds": 0.1,
+    "startingCoreHp": 10,
+    "startingCoins": 100,
+    "startingResources": {
+      "coins": 100,
+      "oakRoots": 0
+    },
+    "prepTimeUnits": 60,
+    "moveTowerCost": {
+      "coins": 50
+    },
+    "waterGroundSpeedFactor": 0.5,
+    "pathWaterCooldownUnits": 60,
+    "pathWaterDurationUnits": 20,
+    "pathWaterRadius": 3,
+    "pathWaterGroundSpeedFactor": 0.3
+  },
+  "defaultMissionId": "tutorial_01",
+  "abilities": {
+    "path_water": {
+      "id": "path_water",
+      "label": "Water Path",
+      "cooldown": 60,
+      "duration": 20,
+      "radius": 3
+    }
+  },
+  "enemies": {
+    "basic_grunt": {
+      "id": "basic_grunt",
+      "label": "Basic Grunt",
+      "maxHp": 10,
+      "speed": 1.0,
+      "reward": {
+        "coins": 5
+      },
+      "coinReward": 5,
+      "coreDamage": 1,
+      "color": 16107595,
+      "hitRadius": 0.55
+    },
+    "armored_brute": {
+      "id": "armored_brute",
+      "label": "Armored Brute",
+      "maxHp": 40,
+      "speed": 0.5,
+      "reward": {
+        "coins": 10
+      },
+      "coinReward": 10,
+      "coreDamage": 3,
+      "color": 11024971,
+      "hitRadius": 0.85,
+      "pathCollisionRadius": 0.9
+    },
+    "swift_runner": {
+      "id": "swift_runner",
+      "label": "Swift Runner",
+      "maxHp": 5,
+      "speed": 2.5,
+      "reward": {
+        "coins": 3
+      },
+      "coinReward": 3,
+      "coreDamage": 1,
+      "color": 13949277,
+      "hitRadius": 0.4,
+      "ignoresWaterSlow": true
+    }
+  },
+  "towers": {
+    "arrow_tower": {
+      "id": "arrow_tower",
+      "label": "Arrow Tower",
+      "cost": {
+        "coins": 50
+      },
+      "footprintRadius": 1,
+      "range": 5,
+      "attack": {
+        "kind": "honey",
+        "fireRate": 1.5,
+        "damagePerMushroom": 1.0,
+        "startingMushrooms": 3,
+        "maxMushrooms": 8,
+        "upgradeCost": 40
+      }
+    },
+    "cannon_tower": {
+      "id": "cannon_tower",
+      "label": "Cannon Tower",
+      "cost": {
+        "coins": 80
+      },
+      "footprintRadius": 1,
+      "range": 4,
+      "attack": {
+        "kind": "slippery_jack",
+        "interval": 2.0,
+        "damage": 5.0,
+        "splashDamage": 2.0,
+        "armoredChipDamage": 1.0,
+        "splashRadius": 1,
+        "slowFactor": 0.6,
+        "slowDuration": 3,
+        "intervalByLevel": [2.0, 1.6, 1.2],
+        "upgradeCosts": [
+          { "coins": 60 },
+          { "coins": 90 }
+        ]
+      }
+    }
+  },
+  "waveSets": {
+    "tutorial_waves": [
+      {
+        "id": "wave_1",
+        "label": "Wave 1",
+        "groups": [
+          {
+            "enemyId": "basic_grunt",
+            "count": 5,
+            "spawnInterval": 2,
+            "startDelay": 0
+          }
+        ]
+      },
+      {
+        "id": "wave_2",
+        "label": "Wave 2",
+        "groups": [
+          {
+            "enemyId": "basic_grunt",
+            "count": 5,
+            "spawnInterval": 1.5,
+            "startDelay": 0
+          },
+          {
+            "enemyId": "swift_runner",
+            "count": 3,
+            "spawnInterval": 1.0,
+            "startDelay": 4
+          }
+        ]
+      },
+      {
+        "id": "wave_3",
+        "label": "Wave 3",
+        "groups": [
+          {
+            "enemyId": "basic_grunt",
+            "count": 6,
+            "spawnInterval": 1.2,
+            "startDelay": 0
+          },
+          {
+            "enemyId": "armored_brute",
+            "count": 1,
+            "spawnInterval": 3,
+            "startDelay": 5
+          }
+        ]
+      }
+    ]
+  },
+  "missions": {
+    "tutorial_01": {
+      "id": "tutorial_01",
+      "label": "Tutorial",
+      "description": "Learn the basics",
+      "availability": "playable",
+      "startingCoreHp": 10,
+      "startingResources": {
+        "coins": 150,
+        "oakRoots": 0
+      },
+      "prepTimeUnits": 60,
+      "mapId": "tutorial_map",
+      "waveSetId": "tutorial_waves",
+      "buildTowerIds": [
+        "arrow_tower",
+        "cannon_tower"
+      ]
+    }
+  }
+}

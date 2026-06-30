@@ -1,0 +1,25 @@
+{
+  "width": 800,
+  "height": 600,
+  "regions": [
+    {
+      "id": "forest",
+      "label": "The Forest",
+      "description": "A peaceful forest under threat",
+      "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+      "accent": "#4a7c4a",
+      "biome": "meadow",
+      "connections": []
+    }
+  ],
+  "missionNodes": [
+    {
+      "missionId": "tutorial_01",
+      "regionId": "forest",
+      "x": 200,
+      "y": 300,
+      "difficulty": 1,
+      "unlockRequiresMissionIds": []
+    }
+  ]
+}
