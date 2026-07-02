@@ -176,8 +176,8 @@ function writeJsonModule(filePath, data) {
 
 function webManifest(manifest, target) {
   return {
-    name: target.manifest?.name ?? target.appTitle ?? manifest.name ?? "Mycelium TD",
-    short_name: target.manifest?.shortName ?? target.appName ?? manifest.name ?? "Mycelium",
+    name: target.manifest?.name ?? target.appTitle ?? manifest.name ?? "TowerForge TD",
+    short_name: target.manifest?.shortName ?? target.appName ?? manifest.name ?? "TowerForge",
     start_url: ".",
     display: target.manifest?.display ?? "standalone",
     orientation: target.manifest?.orientation ?? "any",
@@ -187,7 +187,7 @@ function webManifest(manifest, target) {
 }
 
 function htmlTemplate(manifest, target, renderer = "canvas") {
-  const title = esc(target.appTitle ?? manifest.name ?? "Mycelium TD");
+  const title = esc(target.appTitle ?? manifest.name ?? "TowerForge TD");
   const playfield = renderer === "phaser" ? `<div id="playfield"></div>` : `<canvas id="playfield"></canvas>`;
   const phaserScript = renderer === "phaser" ? `\n  <script src="./vendor/phaser.min.js"></script>` : "";
   return `<!doctype html>
@@ -211,6 +211,7 @@ function htmlTemplate(manifest, target, renderer = "canvas") {
         <label>Tower <select id="tower-select"></select></label>
         <button id="start-wave">Start wave</button>
         <button id="reset-run">Reset</button>
+        <button id="reset-progress" title="Clear saved campaign progress">Reset progress</button>
       </div>
     </header>
     <section class="play-shell">
@@ -224,6 +225,7 @@ function htmlTemplate(manifest, target, renderer = "canvas") {
         <div class="stat"><span>Towers</span><strong id="stat-towers">-</strong></div>
         <label class="speed">Speed <input id="speed" type="range" min="0" max="4" step="0.25" value="1"><span id="speed-label">1x</span></label>
         <label class="speed">Sound <input id="snd" type="checkbox" checked style="width:auto;justify-self:start"></label>
+        <div id="ability-bar" class="ability-bar"></div>
         <p id="message"></p>
       </aside>
     </section>
@@ -237,11 +239,11 @@ function htmlTemplate(manifest, target, renderer = "canvas") {
 function cssTemplate(target) {
   const bg = target.backgroundColor ?? "#111111";
   return `:root{--bg:${bg};--surface:#191b19;--panel:#222620;--border:#364036;--text:#eff3ea;--muted:#9ca895;--accent:#8ac783;--path:#6b5540;--danger:#df6a59;--water:#427b88;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
-*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--font)}body{overflow:hidden}button,select,input{font:inherit}button,select{border:1px solid var(--border);border-radius:6px;background:#111611;color:var(--text);padding:8px 10px}button{cursor:pointer}button:hover{border-color:var(--accent)}#app{height:100%;display:flex;flex-direction:column}.hud{display:flex;gap:18px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface)}h1{font-size:18px;line-height:1.1;margin:0;color:var(--accent);letter-spacing:0}p{margin:4px 0 0;color:var(--muted)}.controls{margin-left:auto;display:flex;gap:10px;align-items:end;flex-wrap:wrap}.controls label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}.play-shell{min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,1fr) 260px}#playfield{width:100%;height:100%;display:block;background:#101410;overflow:hidden}#playfield canvas{display:block}.panel{border-left:1px solid var(--border);background:var(--panel);padding:14px;display:flex;flex-direction:column;gap:10px}.stat{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}.stat span{color:var(--muted)}.stat strong{font-variant-numeric:tabular-nums}.speed{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;color:var(--muted);margin-top:8px}#message{min-height:42px;padding:10px;border:1px solid var(--border);border-radius:6px;background:#161a16;color:var(--text)}@media(max-width:820px){body{overflow:auto}.hud{align-items:flex-start;flex-direction:column}.controls{margin-left:0}.play-shell{grid-template-columns:1fr;grid-template-rows:65vh auto}.panel{border-left:0;border-top:1px solid var(--border)}}`;
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--font)}body{overflow:hidden}button,select,input{font:inherit}button,select{border:1px solid var(--border);border-radius:6px;background:#111611;color:var(--text);padding:8px 10px}button{cursor:pointer}button:hover{border-color:var(--accent)}#app{height:100%;display:flex;flex-direction:column}.hud{display:flex;gap:18px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface)}h1{font-size:18px;line-height:1.1;margin:0;color:var(--accent);letter-spacing:0}p{margin:4px 0 0;color:var(--muted)}.controls{margin-left:auto;display:flex;gap:10px;align-items:end;flex-wrap:wrap}.controls label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}.play-shell{min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,1fr) 260px}#playfield{width:100%;height:100%;display:block;background:#101410;overflow:hidden}#playfield canvas{display:block}.panel{border-left:1px solid var(--border);background:var(--panel);padding:14px;display:flex;flex-direction:column;gap:10px}.stat{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}.stat span{color:var(--muted)}.stat strong{font-variant-numeric:tabular-nums}.speed{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;color:var(--muted);margin-top:8px}#message{min-height:42px;padding:10px;border:1px solid var(--border);border-radius:6px;background:#161a16;color:var(--text)}.ability-bar{display:flex;flex-wrap:wrap;gap:6px}.ability-bar:empty{display:none}.ability-bar button{padding:6px 9px;font-size:12px}.ability-bar button.armed{border-color:var(--accent);color:var(--accent)}.ability-bar button:disabled{opacity:.45;cursor:default}@media(max-width:820px){body{overflow:auto}.hud{align-items:flex-start;flex-direction:column}.controls{margin-left:0}.play-shell{grid-template-columns:1fr;grid-template-rows:65vh auto}.panel{border-left:0;border-top:1px solid var(--border)}}`;
 }
 
 function playerTemplate() {
-  return `import { createGameContentRegistry, MushroomDefenseGame } from "./engine/index.js";
+  return `import { createGameContentRegistry, TowerDefenseGame } from "./engine/index.js";
 import { createCanvasRenderer } from "./renderer/index.mjs";
 import { createAudioPlayer } from "./renderer/audio.mjs";
 import project from "./project-data.js";
@@ -254,7 +256,7 @@ const content = createGameContentRegistry({
 });
 
 const $ = (id) => document.getElementById(id);
-const audio = createAudioPlayer();
+const audio = createAudioPlayer({ audio: project.visuals && project.visuals.audio });
 const canvas = $("playfield");
 let missionId = content.defaultMissionId || Object.keys(content.missions)[0];
 let towerId = content.missions[missionId]?.buildTowerIds?.[0] || Object.keys(content.towers)[0];
@@ -262,8 +264,12 @@ let game = createGame();
 const renderer = createCanvasRenderer({ canvas, content });
 let lastFrame = performance.now();
 let message = "Choose a tower, click a buildable tile, then start the wave.";
+let armedAbility = null;
+const PROGRESS_KEY = "towerforge:progress:" + ((project.buildTarget && project.buildTarget.appId) || (project.manifest && project.manifest.name) || "game");
+let cleared = loadProgress();
 
 initSelectors();
+initAbilityBar();
 resize();
 requestAnimationFrame(loop);
 window.addEventListener("resize", resize);
@@ -271,31 +277,35 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("./offline-sw.js").catch(() => {}));
 }
 $("start-wave").addEventListener("click", () => { audio.resume(); report(game.startNextWave()); });
-$("reset-run").addEventListener("click", () => { game = createGame(); message = "Run reset."; });
+$("reset-run").addEventListener("click", () => { game = createGame(); initAbilityBar(); message = "Run reset."; });
+$("reset-progress")?.addEventListener("click", () => { cleared = new Set(); saveProgress(); refreshMissionOptions(); message = "Campaign progress reset."; });
 $("speed").addEventListener("input", () => $("speed-label").textContent = $("speed").value + "x");
 $("snd").addEventListener("change", () => { if ($("snd").checked) audio.resume(); });
 canvas.addEventListener("click", (event) => {
   audio.resume();
   const coord = pickTile(event);
-  if (!coord || !towerId) return;
+  if (!coord) return;
+  if (armedAbility) { report(game.useAbility(armedAbility, coord)); setArmed(null); return; }
+  if (!towerId) return;
   report(game.placeTower(towerId, coord));
 });
 
 function createGame() {
-  return new MushroomDefenseGame({ missionId, content });
+  return new TowerDefenseGame({ missionId, content });
 }
 
 function initSelectors() {
   const missionSelect = $("mission-select");
-  missionSelect.innerHTML = Object.values(content.missions).map((mission) =>
-    \`<option value="\${escapeHtml(mission.id)}">\${escapeHtml(mission.label || mission.id)}</option>\`
-  ).join("");
-  missionSelect.value = missionId;
+  // Start on an unlocked mission (the default may be gated behind unlockRequiresMissionIds).
+  if (!isUnlocked(missionId)) { const first = Object.keys(content.missions).find(isUnlocked); if (first) { missionId = first; game = createGame(); } }
+  refreshMissionOptions();
   missionSelect.addEventListener("change", () => {
+    if (!isUnlocked(missionSelect.value)) { missionSelect.value = missionId; return; } // locked
     missionId = missionSelect.value;
     towerId = content.missions[missionId]?.buildTowerIds?.[0] || Object.keys(content.towers)[0];
     game = createGame();
     initTowerSelector();
+    initAbilityBar();
   });
   initTowerSelector();
 }
@@ -314,15 +324,60 @@ function initTowerSelector() {
   towerSelect.onchange = () => { towerId = towerSelect.value; };
 }
 
+function setArmed(id) {
+  armedAbility = id;
+  if (id) message = "Click the map to use " + ((game.getSnapshot().abilities[id] || {}).label || id) + ".";
+  for (const btn of document.querySelectorAll("#ability-bar button")) btn.classList.toggle("armed", btn.dataset.aid === id);
+}
+function initAbilityBar() {
+  const bar = $("ability-bar");
+  if (!bar) return;
+  const abilities = Object.values(game.getSnapshot().abilities || {});
+  bar.innerHTML = abilities.map((a) => \`<button data-aid="\${escapeHtml(a.id)}" title="Radius \${a.radius}, cooldown \${a.cooldown}">\${escapeHtml(a.label || a.id)}</button>\`).join("");
+  armedAbility = null;
+  for (const btn of bar.querySelectorAll("button")) {
+    btn.onclick = () => { audio.resume(); setArmed(armedAbility === btn.dataset.aid ? null : btn.dataset.aid); };
+  }
+}
+function updateAbilityBar(snap) {
+  for (const btn of document.querySelectorAll("#ability-bar button")) {
+    const a = snap.abilities ? snap.abilities[btn.dataset.aid] : null;
+    const ready = !!a && a.ready;
+    btn.disabled = !ready;
+    const cd = Math.ceil((a && a.cooldownRemaining) || 0);
+    btn.textContent = ((a && a.label) || btn.dataset.aid) + (cd > 0 ? " (" + cd + ")" : "");
+    if (!ready && armedAbility === btn.dataset.aid) setArmed(null);
+  }
+}
+
+// ── Campaign progress (persisted per app in localStorage) ──────────────────────
+function loadProgress() { try { return new Set(JSON.parse(localStorage.getItem(PROGRESS_KEY) || "[]")); } catch (e) { return new Set(); } }
+function saveProgress() { try { localStorage.setItem(PROGRESS_KEY, JSON.stringify([...cleared])); } catch (e) { /* storage unavailable */ } }
+function unlockReqs(id) { const n = ((content.worldMap && content.worldMap.missionNodes) || []).find((x) => x.missionId === id); return (n && n.unlockRequiresMissionIds) || []; }
+function isUnlocked(id) { return unlockReqs(id).every((r) => cleared.has(r)); }
+function markCleared(id) { if (cleared.has(id)) return false; cleared.add(id); saveProgress(); return true; }
+function newlyUnlockedBy(id) { return Object.keys(content.missions).filter((mid) => !cleared.has(mid) && unlockReqs(mid).includes(id) && isUnlocked(mid)).map((mid) => (content.missions[mid] && content.missions[mid].label) || mid); }
+function refreshMissionOptions() {
+  const sel = $("mission-select");
+  if (!sel) return;
+  sel.innerHTML = Object.values(content.missions).map((mission) => {
+    const unlocked = isUnlocked(mission.id);
+    const mark = cleared.has(mission.id) ? "✓ " : (unlocked ? "" : "🔒 ");
+    return \`<option value="\${escapeHtml(mission.id)}"\${unlocked ? "" : " disabled"}>\${mark}\${escapeHtml(mission.label || mission.id)}</option>\`;
+  }).join("");
+  sel.value = missionId;
+}
+
 function loop(now) {
   const dtSeconds = Math.min(0.05, (now - lastFrame) / 1000);
   lastFrame = now;
   const speed = Number($("speed").value) || 0;
-  if (speed > 0 && game.getSnapshot().outcome === "playing") {
+  const ticked = speed > 0 && game.getSnapshot().outcome === "playing";
+  if (ticked) {
     const timeUnitSeconds = content.constants.timeUnitSeconds || 1;
     game.tick((dtSeconds / timeUnitSeconds) * speed);
   }
-  draw();
+  draw(ticked);
   updateHud();
   requestAnimationFrame(loop);
 }
@@ -331,18 +386,25 @@ function resize() {
   renderer.resize();
 }
 
-function draw() {
+function draw(ticked) {
   const snap = game.getRenderSnapshot();
+  if (!ticked) snap.lastEvents = []; // don't replay last tick's sounds/effects on idle frames
   renderer.drawSnapshot(snap);
   if ($("snd")?.checked) audio.handleEvents(snap.lastEvents);
 }
 
 function updateHud() {
   const snap = game.getSnapshot();
+  updateAbilityBar(snap);
+  if (snap.outcome === "victory" && markCleared(missionId)) {
+    const unlocked = newlyUnlockedBy(missionId);
+    message = "Mission cleared!" + (unlocked.length ? " Unlocked: " + unlocked.join(", ") : "");
+    refreshMissionOptions();
+  }
   $("mission-caption").textContent = content.missions[missionId]?.description || content.missions[missionId]?.label || missionId;
   $("stat-outcome").textContent = snap.outcome;
   $("stat-core").textContent = \`\${snap.coreHp}/\${snap.maxCoreHp}\`;
-  $("stat-resources").textContent = Object.entries(snap.resources).map(([id, value]) => \`\${id}: \${value}\`).join(" · ");
+  $("stat-resources").textContent = Object.entries(snap.resources).map(([id, value]) => { const c = (content.currencies || []).find((c) => c.id === id); return \`\${c ? c.label : id}: \${value}\`; }).join(" · ");
   $("stat-wave").textContent = \`\${snap.startedWaveCount}/\${snap.totalWaves} \${snap.waveState}\`;
   $("stat-enemies").textContent = String(snap.enemies.length);
   $("stat-towers").textContent = String(snap.towers.length);
@@ -370,7 +432,7 @@ function escapeHtml(value) {
 }
 
 function phaserPlayerTemplate() {
-  return `import { createGameContentRegistry, MushroomDefenseGame } from "./engine/index.js";
+  return `import { createGameContentRegistry, TowerDefenseGame } from "./engine/index.js";
 import { createAudioPlayer } from "./renderer/audio.mjs";
 import project from "./project-data.js";
 
@@ -382,21 +444,26 @@ const content = createGameContentRegistry({
 });
 
 const $ = (id) => document.getElementById(id);
-const audio = createAudioPlayer();
+const audio = createAudioPlayer({ audio: project.visuals && project.visuals.audio });
 let missionId = content.defaultMissionId || Object.keys(content.missions)[0];
 let towerId = content.missions[missionId]?.buildTowerIds?.[0] || Object.keys(content.towers)[0];
 let game = createGame();
 let message = "Choose a tower, click a buildable tile, then start the wave.";
+let armedAbility = null;
+const PROGRESS_KEY = "towerforge:progress:" + ((project.buildTarget && project.buildTarget.appId) || (project.manifest && project.manifest.name) || "game");
+let cleared = loadProgress();
 
 const TERRAIN_COLORS = { buildable: 0x1d2a1d, path: 0x6b5540, water: 0x427b88, blocked: 0x252820, spawn: 0x735e2c, core: 0x3f6f43 };
 
 initSelectors();
+initAbilityBar();
 $("start-wave").addEventListener("click", () => { audio.resume(); report(game.startNextWave()); });
-$("reset-run").addEventListener("click", () => { game = createGame(); message = "Run reset."; });
+$("reset-run").addEventListener("click", () => { game = createGame(); initAbilityBar(); message = "Run reset."; });
+$("reset-progress")?.addEventListener("click", () => { cleared = new Set(); saveProgress(); refreshMissionOptions(); message = "Campaign progress reset."; });
 $("speed").addEventListener("input", () => $("speed-label").textContent = $("speed").value + "x");
 $("snd").addEventListener("change", () => { if ($("snd").checked) audio.resume(); });
 
-function createGame() { return new MushroomDefenseGame({ missionId, content }); }
+function createGame() { return new TowerDefenseGame({ missionId, content }); }
 
 class PlayScene extends Phaser.Scene {
   create() {
@@ -407,7 +474,9 @@ class PlayScene extends Phaser.Scene {
     this.input.on("pointerdown", (p) => {
       audio.resume();
       const coord = this.pickTile(p.worldX, p.worldY);
-      if (coord && towerId) report(game.placeTower(towerId, coord));
+      if (!coord) return;
+      if (armedAbility) { report(game.useAbility(armedAbility, coord)); setArmed(null); return; }
+      if (towerId) report(game.placeTower(towerId, coord));
     });
   }
   geometry(tiles) {
@@ -443,11 +512,13 @@ class PlayScene extends Phaser.Scene {
   }
   update(time, delta) {
     const speed = Number($("speed").value) || 0;
-    if (speed > 0 && game.getSnapshot().outcome === "playing") {
+    const ticked = speed > 0 && game.getSnapshot().outcome === "playing";
+    if (ticked) {
       const tu = content.constants.timeUnitSeconds || 1;
       game.tick((Math.min(50, delta) / 1000 / tu) * speed);
     }
     const snap = game.getRenderSnapshot();
+    if (!ticked) snap.lastEvents = []; // don't replay last tick's sounds/tracers on idle frames
     if ($("snd")?.checked) audio.handleEvents(snap.lastEvents);
     const g = this.geometry(snap.tiles);
 
@@ -500,15 +571,16 @@ new Phaser.Game({
 
 function initSelectors() {
   const missionSelect = $("mission-select");
-  missionSelect.innerHTML = Object.values(content.missions).map((mission) =>
-    \`<option value="\${escapeHtml(mission.id)}">\${escapeHtml(mission.label || mission.id)}</option>\`
-  ).join("");
-  missionSelect.value = missionId;
+  // Start on an unlocked mission (the default may be gated behind unlockRequiresMissionIds).
+  if (!isUnlocked(missionId)) { const first = Object.keys(content.missions).find(isUnlocked); if (first) { missionId = first; game = createGame(); } }
+  refreshMissionOptions();
   missionSelect.addEventListener("change", () => {
+    if (!isUnlocked(missionSelect.value)) { missionSelect.value = missionId; return; } // locked
     missionId = missionSelect.value;
     towerId = content.missions[missionId]?.buildTowerIds?.[0] || Object.keys(content.towers)[0];
     game = createGame();
     initTowerSelector();
+    initAbilityBar();
   });
   initTowerSelector();
 }
@@ -526,11 +598,61 @@ function initTowerSelector() {
   towerSelect.onchange = () => { towerId = towerSelect.value; };
 }
 
+function setArmed(id) {
+  armedAbility = id;
+  if (id) message = "Click the map to use " + ((game.getSnapshot().abilities[id] || {}).label || id) + ".";
+  for (const btn of document.querySelectorAll("#ability-bar button")) btn.classList.toggle("armed", btn.dataset.aid === id);
+}
+function initAbilityBar() {
+  const bar = $("ability-bar");
+  if (!bar) return;
+  const abilities = Object.values(game.getSnapshot().abilities || {});
+  bar.innerHTML = abilities.map((a) => \`<button data-aid="\${escapeHtml(a.id)}" title="Radius \${a.radius}, cooldown \${a.cooldown}">\${escapeHtml(a.label || a.id)}</button>\`).join("");
+  armedAbility = null;
+  for (const btn of bar.querySelectorAll("button")) {
+    btn.onclick = () => { audio.resume(); setArmed(armedAbility === btn.dataset.aid ? null : btn.dataset.aid); };
+  }
+}
+function updateAbilityBar(snap) {
+  for (const btn of document.querySelectorAll("#ability-bar button")) {
+    const a = snap.abilities ? snap.abilities[btn.dataset.aid] : null;
+    const ready = !!a && a.ready;
+    btn.disabled = !ready;
+    const cd = Math.ceil((a && a.cooldownRemaining) || 0);
+    btn.textContent = ((a && a.label) || btn.dataset.aid) + (cd > 0 ? " (" + cd + ")" : "");
+    if (!ready && armedAbility === btn.dataset.aid) setArmed(null);
+  }
+}
+
+// ── Campaign progress (persisted per app in localStorage) ──────────────────────
+function loadProgress() { try { return new Set(JSON.parse(localStorage.getItem(PROGRESS_KEY) || "[]")); } catch (e) { return new Set(); } }
+function saveProgress() { try { localStorage.setItem(PROGRESS_KEY, JSON.stringify([...cleared])); } catch (e) { /* storage unavailable */ } }
+function unlockReqs(id) { const n = ((content.worldMap && content.worldMap.missionNodes) || []).find((x) => x.missionId === id); return (n && n.unlockRequiresMissionIds) || []; }
+function isUnlocked(id) { return unlockReqs(id).every((r) => cleared.has(r)); }
+function markCleared(id) { if (cleared.has(id)) return false; cleared.add(id); saveProgress(); return true; }
+function newlyUnlockedBy(id) { return Object.keys(content.missions).filter((mid) => !cleared.has(mid) && unlockReqs(mid).includes(id) && isUnlocked(mid)).map((mid) => (content.missions[mid] && content.missions[mid].label) || mid); }
+function refreshMissionOptions() {
+  const sel = $("mission-select");
+  if (!sel) return;
+  sel.innerHTML = Object.values(content.missions).map((mission) => {
+    const unlocked = isUnlocked(mission.id);
+    const mark = cleared.has(mission.id) ? "✓ " : (unlocked ? "" : "🔒 ");
+    return \`<option value="\${escapeHtml(mission.id)}"\${unlocked ? "" : " disabled"}>\${mark}\${escapeHtml(mission.label || mission.id)}</option>\`;
+  }).join("");
+  sel.value = missionId;
+}
+
 function updateHud(snap) {
+  updateAbilityBar(snap);
+  if (snap.outcome === "victory" && markCleared(missionId)) {
+    const unlocked = newlyUnlockedBy(missionId);
+    message = "Mission cleared!" + (unlocked.length ? " Unlocked: " + unlocked.join(", ") : "");
+    refreshMissionOptions();
+  }
   $("mission-caption").textContent = content.missions[missionId]?.description || content.missions[missionId]?.label || missionId;
   $("stat-outcome").textContent = snap.outcome;
   $("stat-core").textContent = \`\${snap.coreHp}/\${snap.maxCoreHp}\`;
-  $("stat-resources").textContent = Object.entries(snap.resources).map(([id, value]) => \`\${id}: \${value}\`).join(" · ");
+  $("stat-resources").textContent = Object.entries(snap.resources).map(([id, value]) => { const c = (content.currencies || []).find((c) => c.id === id); return \`\${c ? c.label : id}: \${value}\`; }).join(" · ");
   $("stat-wave").textContent = \`\${snap.startedWaveCount}/\${snap.totalWaves} \${snap.waveState}\`;
   $("stat-enemies").textContent = String(snap.enemies.length);
   $("stat-towers").textContent = String(snap.towers.length);
@@ -553,7 +675,7 @@ function escapeHtml(value) {
 
 function serviceWorkerTemplate(precacheAssets = [], cacheVersion = "dev") {
   const assets = ["./", ...precacheAssets];
-  return `const CACHE = "mycelium-build-${cacheVersion}";
+  return `const CACHE = "towerforge-build-${cacheVersion}";
 const ASSETS = ${JSON.stringify(assets)};
 self.addEventListener("install", (event) => {
   self.skipWaiting();

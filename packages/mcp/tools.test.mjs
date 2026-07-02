@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TOOLS, callTool } from "./tools.mjs";
+import { loadEngine } from "../cli/lib/project-loader.mjs";
 
 const STARTER = path.resolve("examples/starter.tdproj");
 
@@ -18,6 +19,14 @@ describe("mcp tool registry", () => {
     expect(names).toContain("validate_project");
     expect(names).toContain("simulate_mission");
     expect(names).toContain("build_project");
+    expect(names).toContain("dry_run_balance_patch");
+    expect(names).toContain("apply_validated_patch");
+    expect(names).toContain("set_enemy_stat");
+    expect(names).toContain("bind_sprite");
+    expect(names).toContain("upsert_entity");
+    expect(names).toContain("delete_entity");
+    expect(names).toContain("write_map");
+    expect(TOOLS.find((t) => t.name === "apply_validated_patch")?.riskClass).toBe("write_local");
   });
 
   it("rejects unknown tools", async () => {
@@ -41,13 +50,27 @@ describe("mcp tool registry", () => {
     const result = await callTool("list_missions", {}, { defaultProjectDir: STARTER });
     expect(result.missions.some((m) => m.id === "tutorial_01")).toBe(true);
   });
+
+  it("describes the schema with no project context at all — pure metadata", async () => {
+    const result = await callTool("describe_schema", {}, {});
+    expect(Object.keys(result.attackKinds).sort()).toEqual(
+      ["antiair", "pulse", "single", "splash", "sniper", "support", "support_buff"].sort()
+    );
+    expect(result.attackKinds.splash.requiredFields.some((f) => f.name === "slowFactor" && f.lessThanOne)).toBe(true);
+    // Ability presets are 3 named, engine-implemented shortcuts, but the ability id space itself
+    // is open — abilityEffects documents the primitives a custom (non-preset) ability composes.
+    expect(Object.keys(result.abilityPresets).sort()).toEqual(["freeze", "path_water", "strike"].sort());
+    expect(result.abilityEffects.damage).toBeTruthy();
+    expect(result.abilityEffects.status).toBeTruthy();
+    expect(result.currencyRules.primaryRequired).toBe("coins");
+  });
 });
 
 describe("mcp balance patch", () => {
   let projectDir;
 
   beforeEach(() => {
-    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "mycelium-mcp-"));
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-"));
     fs.mkdirSync(path.join(projectDir, "content"), { recursive: true });
     fs.cpSync(STARTER, projectDir, { recursive: true });
   });
@@ -67,10 +90,578 @@ describe("mcp balance patch", () => {
     expect(result.validation.ok).toBe(true);
     const balanceAfter = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
     expect(balanceAfter.towers.arrow_tower.cost.coins).toBe(999);
-    expect(fs.existsSync(path.join(projectDir, ".mycelium", "mcp-backups"))).toBe(true);
+    expect(fs.existsSync(path.join(projectDir, ".towerforge", "mcp-backups"))).toBe(true);
+  });
+
+  it("dry-runs invalid balance patches without writing", async () => {
+    const balancePath = path.join(projectDir, "content", "balance.json");
+    const before = fs.readFileSync(balancePath, "utf8");
+    const balanceBefore = JSON.parse(before);
+    const enemies = { ...balanceBefore.enemies, basic_grunt: { ...balanceBefore.enemies.basic_grunt, maxHp: -1 } };
+
+    const result = await callTool("apply_validated_patch", { projectDir, patch: { enemies } }, {});
+
+    expect(result.ok).toBe(false);
+    expect(result.written).toBe(false);
+    expect(result.validation.ok).toBe(false);
+    expect(fs.readFileSync(balancePath, "utf8")).toBe(before);
+  });
+
+  it("supports granular validated balance edits", async () => {
+    const result = await callTool("set_enemy_stat", {
+      projectDir,
+      enemyId: "basic_grunt",
+      field: "maxHp",
+      value: 12
+    }, {});
+
+    expect(result.ok).toBe(true);
+    expect(result.applied).toEqual(["enemies"]);
+    const balanceAfter = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+    expect(balanceAfter.enemies.basic_grunt.maxHp).toBe(12);
+  });
+
+  it("appends one wave group through a validated granular tool", async () => {
+    const result = await callTool("add_wave_group", {
+      projectDir,
+      waveSetId: "tutorial_waves",
+      waveId: "wave_1",
+      group: { enemyId: "basic_grunt", count: 1, spawnInterval: 1, startDelay: 9 }
+    }, {});
+
+    expect(result.ok).toBe(true);
+    const balanceAfter = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+    expect(balanceAfter.waveSets.tutorial_waves[0].groups.at(-1)).toMatchObject({ enemyId: "basic_grunt", count: 1 });
+  });
+
+  it("binds existing sprites without touching balance data", async () => {
+    const visualsPath = path.join(projectDir, "content", "visuals.json");
+    const visuals = JSON.parse(fs.readFileSync(visualsPath, "utf8"));
+    visuals.sprites ??= {};
+    visuals.sprites.arrow_icon = { src: "assets/arrow.png" };
+    fs.writeFileSync(visualsPath, JSON.stringify(visuals, null, 2) + "\n", "utf8");
+
+    const result = await callTool("bind_sprite", {
+      projectDir,
+      kind: "towers",
+      entityId: "arrow_tower",
+      spriteId: "arrow_icon"
+    }, {});
+
+    expect(result.ok).toBe(true);
+    const visualsAfter = JSON.parse(fs.readFileSync(visualsPath, "utf8"));
+    expect(visualsAfter.bindings.towers.arrow_tower).toBe("arrow_icon");
+  });
+
+  it("compiles maps in dry-run mode without writing", async () => {
+    const result = await callTool("compile_maps_dry_run", { projectDir }, {});
+
+    expect(result.ok).toBe(true);
+    expect(result.dryRun).toBe(true);
+    expect(result.mapIds).toContain("tutorial_map");
   });
 
   it("rejects patches with no recognized keys", async () => {
     await expect(callTool("apply_balance_patch", { projectDir, patch: { nonsense: 1 } }, {})).rejects.toThrow(/recognized balance keys/);
+  });
+});
+
+describe("mcp entity CRUD (upsert_entity / delete_entity)", () => {
+  let projectDir;
+
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-entity-"));
+    fs.mkdirSync(path.join(projectDir, "content"), { recursive: true });
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  function balance() {
+    return JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+  }
+
+  it("creates a brand-new tower by id without resending the whole towers section", async () => {
+    const result = await callTool("upsert_entity", {
+      projectDir, collection: "towers", id: "frost_tower",
+      value: { label: "Frost", cost: { coins: 20 }, footprintRadius: 0, range: 5, attack: { kind: "single", fireRate: 1, damagePerStack: 1, startingStacks: 1, maxStacks: 1, upgradeCost: 1 } }
+    }, {});
+    expect(result.ok).toBe(true);
+    expect(balance().towers.frost_tower).toMatchObject({ id: "frost_tower", label: "Frost" });
+    expect(balance().towers.arrow_tower).toBeTruthy(); // untouched
+  });
+
+  it("shallow-merges into an existing entity when merge:true", async () => {
+    const result = await callTool("upsert_entity", {
+      projectDir, collection: "enemies", id: "basic_grunt", value: { maxHp: 999 }, merge: true
+    }, {});
+    expect(result.ok).toBe(true);
+    const grunt = balance().enemies.basic_grunt;
+    expect(grunt.maxHp).toBe(999);
+    expect(grunt.speed).toBeGreaterThan(0); // other fields preserved by the merge
+  });
+
+  it("creates a new wave set from an array of waves", async () => {
+    const result = await callTool("upsert_entity", {
+      projectDir, collection: "waveSets", id: "endless_waves",
+      value: [{ id: "w1", label: "W1", groups: [{ enemyId: "basic_grunt", count: 3, spawnInterval: 1, startDelay: 0 }] }]
+    }, {});
+    expect(result.ok).toBe(true);
+    expect(balance().waveSets.endless_waves).toHaveLength(1);
+  });
+
+  it("adds a currency via the array-shaped collection", async () => {
+    const result = await callTool("upsert_entity", {
+      projectDir, collection: "currencies", id: "gems", value: { label: "Gems" }
+    }, {});
+    expect(result.ok).toBe(true);
+    expect(balance().currencies).toContainEqual({ id: "gems", label: "Gems" });
+  });
+
+  it("rejects an unknown collection", async () => {
+    await expect(callTool("upsert_entity", { projectDir, collection: "bogus", id: "x", value: {} }, {})).rejects.toThrow(/unknown collection/);
+  });
+
+  it("refuses to delete a referenced enemy and reports the references", async () => {
+    const result = await callTool("delete_entity", { projectDir, collection: "enemies", id: "basic_grunt" }, {});
+    expect(result.ok).toBe(false);
+    expect(result.refused).toBe("referenced");
+    expect(result.references.length).toBeGreaterThan(0);
+    expect(balance().enemies.basic_grunt).toBeTruthy(); // nothing written
+  });
+
+  it("deletes an unreferenced entity cleanly", async () => {
+    await callTool("upsert_entity", {
+      projectDir, collection: "enemies", id: "unused_enemy",
+      value: { label: "Unused", maxHp: 1, speed: 1, reward: { coins: 1 }, coinReward: 1, coreDamage: 1, color: 1 }
+    }, {});
+    const result = await callTool("delete_entity", { projectDir, collection: "enemies", id: "unused_enemy" }, {});
+    expect(result.ok).toBe(true);
+    expect(balance().enemies.unused_enemy).toBeUndefined();
+  });
+
+  it("never allows deleting the required primary currency \"coins\", even with force", async () => {
+    await expect(callTool("delete_entity", { projectDir, collection: "currencies", id: "coins", force: true }, {}))
+      .rejects.toThrow(/primary currency/);
+  });
+
+  it("rejects deleting an entity that doesn't exist", async () => {
+    await expect(callTool("delete_entity", { projectDir, collection: "towers", id: "nope" }, {})).rejects.toThrow(/not found/);
+  });
+});
+
+describe("mcp write_map", () => {
+  let projectDir;
+
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-map-"));
+    fs.mkdirSync(path.join(projectDir, "content"), { recursive: true });
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it("authors a brand-new map from scratch and compiles it", async () => {
+    const result = await callTool("write_map", {
+      projectDir, mapId: "canyon", width: 6, height: 3,
+      spawnCoord: { q: 0, r: 1 }, coreCoord: { q: 5, r: 1 },
+      pathCenterline: [{ q: 0, r: 1 }, { q: 1, r: 1 }, { q: 2, r: 1 }, { q: 3, r: 1 }, { q: 4, r: 1 }, { q: 5, r: 1 }]
+    }, {});
+    expect(result.ok).toBe(true);
+    expect(result.mapIds).toContain("canyon");
+    expect(fs.existsSync(path.join(projectDir, "maps", "src", "canyon.tmj"))).toBe(true);
+    const compiled = JSON.parse(fs.readFileSync(path.join(projectDir, "maps", "compiled", "maps.json"), "utf8"));
+    expect(compiled.canyon.width).toBe(6);
+  });
+
+  it("supports multi-route paths", async () => {
+    const result = await callTool("write_map", {
+      projectDir, mapId: "fork", width: 6, height: 5,
+      spawnCoord: { q: 0, r: 2 }, coreCoord: { q: 5, r: 2 },
+      pathCenterline: [{ q: 0, r: 2 }, { q: 5, r: 2 }],
+      pathRoutes: [
+        { id: "top", pathCenterline: [{ q: 0, r: 2 }, { q: 3, r: 0 }, { q: 5, r: 2 }] },
+        { id: "bottom", pathCenterline: [{ q: 0, r: 2 }, { q: 3, r: 4 }, { q: 5, r: 2 }] }
+      ]
+    }, {});
+    expect(result.ok).toBe(true);
+    const compiled = JSON.parse(fs.readFileSync(path.join(projectDir, "maps", "compiled", "maps.json"), "utf8"));
+    expect(compiled.fork.pathRoutes.map((r) => r.id).sort()).toEqual(["bottom", "top"]);
+  });
+
+  it("validates BEFORE writing — a malformed map never touches disk", async () => {
+    const result = await callTool("write_map", {
+      projectDir, mapId: "broken", width: -1, height: 3,
+      spawnCoord: { q: 0, r: 0 }, coreCoord: { q: 1, r: 0 },
+      pathCenterline: [{ q: 0, r: 0 }, { q: 1, r: 0 }]
+    }, {});
+    expect(result.ok).toBe(false);
+    expect(fs.existsSync(path.join(projectDir, "maps", "src", "broken.tmj"))).toBe(false);
+  });
+});
+
+describe("mcp diff payload (2.4)", () => {
+  let projectDir;
+
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-diff-"));
+    fs.mkdirSync(path.join(projectDir, "content"), { recursive: true });
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it("reports a leaf-level diff of exactly what a dry-run patch would change", async () => {
+    // dry_run_balance_patch REPLACES the whole `enemies` section, so preserve the other enemies —
+    // only basic_grunt's maxHp should show up in the diff.
+    const before = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+    const result = await callTool("dry_run_balance_patch", {
+      projectDir,
+      patch: { enemies: { ...before.enemies, basic_grunt: { ...before.enemies.basic_grunt, maxHp: 999 } } }
+    }, {});
+    expect(result.ok).toBe(true);
+    expect(typeof result.revision).toBe("string");
+    const maxHpChange = result.diff.changes.find((c) => c.path === "enemies.basic_grunt.maxHp");
+    expect(maxHpChange).toBeTruthy();
+    expect(maxHpChange.after).toBe(999);
+    expect(result.diff.truncated).toBe(false);
+  });
+
+  it("carries the same diff through to the actual write on apply_validated_patch", async () => {
+    const before = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+    const result = await callTool("upsert_entity", {
+      projectDir, collection: "enemies", id: "basic_grunt", value: { speed: 5 }, merge: true
+    }, {});
+    expect(result.ok).toBe(true);
+    const speedChange = result.diff.changes.find((c) => c.path === "enemies.basic_grunt.speed");
+    expect(speedChange).toEqual({ path: "enemies.basic_grunt.speed", before: before.enemies.basic_grunt.speed, after: 5 });
+  });
+
+  it("reports no diff entries when a patch value is identical to the current one", async () => {
+    const before = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+    const result = await callTool("dry_run_balance_patch", { projectDir, patch: { enemies: before.enemies } }, {});
+    expect(result.diff.changeCount).toBe(0);
+  });
+
+  // Regression: an off-by-one bug used to mark truncated:true whenever the walk happened to hit
+  // exactly DIFF_LIMIT entries, even if that was the true total (nothing was actually dropped).
+  it("does not false-positive truncated when the real change count lands exactly on the limit", async () => {
+    const before = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+    const enemies = { ...before.enemies };
+    // 200 distinct real leaf changes across 100 synthetic enemies (2 fields each).
+    for (let i = 0; i < 100; i += 1) {
+      enemies[`synthetic_${i}`] = { id: `synthetic_${i}`, label: `S${i}`, maxHp: 999 + i, speed: 5 + i, reward: { coins: 1 }, coinReward: 1, coreDamage: 1, color: 1 };
+    }
+    const beforeWithBaseline = { ...before.enemies };
+    for (let i = 0; i < 100; i += 1) {
+      beforeWithBaseline[`synthetic_${i}`] = { id: `synthetic_${i}`, label: `S${i}`, maxHp: 1, speed: 1, reward: { coins: 1 }, coinReward: 1, coreDamage: 1, color: 1 };
+    }
+    const result = await callTool("dry_run_balance_patch", {
+      projectDir: (() => {
+        // Seed a fresh project whose baseline already has the 100 synthetic enemies at maxHp:1/speed:1,
+        // so the patch produces exactly 200 real changed leaves (maxHp+speed x 100), nothing more.
+        const seeded = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-diff-limit-"));
+        fs.mkdirSync(path.join(seeded, "content"), { recursive: true });
+        fs.cpSync(STARTER, seeded, { recursive: true });
+        const balancePath = path.join(seeded, "content", "balance.json");
+        const balance = JSON.parse(fs.readFileSync(balancePath, "utf8"));
+        balance.enemies = beforeWithBaseline;
+        fs.writeFileSync(balancePath, JSON.stringify(balance, null, 2));
+        return seeded;
+      })(),
+      patch: { enemies }
+    }, {});
+    expect(result.diff.changeCount).toBe(200);
+    expect(result.diff.changes).toHaveLength(200);
+    expect(result.diff.truncated).toBe(false);
+  });
+
+  it("correctly marks truncated when there really are more than DIFF_LIMIT changes", async () => {
+    const seeded = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-diff-over-"));
+    fs.mkdirSync(path.join(seeded, "content"), { recursive: true });
+    fs.cpSync(STARTER, seeded, { recursive: true });
+    const balancePath = path.join(seeded, "content", "balance.json");
+    const balance = JSON.parse(fs.readFileSync(balancePath, "utf8"));
+    const baseline = { ...balance.enemies };
+    const patched = { ...balance.enemies };
+    for (let i = 0; i < 101; i += 1) {
+      baseline[`e${i}`] = { id: `e${i}`, label: `E${i}`, maxHp: 1, speed: 1, reward: { coins: 1 }, coinReward: 1, coreDamage: 1, color: 1 };
+      patched[`e${i}`] = { id: `e${i}`, label: `E${i}`, maxHp: 2, speed: 2, reward: { coins: 1 }, coinReward: 1, coreDamage: 1, color: 1 }; // 202 real changes
+    }
+    balance.enemies = baseline;
+    fs.writeFileSync(balancePath, JSON.stringify(balance, null, 2));
+    const result = await callTool("dry_run_balance_patch", { projectDir: seeded, patch: { enemies: patched } }, {});
+    expect(result.diff.changeCount).toBeGreaterThan(200);
+    expect(result.diff.changes).toHaveLength(200); // output capped
+    expect(result.diff.truncated).toBe(true);
+    fs.rmSync(seeded, { recursive: true, force: true });
+  });
+
+  it("diffs a changed element of an existing array field-by-field, not the whole array twice", async () => {
+    const before = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+    const waveSets = structuredClone(before.waveSets);
+    waveSets.tutorial_waves[0].groups[0].startDelay = 9; // wave_1's existing (only) group
+    const result = await callTool("dry_run_balance_patch", { projectDir, patch: { waveSets } }, {});
+    expect(result.ok).toBe(true);
+    // Both sides of this array element already existed as plain objects, so the walk recurses to
+    // the single leaf field that actually changed, instead of reporting the whole group/array.
+    const entry = result.diff.changes.find((c) => c.path === "waveSets.tutorial_waves[0].groups[0].startDelay");
+    expect(entry).toBeTruthy();
+    expect(entry.before).toBe(0);
+    expect(entry.after).toBe(9);
+    // The unrelated sibling field (count) on that same group must not appear — only the true diff.
+    expect(result.diff.changes.some((c) => c.path === "waveSets.tutorial_waves[0].groups[0].count")).toBe(false);
+    expect(result.diff.changes.some((c) => c.path === "waveSets.tutorial_waves")).toBe(false);
+  });
+
+  it("reports a brand-new array element as a single whole-object leaf (nothing to recurse into on the before side)", async () => {
+    const result = await callTool("add_wave_group", {
+      projectDir, waveSetId: "tutorial_waves", waveId: "wave_1",
+      group: { enemyId: "basic_grunt", count: 1, spawnInterval: 1, startDelay: 9 }
+    }, {});
+    expect(result.ok).toBe(true);
+    const groupEntry = result.diff.changes.find((c) => /^waveSets\.tutorial_waves\[0\]\.groups\[\d+\]$/.test(c.path));
+    expect(groupEntry).toBeTruthy();
+    expect(groupEntry.before).toBeUndefined();
+    expect(groupEntry.after).toEqual({ enemyId: "basic_grunt", count: 1, spawnInterval: 1, startDelay: 9 });
+    expect(result.diff.changes.some((c) => c.path === "waveSets.tutorial_waves")).toBe(false);
+  });
+
+  it("distinguishes an absent field from an explicit null in a diff entry", async () => {
+    const before = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+    const withNull = { ...before.enemies, basic_grunt: { ...before.enemies.basic_grunt, customNote: null } };
+    const addResult = await callTool("dry_run_balance_patch", { projectDir, patch: { enemies: withNull } }, {});
+    const addEntry = addResult.diff.changes.find((c) => c.path === "enemies.basic_grunt.customNote");
+    expect(addEntry.before).toBeUndefined(); // was absent, not null
+    expect(addEntry.after).toBeNull();
+    const removeResult = await callTool("dry_run_balance_patch", {
+      projectDir: (() => {
+        const seeded = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-diff-null-"));
+        fs.mkdirSync(path.join(seeded, "content"), { recursive: true });
+        fs.cpSync(STARTER, seeded, { recursive: true });
+        const balancePath = path.join(seeded, "content", "balance.json");
+        const balance = JSON.parse(fs.readFileSync(balancePath, "utf8"));
+        balance.enemies.basic_grunt.customNote = null;
+        fs.writeFileSync(balancePath, JSON.stringify(balance, null, 2));
+        return seeded;
+      })(),
+      patch: { enemies: before.enemies } // no customNote key at all
+    }, {});
+    const removeEntry = removeResult.diff.changes.find((c) => c.path === "enemies.basic_grunt.customNote");
+    expect(removeEntry.before).toBeNull();
+    expect(removeEntry.after).toBeUndefined(); // now absent, not null
+  });
+});
+
+describe("mcp optimistic-concurrency revision tokens (2.8)", () => {
+  let projectDir;
+
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-revision-"));
+    fs.mkdirSync(path.join(projectDir, "content"), { recursive: true });
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it("returns a stable balance revision from get_project_summary and validate_project", async () => {
+    const summary = await callTool("get_project_summary", { projectDir }, {});
+    const validation = await callTool("validate_project", { projectDir }, {});
+    expect(summary.revisions.balance).toBe(validation.revisions.balance);
+    expect(typeof summary.revisions.balance).toBe("string");
+  });
+
+  it("accepts a write whose ifRevision matches the current revision", async () => {
+    const { revisions } = await callTool("get_project_summary", { projectDir }, {});
+    const result = await callTool("set_enemy_stat", {
+      projectDir, enemyId: "basic_grunt", field: "maxHp", value: 15, ifRevision: revisions.balance
+    }, {});
+    expect(result.ok).toBe(true);
+    expect(typeof result.revision).toBe("string");
+    expect(result.revision).not.toBe(revisions.balance); // content actually changed
+  });
+
+  it("rejects a write whose ifRevision is stale, without touching the file", async () => {
+    const balancePath = path.join(projectDir, "content", "balance.json");
+    const before = fs.readFileSync(balancePath, "utf8");
+    const result = await callTool("set_enemy_stat", {
+      projectDir, enemyId: "basic_grunt", field: "maxHp", value: 15, ifRevision: "stale-not-a-real-revision"
+    }, {});
+    expect(result.ok).toBe(false);
+    expect(result.conflict).toBe(true);
+    expect(result.expectedRevision).toBe("stale-not-a-real-revision");
+    expect(fs.readFileSync(balancePath, "utf8")).toBe(before);
+  });
+
+  it("detects a concurrent edit: a write based on a now-stale revision is rejected", async () => {
+    const { revisions } = await callTool("get_project_summary", { projectDir }, {});
+    // Someone else writes first...
+    await callTool("set_enemy_stat", { projectDir, enemyId: "basic_grunt", field: "maxHp", value: 20 }, {});
+    // ...then our agent's write, still holding the OLD revision, is rejected rather than clobbering it.
+    const result = await callTool("set_enemy_stat", {
+      projectDir, enemyId: "armored_brute", field: "maxHp", value: 30, ifRevision: revisions.balance
+    }, {});
+    expect(result.ok).toBe(false);
+    expect(result.conflict).toBe(true);
+  });
+
+  it("guards bind_sprite writes with the visuals revision independently of the balance one", async () => {
+    const { revisions } = await callTool("get_project_summary", { projectDir }, {});
+    const result = await callTool("bind_sprite", {
+      projectDir, kind: "towers", entityId: "arrow_tower", spriteId: "", ifRevision: revisions.visuals
+    }, {});
+    expect(result.ok).toBe(true);
+  });
+
+  // Regression: the revision a successful write reported used to be the pre-write in-memory
+  // candidate's hash, computed before the final validateProjectDir await point — a concurrent
+  // writer landing in that window made the reported revision stale (didn't match the file on disk).
+  // This asserts the returned revision always matches an independent fresh read right after.
+  it("returns a revision that matches a fresh read of the file right after a successful write", async () => {
+    const result = await callTool("set_enemy_stat", { projectDir, enemyId: "basic_grunt", field: "maxHp", value: 42 }, {});
+    expect(result.ok).toBe(true);
+    const { revisions } = await callTool("get_project_summary", { projectDir }, {});
+    expect(result.revision).toBe(revisions.balance);
+  });
+
+  // Regression: applyValidatedBalancePatch used to re-load-and-re-merge the patch against whatever
+  // was on disk immediately before writing, instead of reusing the already-validated dry-run
+  // candidate — reopening the exact TOCTOU window the pre-write revision check exists to close.
+  // Firing overlapping writes lets the (now-unconditional) pre-write check reject the loser rather
+  // than silently building its write on top of the winner's already-persisted change.
+  it("never silently loses a concurrent write: the pre-write revision check is unconditional, not opt-in", async () => {
+    const [a, b] = await Promise.all([
+      callTool("set_enemy_stat", { projectDir, enemyId: "basic_grunt", field: "maxHp", value: 111 }, {}),
+      callTool("set_enemy_stat", { projectDir, enemyId: "armored_brute", field: "maxHp", value: 222 }, {})
+    ]);
+    const outcomes = [a, b];
+    const succeeded = outcomes.filter((r) => r.ok);
+    const rejected = outcomes.filter((r) => !r.ok);
+    // Either both serialized cleanly (no real overlap this run) or the loser detected the race —
+    // never both claiming ok:true while one write is silently missing from the final file.
+    expect(rejected.every((r) => r.conflict === true)).toBe(true);
+    if (succeeded.length === 2) {
+      const finalBalance = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+      expect(finalBalance.enemies.basic_grunt.maxHp).toBe(111);
+      expect(finalBalance.enemies.armored_brute.maxHp).toBe(222);
+    } else {
+      expect(succeeded.length).toBe(1);
+      expect(rejected.length).toBe(1);
+    }
+  });
+});
+
+describe("mcp explain_validation (2.6)", () => {
+  it("explains a curated code with an example, no project needed", async () => {
+    const result = await callTool("explain_validation", { code: "TOWER_ATTACK_KIND" }, {});
+    expect(result.curated).toBe(true);
+    expect(result.example.attack.kind).toBeTruthy();
+    expect(result.seeAlso).toBe("describe_schema");
+  });
+
+  it("echoes the issue's own hint/expected/got when given a whole issue object", async () => {
+    const result = await callTool("explain_validation", {
+      issue: { code: "TOWER_ATTACK_SLOWFACTOR", message: "must be < 1", hint: "custom hint", expected: "0 < x < 1", got: "1.5" }
+    }, {});
+    expect(result.hint).toBe("custom hint"); // the issue's own hint wins over the curated one
+    expect(result.expected).toBe("0 < x < 1");
+    expect(result.curated).toBe(true); // still has a curated example even though hint came from the issue
+  });
+
+  it("falls back gracefully for an uncurated code", async () => {
+    const result = await callTool("explain_validation", { code: "SOME_MADE_UP_CODE" }, {});
+    expect(result.curated).toBe(false);
+    expect(result.note).toMatch(/no curated example/i);
+  });
+
+  it("rejects a call with neither code nor issue", async () => {
+    await expect(callTool("explain_validation", {}, {})).rejects.toThrow(/requires .code. or/i);
+  });
+
+  it("round-trips end-to-end: an unknown attack kind's issue code is explainable", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-explain-"));
+    fs.mkdirSync(path.join(projectDir, "content"), { recursive: true });
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+    try {
+      await callTool("upsert_entity", {
+        projectDir, collection: "towers", id: "typo_tower",
+        value: { label: "Typo", cost: { coins: 1 }, footprintRadius: 0, range: 1, attack: { kind: "sinlge" } }
+      }, {}).catch(() => {}); // expected to fail validation; we just want the issue shape below
+      const dry = await callTool("dry_run_balance_patch", {
+        projectDir, patch: { towers: { typo_tower: { id: "typo_tower", label: "Typo", cost: { coins: 1 }, footprintRadius: 0, range: 1, attack: { kind: "sinlge" } } } }
+      }, {});
+      const kindIssue = dry.validation.issues.find((i) => i.fieldPath === "attack.kind");
+      expect(kindIssue).toBeTruthy();
+      const explained = await callTool("explain_validation", { issue: kindIssue }, {});
+      expect(explained.curated).toBe(true);
+      expect(explained.example).toBeTruthy();
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  // Regression: an unguarded `EXPLAIN_CURATED[code]` bracket lookup resolves inherited
+  // Object.prototype members (constructor, toString, hasOwnProperty, ...) instead of undefined,
+  // producing a false curated:true with garbage content for an attacker/agent-supplied code.
+  it.each(["constructor", "toString", "hasOwnProperty", "__proto__"])(
+    "does not resolve the inherited Object.prototype member for code %j",
+    async (code) => {
+      const result = await callTool("explain_validation", { code }, {});
+      expect(result.curated).toBe(false);
+      expect(result.example).toBeUndefined();
+      expect(typeof result.hint === "string" || result.hint === undefined).toBe(true);
+    }
+  );
+
+  it("rejects a non-string `code` with a distinct error from the missing-code case", async () => {
+    await expect(callTool("explain_validation", { code: 42 }, {})).rejects.toThrow(/code.*must be a string/i);
+  });
+
+  // Regression: TOWER_ATTACK_SLOWFACTOR's curated example used to omit several fields the
+  // "splash" attack kind actually requires (interval/damage/splashDamage/armoredChipDamage/
+  // splashRadius), so an agent copying it verbatim would immediately fail validation again.
+  it("TOWER_ATTACK_SLOWFACTOR's curated example is itself a fully valid splash attack", async () => {
+    const engine = await loadEngine();
+    const { example } = await callTool("explain_validation", { code: "TOWER_ATTACK_SLOWFACTOR" }, {});
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-explain-example-"));
+    fs.mkdirSync(path.join(projectDir, "content"), { recursive: true });
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+    try {
+      const dry = await callTool("dry_run_balance_patch", {
+        projectDir,
+        patch: { towers: { example_tower: { id: "example_tower", label: "Example", cost: { coins: 1 }, footprintRadius: 0, range: 3, ...example } } }
+      }, {});
+      const attackIssues = dry.validation.issues.filter((i) => i.entityId === "example_tower" && i.fieldPath.startsWith("attack"));
+      expect(attackIssues).toEqual([]);
+      expect(engine.ATTACK_KIND_SCHEMA.splash).toBeTruthy(); // sanity: splash is still a real kind
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  // Regression (finding #8): EXPLAIN_CURATED's keys are hand-written strings that must stay in
+  // sync with deriveValidationCode(entityKind, fieldPath) — this pins the (entityKind, fieldPath)
+  // pair each curated code actually corresponds to, so a future rename of either derivation input
+  // breaks this test instead of silently desyncing the curated map from the real issue codes.
+  it("keeps every curated code in sync with deriveValidationCode(entityKind, fieldPath)", async () => {
+    const engine = await loadEngine();
+    const pairs = [
+      ["TOWER_ATTACK_KIND", "tower", "attack.kind"],
+      ["TOWER_ATTACK_SLOWFACTOR", "tower", "attack.slowFactor"],
+      ["ABILITY_ID", "ability", "id"]
+    ];
+    for (const [code, entityKind, fieldPath] of pairs) {
+      expect(engine.deriveValidationCode(entityKind, fieldPath)).toBe(code);
+      const result = await callTool("explain_validation", { code }, {});
+      expect(result.curated).toBe(true);
+    }
   });
 });

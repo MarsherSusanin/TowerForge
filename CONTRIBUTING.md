@@ -1,6 +1,6 @@
 # Contributing
 
-Mycelium Kit is a local-first constructor for 2D hex tower-defense games.
+TowerForge is a local-first constructor for 2D hex tower-defense games.
 
 ## Development
 

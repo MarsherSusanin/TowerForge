@@ -1,11 +1,17 @@
 {
+  "currencies": [
+    {
+      "id": "coins",
+      "label": "Coins",
+      "color": 16107330
+    }
+  ],
   "constants": {
     "timeUnitSeconds": 0.1,
     "startingCoreHp": 10,
     "startingCoins": 100,
     "startingResources": {
-      "coins": 100,
-      "oakRoots": 0
+      "coins": 100
     },
     "prepTimeUnits": 60,
     "moveTowerCost": {
@@ -32,7 +38,7 @@
       "id": "basic_grunt",
       "label": "Basic Grunt",
       "maxHp": 10,
-      "speed": 1.0,
+      "speed": 1,
       "reward": {
         "coins": 5
       },
@@ -80,11 +86,11 @@
       "footprintRadius": 1,
       "range": 5,
       "attack": {
-        "kind": "honey",
+        "kind": "single",
         "fireRate": 1.5,
-        "damagePerMushroom": 1.0,
-        "startingMushrooms": 3,
-        "maxMushrooms": 8,
+        "damagePerStack": 1,
+        "startingStacks": 3,
+        "maxStacks": 8,
         "upgradeCost": 40
       }
     },
@@ -97,18 +103,26 @@
       "footprintRadius": 1,
       "range": 4,
       "attack": {
-        "kind": "slippery_jack",
-        "interval": 2.0,
-        "damage": 5.0,
-        "splashDamage": 2.0,
-        "armoredChipDamage": 1.0,
+        "kind": "splash",
+        "interval": 2,
+        "damage": 5,
+        "splashDamage": 2,
+        "armoredChipDamage": 1,
         "splashRadius": 1,
         "slowFactor": 0.6,
         "slowDuration": 3,
-        "intervalByLevel": [2.0, 1.6, 1.2],
+        "intervalByLevel": [
+          2,
+          1.6,
+          1.2
+        ],
         "upgradeCosts": [
-          { "coins": 60 },
-          { "coins": 90 }
+          {
+            "coins": 60
+          },
+          {
+            "coins": 90
+          }
         ]
       }
     }
@@ -140,7 +154,7 @@
           {
             "enemyId": "swift_runner",
             "count": 3,
-            "spawnInterval": 1.0,
+            "spawnInterval": 1,
             "startDelay": 4
           }
         ]
@@ -173,8 +187,7 @@
       "availability": "playable",
       "startingCoreHp": 10,
       "startingResources": {
-        "coins": 150,
-        "oakRoots": 0
+        "coins": 150
       },
       "prepTimeUnits": 60,
       "mapId": "tutorial_map",
@@ -182,7 +195,8 @@
       "buildTowerIds": [
         "arrow_tower",
         "cannon_tower"
-      ]
+      ],
+      "abilityIds": []
     }
   }
 }

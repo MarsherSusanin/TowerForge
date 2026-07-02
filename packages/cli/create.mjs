@@ -1,18 +1,22 @@
-// create.mjs — Scaffold a new .tdproj project from a minimal template.
-// Usage: node create.mjs <name> [--dir <path>]
+// create.mjs — Scaffold a new .tdproj project from a genre template.
+// Usage: node create.mjs <name> [--dir <path>] [--template classic|maze|idle|roguelike]
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { getTemplate, TEMPLATE_NAMES } from "./lib/templates.mjs";
 
 // ── Argument parsing ──────────────────────────────────────────────────────────
 
 function parseArgs() {
   const raw = process.argv.slice(2);
-  const result = { name: null, dir: null };
+  const result = { name: null, dir: null, template: "classic" };
   let i = 0;
   while (i < raw.length) {
     if (raw[i] === "--dir" && raw[i + 1]) {
       result.dir = path.resolve(raw[i + 1]);
+      i += 2;
+    } else if (raw[i] === "--template" && raw[i + 1]) {
+      result.template = raw[i + 1];
       i += 2;
     } else if (!raw[i].startsWith("--")) {
       if (!result.name) result.name = raw[i];
@@ -27,15 +31,21 @@ function parseArgs() {
 const args = parseArgs();
 
 if (!args.name) {
-  console.error("Usage: node create.mjs <name> [--dir <path>]");
-  console.error("  name    Project name (will create <name>.tdproj directory)");
-  console.error("  --dir   Parent directory for the project (default: current directory)");
+  console.error("Usage: node create.mjs <name> [--dir <path>] [--template <name>]");
+  console.error("  name        Project name (will create <name>.tdproj directory)");
+  console.error("  --dir       Parent directory for the project (default: current directory)");
+  console.error(`  --template  Starter game: ${TEMPLATE_NAMES.join(" | ")} (default: classic)`);
   process.exit(1);
 }
 
 // Sanitize name: only word chars, hyphens, underscores
 if (!/^[\w_-]+$/.test(args.name)) {
   console.error(`Invalid project name "${args.name}". Use only letters, digits, hyphens, and underscores.`);
+  process.exit(1);
+}
+
+if (!TEMPLATE_NAMES.includes(args.template)) {
+  console.error(`Unknown template "${args.template}". Choose one of: ${TEMPLATE_NAMES.join(", ")}.`);
   process.exit(1);
 }
 
@@ -60,171 +70,21 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf8");
 }
 
-// ── Template content ──────────────────────────────────────────────────────────
+// ── Content ─────────────────────────────────────────────────────────────────
+// Genre-specific content (balance, maps, world map) comes from the template; the rest of the
+// scaffolding (manifest, visuals, build target) is shared.
+
+const template = getTemplate(args.template);
+const balanceJson = template.balance;
+const worldMapJson = template.worldMap;
+const mapsJson = template.maps;          // { [mapId]: compiledMap }
+const mapSourcesJson = template.mapSources; // { [mapId]: tmjSource }
 
 const projectJson = {
   schemaVersion: 1,
   name: args.name,
-  description: "",
+  description: `A ${args.template} tower-defense game built with TowerForge.`,
   author: "",
-};
-
-const balanceJson = {
-  schemaVersion: 1,
-  defaultMissionId: "starter_01",
-  constants: {
-    timeUnitSeconds: 0.1,
-    startingCoreHp: 20,
-    startingCoins: 150,
-    startingResources: { coins: 150 },
-    prepTimeUnits: 100,
-    moveTowerCost: { coins: 25 },
-    waterGroundSpeedFactor: 0.6,
-    pathWaterCooldownUnits: 300,
-    pathWaterDurationUnits: 100,
-    pathWaterRadius: 2,
-    pathWaterGroundSpeedFactor: 0.5,
-  },
-  abilities: {},
-  enemies: {
-    crawler: {
-      id: "crawler",
-      label: "Crawler",
-      maxHp: 60,
-      speed: 1.5,
-      reward: { coins: 5 },
-      coreDamage: 1,
-      coinReward: 5,
-      color: 0x8db070,
-      hitRadius: 0.5,
-      size: "small",
-    },
-  },
-  towers: {
-    basic: {
-      id: "basic",
-      label: "Basic Tower",
-      footprintRadius: 0,
-      range: 3,
-      cost: { coins: 50 },
-      attack: {
-        kind: "chanterelle",
-        fireRate: 1,
-        damage: 20,
-        maxTargetsByLevel: [1, 2, 3, 4],
-        upgradeCosts: [],
-      },
-    },
-  },
-  waveSets: {
-    starter_waves: [
-      {
-        id: "wave_1",
-        groups: [
-          {
-            enemyId: "crawler",
-            count: 5,
-            spawnInterval: 10,
-            startDelay: 0,
-          },
-        ],
-      },
-    ],
-  },
-  missions: {
-    starter_01: {
-      id: "starter_01",
-      label: "First Steps",
-      description: "Defend against the first wave of crawlers.",
-      availability: "playable",
-      countsTowardProgress: true,
-      startingCoreHp: 20,
-      startingResources: { coins: 150 },
-      prepTimeUnits: 100,
-      mapId: "starter_map",
-      waveSetId: "starter_waves",
-      buildTowerIds: ["basic"],
-      abilityIds: [],
-    },
-  },
-};
-
-const worldMapJson = {
-  width: 800,
-  height: 600,
-  regions: [
-    {
-      id: "region_forest",
-      label: "Forest",
-      description: "A dense woodland.",
-      bounds: { x: 0, y: 0, width: 800, height: 600 },
-      accent: "#4a7c59",
-      biome: "forest",
-      connections: [],
-    },
-  ],
-  missionNodes: [
-    {
-      missionId: "starter_01",
-      regionId: "region_forest",
-      x: 400,
-      y: 300,
-      difficulty: 1,
-      unlockRequiresMissionIds: [],
-    },
-  ],
-};
-
-// Minimal map: 8-wide, 6-tall hex grid with a straight path
-const starterMap = {
-  id: "starter_map",
-  label: "Starter Map",
-  width: 8,
-  height: 6,
-  spawnCoord: { q: 0, r: 2 },
-  coreCoord: { q: 7, r: 2 },
-  pathCenterline: [
-    { q: 0, r: 2 },
-    { q: 1, r: 2 },
-    { q: 2, r: 2 },
-    { q: 3, r: 2 },
-    { q: 4, r: 2 },
-    { q: 5, r: 2 },
-    { q: 6, r: 2 },
-    { q: 7, r: 2 },
-  ],
-  pathRoutes: [{ id: "main", pathCenterline: [
-    { q: 0, r: 2 },
-    { q: 1, r: 2 },
-    { q: 2, r: 2 },
-    { q: 3, r: 2 },
-    { q: 4, r: 2 },
-    { q: 5, r: 2 },
-    { q: 6, r: 2 },
-    { q: 7, r: 2 },
-  ] }],
-  terrainOverrides: [],
-};
-
-const mapsJson = {
-  starter_map: starterMap,
-};
-
-const mapSourceJson = {
-  id: "starter_map",
-  type: "map",
-  orientation: "hexagonal",
-  width: starterMap.width,
-  height: starterMap.height,
-  properties: [
-    { name: "id", type: "string", value: "starter_map" },
-    { name: "defaultTerrain", type: "string", value: "buildable" },
-    { name: "spawnCoord", type: "string", value: JSON.stringify(starterMap.spawnCoord) },
-    { name: "coreCoord", type: "string", value: JSON.stringify(starterMap.coreCoord) },
-    { name: "pathCenterline", type: "string", value: JSON.stringify(starterMap.pathCenterline) }
-  ],
-  pathRoutes: starterMap.pathRoutes,
-  terrainOverrides: starterMap.terrainOverrides
 };
 
 const visualsJson = {
@@ -232,12 +92,7 @@ const visualsJson = {
   assetsRoot: "assets",
   atlases: {},
   sprites: {},
-  bindings: {
-    towers: {},
-    enemies: {},
-    tiles: {},
-    ui: {}
-  }
+  bindings: { towers: {}, enemies: {}, tiles: {}, ui: {} }
 };
 
 const buildTargetsJson = {
@@ -258,7 +113,7 @@ const buildTargetsJson = {
   }
 };
 
-const gitignoreContent = `.mycelium/
+const gitignoreContent = `.towerforge/
 *.bak
 `;
 
@@ -275,21 +130,30 @@ writeJson(path.join(projectDir, "content", "balance.json"), balanceJson);
 writeJson(path.join(projectDir, "content", "world-map.json"), worldMapJson);
 writeJson(path.join(projectDir, "content", "visuals.json"), visualsJson);
 writeJson(path.join(projectDir, "build-targets.json"), buildTargetsJson);
-writeJson(path.join(projectDir, "maps", "src", "starter_map.tmj"), mapSourceJson);
+for (const [mapId, source] of Object.entries(mapSourcesJson)) {
+  writeJson(path.join(projectDir, "maps", "src", `${mapId}.tmj`), source);
+}
 writeJson(path.join(projectDir, "maps", "compiled", "maps.json"), mapsJson);
 fs.writeFileSync(path.join(projectDir, ".gitignore"), gitignoreContent, "utf8");
 
-console.log(`Created ${projectName}/`);
-console.log(`  project.json`);
-console.log(`  content/balance.json       — 1 mission, 1 enemy, 1 tower, 1 wave set`);
-console.log(`  content/world-map.json     — 1 region, 1 mission node`);
-console.log(`  content/visuals.json       — empty asset catalog`);
+// ── Summary ───────────────────────────────────────────────────────────────────
+
+const missionIds = Object.keys(balanceJson.missions ?? {});
+const counts = {
+  missions: missionIds.length,
+  enemies: Object.keys(balanceJson.enemies ?? {}).length,
+  towers: Object.keys(balanceJson.towers ?? {}).length,
+  maps: Object.keys(mapsJson).length,
+  currencies: (balanceJson.currencies ?? []).length
+};
+
+console.log(`Created ${projectName}/  (template: ${args.template})`);
+console.log(`  content/balance.json       — ${counts.missions} mission(s), ${counts.enemies} enemies, ${counts.towers} towers, ${counts.currencies} currenc(ies)`);
+console.log(`  content/world-map.json     — ${(worldMapJson.missionNodes ?? []).length} mission node(s)`);
+console.log(`  maps/compiled/maps.json    — ${counts.maps} map(s)`);
 console.log(`  build-targets.json         — web-pwa target`);
-console.log(`  maps/src/starter_map.tmj   — editable map source`);
-console.log(`  maps/compiled/maps.json    — 1 map (8×6 starter_map)`);
-console.log(`  assets/                    — place image assets here`);
 console.log();
 console.log(`Next steps:`);
-console.log(`  cd ${projectName}`);
-console.log(`  node ../../packages/cli/validate.mjs`);
-console.log(`  node ../../packages/cli/sim.mjs starter_01`);
+console.log(`  node packages/cli/bin/towerforge.mjs validate --project ${projectName}`);
+console.log(`  node packages/cli/bin/towerforge.mjs balance  --project ${projectName}`);
+console.log(`  node packages/cli/bin/towerforge.mjs studio   --project ${projectName}`);

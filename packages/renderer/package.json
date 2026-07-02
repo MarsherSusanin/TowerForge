@@ -1,5 +1,5 @@
 {
-  "name": "@mycelium/renderer",
+  "name": "@towerforge/renderer",
   "version": "0.1.0",
   "type": "module",
   "exports": {

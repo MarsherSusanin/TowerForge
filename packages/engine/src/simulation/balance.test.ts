@@ -12,9 +12,9 @@ function buildContent(): ReturnType<typeof createGameContentRegistry> {
         timeUnitSeconds: 1,
         startingCoreHp: 10,
         startingCoins: 100,
-        startingResources: { coins: 100, oakRoots: 0 },
+        startingResources: { coins: 100 },
         prepTimeUnits: 2,
-        moveTowerCost: { coins: 1, oakRoots: 0 },
+        moveTowerCost: { coins: 1 },
         waterGroundSpeedFactor: 0.5,
         pathWaterCooldownUnits: 10,
         pathWaterDurationUnits: 5,
@@ -33,7 +33,7 @@ function buildContent(): ReturnType<typeof createGameContentRegistry> {
           cost: { coins: 5 },
           footprintRadius: 0,
           range: 8,
-          attack: { kind: "honey", fireRate: 5, damagePerMushroom: 10, startingMushrooms: 3, maxMushrooms: 8, upgradeCost: 5 }
+          attack: { kind: "single", fireRate: 5, damagePerStack: 10, startingStacks: 3, maxStacks: 8, upgradeCost: 5 }
         }
       },
       waveSets: {
@@ -74,7 +74,7 @@ function mission(id: string, waveSetId: string) {
     label: id,
     description: "",
     startingCoreHp: 10,
-    startingResources: { coins: 100, oakRoots: 0 },
+    startingResources: { coins: 100 },
     prepTimeUnits: 2,
     mapId: "lane",
     waveSetId,
@@ -91,12 +91,16 @@ describe("runBalanceSweep", () => {
 
     expect(easy?.winRate).toBe(1);
     expect(easy?.flags.some((f) => f.code === "trivial")).toBe(true);
+    // single-tower missions must not be flagged "dominant_tower" (no alternatives to dominate)
+    expect(easy?.flags.some((f) => f.code === "dominant_tower")).toBe(false);
 
     expect(impossible?.winRate).toBe(0);
     expect(impossible?.flags.some((f) => f.code === "unwinnable")).toBe(true);
 
     expect(report.summary.missions).toBe(2);
     expect(report.summary.winnable).toBe(1);
+    expect(easy?.strategyCount).toBeGreaterThan(3);
+    expect(easy?.results.some((result) => result.strategy.placement === "far_path")).toBe(true);
   });
 
   it("is deterministic — identical content yields an identical report", () => {

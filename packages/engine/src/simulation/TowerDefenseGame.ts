@@ -2,16 +2,21 @@ import { type GameContentRegistry } from "../content/registry.js";
 import { coordKey, hexDistance, hexLine } from "./hex.js";
 import { HexMap } from "./map.js";
 import type {
+  AbilityEffect,
   ActionResult,
+  ChainDeliverySpec,
+  CurrencyDefinition,
   EnemyPhaseSpawnDefinition,
   EnemyState,
   GameEvent,
   GameSnapshot,
   HexCoord,
   HexTile,
+  MissionAbilityDefinition,
   MissionAbilityId,
   ResourceBag,
   ResourceCost,
+  StatusEffectSpec,
   SunlightTile,
   TemporaryWaterTile,
   TowerTargetMode,
@@ -29,12 +34,12 @@ interface DamageResolutionOptions {
   aoe?: boolean;
 }
 
-export interface MushroomDefenseGameOptions {
+export interface TowerDefenseGameOptions {
   missionId: string;
   content: GameContentRegistry;
 }
 
-export class MushroomDefenseGame {
+export class TowerDefenseGame {
   readonly content: GameContentRegistry;
   readonly mission: GameContentRegistry["missions"][string];
   readonly map: HexMap;
@@ -48,6 +53,8 @@ export class MushroomDefenseGame {
   enemies: EnemyState[] = [];
   towers: TowerState[] = [];
   lastEvents: GameEvent[] = [];
+  readonly currencies: CurrencyDefinition[];
+  private readonly currencyIds: string[];
 
   private enemyCounter = 0;
   private towerCounter = 0;
@@ -65,8 +72,24 @@ export class MushroomDefenseGame {
   private readonly staticSpawnCoordSnapshot: HexCoord;
   private readonly staticCoreCoordSnapshot: HexCoord;
 
-  constructor(options: MushroomDefenseGameOptions) {
+  constructor(options: TowerDefenseGameOptions) {
     this.content = options.content;
+    // Currencies are content-defined; "coins" is always guaranteed as the primary (first) currency.
+    // Dedupe and reorder defensively so the engine is correct even on content built without the loader.
+    const declared = this.content.currencies?.length ? this.content.currencies : [{ id: "coins", label: "Coins" }];
+    const seen = new Set<string>();
+    const ordered: CurrencyDefinition[] = [];
+    for (const currency of declared) {
+      if (currency && currency.id && !seen.has(currency.id)) {
+        seen.add(currency.id);
+        ordered.push(currency);
+      }
+    }
+    if (!seen.has("coins")) ordered.unshift({ id: "coins", label: "Coins" });
+    const coinsIndex = ordered.findIndex((c) => c.id === "coins");
+    if (coinsIndex > 0) ordered.unshift(ordered.splice(coinsIndex, 1)[0]!);
+    this.currencies = ordered;
+    this.currencyIds = this.currencies.map((c) => c.id);
     const missionId = options.missionId;
     const mission = this.content.missions[missionId];
     if (!mission) {
@@ -92,7 +115,7 @@ export class MushroomDefenseGame {
   }
 
   get coins(): number {
-    return this.resources.coins;
+    return this.resources.coins ?? 0;
   }
 
   set coins(value: number) {
@@ -185,8 +208,8 @@ export class MushroomDefenseGame {
       return this.fail(`Need ${this.formatCost(type.cost)}.`, "reason.needCost", this.costReasonParams(type.cost));
     }
 
-    let firstReason = "No valid planting space.";
-    let firstReasonKey: ActionResult["reasonKey"] = "reason.noPlantingSpace";
+    let firstReason = "No valid build space.";
+    let firstReasonKey: ActionResult["reasonKey"] = "reason.noBuildSpace";
     let firstReasonParams: ActionResult["reasonParams"] | undefined;
     for (const tile of this.map.tiles.values()) {
       const result = this.canPlaceTower(typeId, tile);
@@ -219,9 +242,10 @@ export class MushroomDefenseGame {
       coord: this.cleanCoord(coord),
       footprint: this.map.tilesWithin(coord, type.footprintRadius).map(({ q, r }) => ({ q, r })),
       level: 1,
-      targetMode: attack.kind === "oak_bolete" ? attack.targetPriority : undefined,
-      mushrooms: attack.kind === "honey" ? attack.startingMushrooms : 0,
-      cooldown: 0
+      targetMode: attack.kind === "sniper" ? attack.targetPriority : undefined,
+      stacks: attack.kind === "single" ? attack.startingStacks : 0,
+      cooldown: 0,
+      hp: typeof type.maxHp === "number" && type.maxHp > 0 ? type.maxHp : undefined
     };
 
     this.spendResources(type.cost);
@@ -252,7 +276,7 @@ export class MushroomDefenseGame {
     }
 
     if (this.towerTypes[tower.typeId]?.attack.kind === "support" && !this.dependentsKeepSupportAfterMove(tower.id, coord)) {
-      return this.fail("Dependent towers would lose this support aura.", "reason.oakDependentsLoseAura");
+      return this.fail("Dependent towers would lose this support aura.", "reason.dependentsLoseAura");
     }
 
     return { ok: true };
@@ -319,8 +343,8 @@ export class MushroomDefenseGame {
       return null;
     }
     const attack = type.attack;
-    if (attack.kind === "honey") {
-      return tower.mushrooms >= attack.maxMushrooms ? null : { coins: attack.upgradeCost };
+    if (attack.kind === "single") {
+      return tower.stacks >= attack.maxStacks ? null : { coins: attack.upgradeCost };
     }
 
     const costs = "upgradeCosts" in attack ? attack.upgradeCosts : undefined;
@@ -351,12 +375,12 @@ export class MushroomDefenseGame {
       return this.fail("Unknown tower type.", "reason.unknownTower");
     }
     this.spendResources(cost);
-    if (type.attack.kind === "honey") {
-      tower.mushrooms += 1;
+    if (type.attack.kind === "single") {
+      tower.stacks += 1;
     } else {
       tower.level += 1;
     }
-    this.lastEvents.push({ type: "towerUpgraded", towerId, level: tower.level, mushrooms: tower.mushrooms });
+    this.lastEvents.push({ type: "towerUpgraded", towerId, level: tower.level, stacks: tower.stacks });
     return { ok: true };
   }
 
@@ -366,7 +390,7 @@ export class MushroomDefenseGame {
       return this.fail("No tower selected.", "reason.noTowerSelected");
     }
 
-    if (this.towerTypes[tower.typeId]?.attack.kind !== "oak_bolete") {
+    if (this.towerTypes[tower.typeId]?.attack.kind !== "sniper") {
       return this.fail("This tower has no selectable target mode.", "reason.targetModeUnsupported");
     }
 
@@ -427,6 +451,71 @@ export class MushroomDefenseGame {
     return { ok: true };
   }
 
+  /**
+   * The `strike`/`freeze` engine presets, expressed as the same composable effects a custom
+   * ability declares via `MissionAbilityDefinition.effects`. Returns undefined for any other id
+   * (including `path_water`, which stays on its own bespoke tile-targeting handler below — its
+   * validation/failure modes are tile-specific, not enemy-targeted).
+   */
+  private builtinAbilityEffects(abilityId: MissionAbilityId, ability: MissionAbilityDefinition): AbilityEffect[] | undefined {
+    if (abilityId === "strike") {
+      return [{ kind: "damage", amount: Math.max(0, ability.damage ?? 0) }];
+    }
+    if (abilityId === "freeze") {
+      return [{ kind: "status", status: { stun: ability.stunDuration ?? ability.duration } }];
+    }
+    return undefined;
+  }
+
+  private applyAbilityEffect(enemy: EnemyState, effect: AbilityEffect): void {
+    if (effect.kind === "damage") {
+      enemy.hp -= Math.max(0, effect.amount); // reward/removal handled by the next removeDeadEnemies() pass
+    } else if (effect.kind === "status") {
+      this.applyStatusEffect(enemy, effect.status);
+    }
+  }
+
+  /**
+   * Trigger a mission ability at a target coord. `path_water` routes to its own handler (a
+   * tile effect, not enemy-targeted). Every other ability — `strike`/`freeze` presets or a
+   * custom author-declared one — resolves to an `effects[]` composition applied to every enemy
+   * within `radius` of `center`, via the shared applyAbilityEffect primitive. A custom ability
+   * needs no engine code: declare `effects` on it and it just works.
+   */
+  useAbility(abilityId: MissionAbilityId, center: HexCoord): ActionResult {
+    if (abilityId === "path_water") {
+      return this.usePathWaterAbility(center);
+    }
+    const ability = this.mission.abilities?.find((item) => item.id === abilityId);
+    if (!ability) {
+      return this.fail("This ability is not available in this mission.", "reason.abilityUnavailable");
+    }
+    if (this.outcome !== "playing") {
+      return this.fail("Mission already ended.", "reason.missionEnded");
+    }
+    const remaining = this.abilityCooldowns[abilityId] ?? 0;
+    if (remaining > 0) {
+      return this.fail("Ability is still recharging.", "reason.abilityCooldown", { seconds: Math.ceil(remaining) });
+    }
+
+    const effects = ability.effects ?? this.builtinAbilityEffects(abilityId, ability);
+    if (!effects || effects.length === 0) {
+      return this.fail("Unknown ability.", "reason.abilityUnavailable");
+    }
+
+    const targets = this.enemies.filter((enemy) => enemy.hp > 0 && hexDistance(this.enemyCoord(enemy), center) <= ability.radius);
+    const enemyIds: string[] = [];
+    for (const enemy of targets) {
+      for (const effect of effects) {
+        this.applyAbilityEffect(enemy, effect);
+      }
+      enemyIds.push(enemy.id);
+    }
+    this.abilityCooldowns[abilityId] = ability.cooldown;
+    this.lastEvents.push({ type: "abilityUsed", abilityId, center: { ...center }, enemyIds, effects });
+    return { ok: true };
+  }
+
   getTowerIdAt(coord: HexCoord): string | undefined {
     return this.map.occupiedTowerAt(coord);
   }
@@ -452,7 +541,9 @@ export class MushroomDefenseGame {
     this.moveEnemies(delta);
     this.applySunlightRegeneration(delta);
     this.applyHealAuras(delta);
-    this.applySporeDamage(delta);
+    this.applyDotDamage(delta);
+    this.updateTowerDisruptions(delta);
+    this.updateEnemyTowerAttacks(delta);
     this.updateTowers(delta);
     this.triggerEnemyPhaseSpawns();
     this.removeDeadEnemies();
@@ -487,7 +578,13 @@ export class MushroomDefenseGame {
         ...enemy,
         routeId: enemy.routeId,
         phaseSpawnsTriggered: enemy.phaseSpawnsTriggered ? [...enemy.phaseSpawnsTriggered] : undefined,
-        statuses: enemy.statuses?.slow ? { slow: { ...enemy.statuses.slow } } : {}
+        statuses: enemy.statuses
+          ? {
+              ...(enemy.statuses.slow ? { slow: { ...enemy.statuses.slow } } : {}),
+              ...(enemy.statuses.stun ? { stun: { ...enemy.statuses.stun } } : {}),
+              ...(enemy.statuses.poison ? { poison: { ...enemy.statuses.poison } } : {})
+            }
+          : {}
       })),
       towers: this.towers.map((tower) => ({
         ...tower,
@@ -602,7 +699,7 @@ export class MushroomDefenseGame {
       hp: type.maxHp,
       maxHp: type.maxHp,
       pathProgress: Math.max(0, Math.min(pathProgress, Math.max(0, trackEnd - 0.001))),
-      sporeRemaining: 0,
+      dotRemaining: 0,
       pathOffset,
       routeId: resolvedRouteId,
       phaseSpawnsTriggered: type.phaseSpawns?.length ? [] : undefined,
@@ -629,14 +726,23 @@ export class MushroomDefenseGame {
 
   private updateEnemyStatuses(delta: number): void {
     for (const enemy of this.enemies) {
-      const slow = enemy.statuses?.slow;
-      if (!slow) {
+      const statuses = enemy.statuses;
+      if (!statuses) {
         continue;
       }
-
-      slow.remaining = Math.max(0, slow.remaining - delta);
-      if (slow.remaining <= 0) {
-        delete enemy.statuses?.slow;
+      if (statuses.slow) {
+        statuses.slow.remaining = Math.max(0, statuses.slow.remaining - delta);
+        if (statuses.slow.remaining <= 0) delete statuses.slow;
+      }
+      if (statuses.stun) {
+        statuses.stun.remaining = Math.max(0, statuses.stun.remaining - delta);
+        if (statuses.stun.remaining <= 0) delete statuses.stun;
+      }
+      if (statuses.poison) {
+        // Damage-over-time; death + reward is handled by the later removeDeadEnemies() pass.
+        if (enemy.hp > 0) enemy.hp -= statuses.poison.dps * delta;
+        statuses.poison.remaining = Math.max(0, statuses.poison.remaining - delta);
+        if (statuses.poison.remaining <= 0) delete statuses.poison;
       }
     }
   }
@@ -716,48 +822,48 @@ export class MushroomDefenseGame {
     }
   }
 
-  private applySporeDamage(delta: number): void {
+  private applyDotDamage(delta: number): void {
     for (const enemy of this.enemies) {
-      if (enemy.hp <= 0 || enemy.sporeRemaining <= 0) {
+      if (enemy.hp <= 0 || enemy.dotRemaining <= 0) {
         continue;
       }
 
-      if (this.isInsideAnyChaga(enemy)) {
+      if (this.isInsideAnyPulse(enemy)) {
         continue;
       }
 
-      enemy.sporeRemaining = Math.max(0, enemy.sporeRemaining - delta);
-      const sourceTowerTypeId = enemy.sporeSourceTowerTypeId ?? this.firstChagaTowerTypeId();
-      const damagePerUnit = enemy.sporeDamagePerUnit ?? this.chagaSporeDamagePerUnit(sourceTowerTypeId);
+      enemy.dotRemaining = Math.max(0, enemy.dotRemaining - delta);
+      const sourceTowerTypeId = enemy.dotSourceTowerTypeId ?? this.firstPulseTowerTypeId();
+      const damagePerUnit = enemy.dotDamagePerUnit ?? this.pulseDotDamagePerUnit(sourceTowerTypeId);
       const baseDamage = Math.max(0, damagePerUnit) * delta;
       enemy.hp -= this.resolveEffectiveTowerDamage(sourceTowerTypeId ?? "", enemy, baseDamage, { aoe: true });
 
-      if (enemy.sporeRemaining <= 0) {
-        delete enemy.sporeDamagePerUnit;
-        delete enemy.sporeSourceTowerTypeId;
+      if (enemy.dotRemaining <= 0) {
+        delete enemy.dotDamagePerUnit;
+        delete enemy.dotSourceTowerTypeId;
       }
     }
   }
 
-  private isChagaTower(tower: TowerState): boolean {
-    return this.towerTypes[tower.typeId]?.attack.kind === "chaga";
+  private isPulseTower(tower: TowerState): boolean {
+    return this.towerTypes[tower.typeId]?.attack.kind === "pulse";
   }
 
-  private firstChagaTowerTypeId(): string | undefined {
+  private firstPulseTowerTypeId(): string | undefined {
     for (const [typeId, type] of Object.entries(this.towerTypes)) {
-      if (type.attack.kind === "chaga") {
+      if (type.attack.kind === "pulse") {
         return typeId;
       }
     }
     return undefined;
   }
 
-  private chagaSporeDamagePerUnit(towerTypeId: string | undefined): number {
+  private pulseDotDamagePerUnit(towerTypeId: string | undefined): number {
     if (!towerTypeId) {
       return 0;
     }
     const attack = this.towerTypes[towerTypeId]?.attack;
-    return attack?.kind === "chaga" ? attack.sporeDamagePerUnit : 0;
+    return attack?.kind === "pulse" ? attack.dotDamagePerUnit : 0;
   }
 
   private applySunlightRegeneration(delta: number): void {
@@ -825,60 +931,182 @@ export class MushroomDefenseGame {
     }
   }
 
+  /** Boss pattern: enemies with `towerDisrupt` periodically silence towers within radius. */
+  private updateTowerDisruptions(delta: number): void {
+    if (this.towers.length === 0) {
+      return;
+    }
+    for (const enemy of this.enemies) {
+      if (enemy.hp <= 0) {
+        continue;
+      }
+      const disrupt = this.enemyTypes[enemy.typeId]?.towerDisrupt;
+      if (!disrupt || disrupt.interval <= 0 || disrupt.duration <= 0) {
+        continue;
+      }
+      enemy.disruptCooldown = (enemy.disruptCooldown ?? disrupt.interval) - delta;
+      if (enemy.disruptCooldown > 0) {
+        continue;
+      }
+      enemy.disruptCooldown = disrupt.interval;
+      const center = this.enemyCoord(enemy);
+      const disabledTowerIds: string[] = [];
+      for (const tower of this.towers) {
+        if (hexDistance(center, tower.coord) <= disrupt.radius) {
+          tower.disabledFor = Math.max(tower.disabledFor ?? 0, disrupt.duration);
+          disabledTowerIds.push(tower.id);
+        }
+      }
+      if (disabledTowerIds.length > 0) {
+        this.lastEvents.push({ type: "towerDisrupted", enemyId: enemy.id, enemyTypeId: enemy.typeId, towerIds: disabledTowerIds, duration: disrupt.duration });
+      }
+    }
+  }
+
+  /** Boss pattern: enemies with `towerAttack` periodically damage the nearest tower with hp; destroy it at 0. */
+  private updateEnemyTowerAttacks(delta: number): void {
+    if (this.towers.length === 0) {
+      return;
+    }
+    const destroyedIds: string[] = [];
+    for (const enemy of this.enemies) {
+      if (enemy.hp <= 0) {
+        continue;
+      }
+      const attack = this.enemyTypes[enemy.typeId]?.towerAttack;
+      if (!attack || attack.interval <= 0 || attack.damage <= 0) {
+        continue;
+      }
+      enemy.towerAttackCooldown = (enemy.towerAttackCooldown ?? attack.interval) - delta;
+      if (enemy.towerAttackCooldown > 0) {
+        continue;
+      }
+      enemy.towerAttackCooldown = attack.interval;
+      const center = this.enemyCoord(enemy);
+      let target: TowerState | null = null;
+      let best = Infinity;
+      for (const tower of this.towers) {
+        if (typeof tower.hp !== "number" || tower.hp <= 0) continue; // indestructible or already downed this tick
+        const dist = hexDistance(center, tower.coord);
+        if (dist <= attack.range && dist < best) { best = dist; target = tower; }
+      }
+      if (!target) continue;
+      target.hp = (target.hp ?? 0) - attack.damage;
+      this.lastEvents.push({ type: "towerAttacked", enemyId: enemy.id, enemyTypeId: enemy.typeId, towerId: target.id, damage: attack.damage });
+      if (target.hp <= 0) {
+        destroyedIds.push(target.id);
+        this.lastEvents.push({ type: "towerDestroyed", towerId: target.id, towerTypeId: target.typeId, enemyId: enemy.id });
+      }
+    }
+    for (const id of destroyedIds) this.destroyTower(id);
+  }
+
+  private destroyTower(towerId: string): void {
+    const index = this.towers.findIndex((tower) => tower.id === towerId);
+    if (index < 0) return;
+    this.map.clearOccupied(towerId); // free the footprint tiles for rebuilding
+    this.towers.splice(index, 1);
+  }
+
   private updateTowers(delta: number): void {
     for (const tower of this.towers) {
       const type = this.towerTypes[tower.typeId];
       if (!type) {
         continue;
       }
+      if (tower.disabledFor && tower.disabledFor > 0) {
+        tower.disabledFor = Math.max(0, tower.disabledFor - delta); // silenced by an enemy disrupt pulse
+        continue;
+      }
       tower.cooldown -= delta;
       const fireRateMultiplier = this.towerFireRateMultiplier(tower);
 
-      if (type.attack.kind === "honey") {
-        this.updateHoneyTower(tower, type.attack.fireRate * fireRateMultiplier, type.attack.damagePerMushroom);
-      } else if (type.attack.kind === "chaga") {
-        this.updateChagaTower(
+      if (type.attack.kind === "single") {
+        this.updateSingleTower(tower, type.attack.fireRate * fireRateMultiplier, type.attack.damagePerStack, type.attack.chain);
+      } else if (type.attack.kind === "pulse") {
+        this.updatePulseTower(
           tower,
-          this.towerChagaPulseRate(tower) * fireRateMultiplier,
+          this.towerPulseRate(tower) * fireRateMultiplier,
           type.attack.pulseDamage,
-          type.attack.sporeDuration,
-          type.attack.sporeDamagePerUnit
+          type.attack.dotDuration,
+          type.attack.dotDamagePerUnit
         );
-      } else if (type.attack.kind === "oak_bolete") {
-        this.updateOakBoleteTower(tower, type.attack.interval / fireRateMultiplier, type.attack.damage);
-      } else if (type.attack.kind === "chanterelle") {
-        this.updateChanterelleTower(tower, type.attack.fireRate * fireRateMultiplier, type.attack.damage);
-      } else if (type.attack.kind === "slippery_jack") {
-        this.updateSlipperyJackTower(tower, fireRateMultiplier);
+      } else if (type.attack.kind === "sniper") {
+        this.updateSniperTower(tower, type.attack.interval / fireRateMultiplier, type.attack.damage);
+      } else if (type.attack.kind === "antiair") {
+        this.updateAntiAirTower(tower, type.attack.fireRate * fireRateMultiplier, type.attack.damage);
+      } else if (type.attack.kind === "splash") {
+        this.updateSplashTower(tower, fireRateMultiplier);
       }
     }
   }
 
-  private updateHoneyTower(tower: TowerState, fireRate: number, damagePerMushroom: number): void {
+  private updateSingleTower(tower: TowerState, fireRate: number, damagePerStack: number, chain?: ChainDeliverySpec): void {
     const interval = 1 / fireRate;
     let shots = 0;
 
     while (tower.cooldown <= 0 && shots < 4) {
-      const target = this.findHoneyTarget(tower);
+      const target = this.findSingleTarget(tower);
       if (!target) {
         tower.cooldown = 0;
         return;
       }
 
-      const damage = tower.mushrooms * damagePerMushroom;
+      const damage = tower.stacks * damagePerStack;
       this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: target.id, damage });
-      this.applyTowerDamage(tower, target, damage);
+      const applied = this.applyTowerDamage(tower, target, damage);
+      if (chain && applied > 0) {
+        this.propagateChain(tower, target, damage, chain);
+      }
       tower.cooldown += interval;
       shots += 1;
     }
   }
 
-  private updateChagaTower(
+  /**
+   * Chain delivery: propagate a landed hit hop-by-hop to the nearest not-yet-hit ground enemy
+   * within `jumpRadius` of the LAST-hit enemy (not the origin — a true chain, not a fixed-radius
+   * splash), for up to `maxJumps` extra hits, each scaled by `damageFalloff^hop`. Deterministic:
+   * ties broken by enemy id. Reuses applyTowerDamage so resistances/armor/statusOnHit apply to
+   * every hop exactly as they would to a primary hit.
+   */
+  private propagateChain(tower: TowerState, originTarget: EnemyState, baseDamage: number, chain: ChainDeliverySpec): void {
+    const alreadyHit = new Set<string>([originTarget.id]);
+    let current = originTarget;
+    for (let hop = 1; hop <= chain.maxJumps; hop += 1) {
+      const fromCoord = this.enemyCoord(current);
+      let next: EnemyState | undefined;
+      let bestDistance = Infinity;
+      for (const enemy of this.enemies) {
+        if (enemy.hp <= 0 || alreadyHit.has(enemy.id) || this.enemyTargetClass(enemy) !== "ground") {
+          continue;
+        }
+        const distance = hexDistance(fromCoord, this.enemyCoord(enemy));
+        if (distance > chain.jumpRadius) {
+          continue;
+        }
+        if (!next || distance < bestDistance || (distance === bestDistance && enemy.id < next.id)) {
+          next = enemy;
+          bestDistance = distance;
+        }
+      }
+      if (!next) {
+        return;
+      }
+      alreadyHit.add(next.id);
+      const hopDamage = baseDamage * Math.pow(chain.damageFalloff, hop);
+      this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: next.id, damage: hopDamage });
+      this.applyTowerDamage(tower, next, hopDamage);
+      current = next;
+    }
+  }
+
+  private updatePulseTower(
     tower: TowerState,
     pulseRate: number,
     pulseDamage: number,
-    sporeDuration: number,
-    sporeDamagePerUnit: number
+    dotDuration: number,
+    dotDamagePerUnit: number
   ): void {
     const interval = 1 / pulseRate;
     let pulses = 0;
@@ -896,23 +1124,23 @@ export class MushroomDefenseGame {
       for (const target of targets) {
         const damage = this.applyTowerDamage(tower, target, pulseDamage, { aoe: true });
         if (damage > 0) {
-          target.sporeRemaining = sporeDuration;
-          target.sporeDamagePerUnit = sporeDamagePerUnit;
-          target.sporeSourceTowerTypeId = tower.typeId;
+          target.dotRemaining = dotDuration;
+          target.dotDamagePerUnit = dotDamagePerUnit;
+          target.dotSourceTowerTypeId = tower.typeId;
         }
       }
 
-      this.lastEvents.push({ type: "chagaPulse", towerId: tower.id, enemyIds: targets.map((target) => target.id) });
+      this.lastEvents.push({ type: "areaPulse", towerId: tower.id, enemyIds: targets.map((target) => target.id) });
       tower.cooldown += interval;
       pulses += 1;
     }
   }
 
-  private updateOakBoleteTower(tower: TowerState, interval: number, damage: number): void {
+  private updateSniperTower(tower: TowerState, interval: number, damage: number): void {
     let shots = 0;
 
     while (tower.cooldown <= 0 && shots < 2) {
-      const target = this.findOakBoleteTarget(tower);
+      const target = this.findSniperTarget(tower);
       if (!target) {
         tower.cooldown = 0;
         return;
@@ -925,12 +1153,12 @@ export class MushroomDefenseGame {
     }
   }
 
-  private updateChanterelleTower(tower: TowerState, fireRate: number, damage: number): void {
+  private updateAntiAirTower(tower: TowerState, fireRate: number, damage: number): void {
     const interval = 1 / fireRate;
     let volleys = 0;
 
     while (tower.cooldown <= 0 && volleys < 3) {
-      const targets = this.findChanterelleTargets(tower);
+      const targets = this.findAntiAirTargets(tower);
       if (targets.length === 0) {
         tower.cooldown = 0;
         return;
@@ -946,9 +1174,9 @@ export class MushroomDefenseGame {
     }
   }
 
-  private updateSlipperyJackTower(tower: TowerState, fireRateMultiplier = 1): void {
+  private updateSplashTower(tower: TowerState, fireRateMultiplier = 1): void {
     const type = this.towerTypes[tower.typeId];
-    if (!type || type.attack.kind !== "slippery_jack") {
+    if (!type || type.attack.kind !== "splash") {
       return;
     }
     const attack = type.attack;
@@ -956,7 +1184,7 @@ export class MushroomDefenseGame {
     let shots = 0;
 
     while (tower.cooldown <= 0 && shots < 3) {
-      const target = this.findSlipperyJackTarget(tower);
+      const target = this.findSplashTarget(tower);
       if (!target) {
         tower.cooldown = 0;
         return;
@@ -981,7 +1209,7 @@ export class MushroomDefenseGame {
     }
   }
 
-  private findHoneyTarget(tower: TowerState): EnemyState | undefined {
+  private findSingleTarget(tower: TowerState): EnemyState | undefined {
     const type = this.towerTypes[tower.typeId];
     if (!type) {
       return undefined;
@@ -998,7 +1226,7 @@ export class MushroomDefenseGame {
     return best;
   }
 
-  private findOakBoleteTarget(tower: TowerState): EnemyState | undefined {
+  private findSniperTarget(tower: TowerState): EnemyState | undefined {
     let best: EnemyState | undefined;
     const range = this.towerRange(tower);
     for (const enemy of this.enemies) {
@@ -1014,8 +1242,8 @@ export class MushroomDefenseGame {
           best = enemy;
         }
       } else {
-        const enemyIsArmored = this.hasOakBoleteOnlyArmor(enemy);
-        const bestIsArmored = this.hasOakBoleteOnlyArmor(best);
+        const enemyIsArmored = this.hasPierceOnlyArmor(enemy);
+        const bestIsArmored = this.hasPierceOnlyArmor(best);
         if (enemyIsArmored !== bestIsArmored) {
           if (enemyIsArmored) {
             best = enemy;
@@ -1028,9 +1256,9 @@ export class MushroomDefenseGame {
     return best;
   }
 
-  private findChanterelleTargets(tower: TowerState): EnemyState[] {
+  private findAntiAirTargets(tower: TowerState): EnemyState[] {
     const type = this.towerTypes[tower.typeId];
-    const attack = type?.attack.kind === "chanterelle" ? type.attack : undefined;
+    const attack = type?.attack.kind === "antiair" ? type.attack : undefined;
     if (!attack) {
       return [];
     }
@@ -1060,7 +1288,7 @@ export class MushroomDefenseGame {
     return targets;
   }
 
-  private findSlipperyJackTarget(tower: TowerState): EnemyState | undefined {
+  private findSplashTarget(tower: TowerState): EnemyState | undefined {
     const type = this.towerTypes[tower.typeId];
     if (!type) {
       return undefined;
@@ -1088,7 +1316,7 @@ export class MushroomDefenseGame {
     }
     const attack = type.attack;
     const levelIndex = Math.max(0, tower.level - 1);
-    if (attack.kind === "oak_bolete") {
+    if (attack.kind === "sniper") {
       return attack.rangeByLevel?.[Math.min(levelIndex, attack.rangeByLevel.length - 1)] ?? type.range;
     }
     if (attack.kind === "support") {
@@ -1102,16 +1330,16 @@ export class MushroomDefenseGame {
 
   private slipperyJackInterval(tower: TowerState): number {
     const type = this.towerTypes[tower.typeId];
-    if (!type || type.attack.kind !== "slippery_jack") {
+    if (!type || type.attack.kind !== "splash") {
       return 1;
     }
     const levelIndex = Math.max(0, tower.level - 1);
     return type.attack.intervalByLevel?.[Math.min(levelIndex, type.attack.intervalByLevel.length - 1)] ?? type.attack.interval;
   }
 
-  private towerChagaPulseRate(tower: TowerState): number {
+  private towerPulseRate(tower: TowerState): number {
     const type = this.towerTypes[tower.typeId];
-    if (!type || type.attack.kind !== "chaga") {
+    if (!type || type.attack.kind !== "pulse") {
       return 1;
     }
     const levelIndex = Math.max(0, tower.level - 1);
@@ -1148,6 +1376,9 @@ export class MushroomDefenseGame {
   }
 
   private enemyStatusSpeedFactor(enemy: EnemyState): number {
+    if ((enemy.statuses?.stun?.remaining ?? 0) > 0) {
+      return 0; // stunned enemies are frozen in place
+    }
     const slow = enemy.statuses?.slow;
     if (!slow || slow.remaining <= 0) {
       return 1;
@@ -1180,6 +1411,7 @@ export class MushroomDefenseGame {
     const damage = this.resolveEffectiveTowerDamage(tower.typeId, enemy, rawDamage, options);
     if (damage > 0) {
       enemy.hp -= damage;
+      this.applyStatusOnHit(tower.typeId, enemy);
       this.lastEvents.push({
         type: "enemyHit",
         towerId: tower.id,
@@ -1213,8 +1445,14 @@ export class MushroomDefenseGame {
       return 0;
     }
 
+    // Elemental resistances: scale by the enemy's multiplier for this attack's (author-defined) damage type.
+    damage *= this.resistanceMultiplier(enemy, this.damageTypeOf(towerTypeId));
+    if (damage <= 0) {
+      return 0;
+    }
+
     const armor = this.enemyTypes[enemy.typeId]?.armor;
-    if (!armor || armor.kind !== "oak_bolete_only" || this.piercesOakBoleteArmor(towerTypeId)) {
+    if (!armor || armor.kind !== "pierce_only" || this.piercesSniperArmor(towerTypeId)) {
       return damage;
     }
 
@@ -1222,17 +1460,29 @@ export class MushroomDefenseGame {
     return Math.max(0, damage);
   }
 
+  /** The (author-defined) damage type a tower deals; defaults to "physical". */
+  private damageTypeOf(towerTypeId: string): string {
+    const attack = this.towerTypes[towerTypeId]?.attack as { damageType?: string } | undefined;
+    return attack?.damageType ?? "physical";
+  }
+
+  /** Enemy's incoming-damage multiplier for a damage type (unlisted types = 1, clamped >= 0). */
+  private resistanceMultiplier(enemy: EnemyState, damageType: string): number {
+    const value = this.enemyTypes[enemy.typeId]?.resistances?.[damageType];
+    return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 1;
+  }
+
   private isDamageBlockedByArmor(towerTypeId: string, enemy: EnemyState): boolean {
     const armor = this.enemyTypes[enemy.typeId]?.armor;
-    if (!armor || armor.kind !== "oak_bolete_only" || this.piercesOakBoleteArmor(towerTypeId)) {
+    if (!armor || armor.kind !== "pierce_only" || this.piercesSniperArmor(towerTypeId)) {
       return false;
     }
     return this.armoredChipDamageForTower(towerTypeId, armor.chipDamageByTowerId) <= 0;
   }
 
-  /** "oak_bolete_only" armor is fully pierced by any oak_bolete-kind weapon, regardless of its tower id. */
-  private piercesOakBoleteArmor(towerTypeId: string): boolean {
-    return this.towerTypes[towerTypeId]?.attack.kind === "oak_bolete";
+  /** "pierce_only" armor is fully pierced by any sniper-kind weapon, regardless of its tower id. */
+  private piercesSniperArmor(towerTypeId: string): boolean {
+    return this.towerTypes[towerTypeId]?.attack.kind === "sniper";
   }
 
   private armoredChipDamageForTower(towerTypeId: string, chipDamageByTowerId?: Record<string, number>): number {
@@ -1242,11 +1492,11 @@ export class MushroomDefenseGame {
     }
 
     const attack = this.towerTypes[towerTypeId]?.attack;
-    return attack?.kind === "slippery_jack" ? Math.max(0, attack.armoredChipDamage) : 0;
+    return attack?.kind === "splash" ? Math.max(0, attack.armoredChipDamage) : 0;
   }
 
-  private hasOakBoleteOnlyArmor(enemy: EnemyState): boolean {
-    return this.enemyTypes[enemy.typeId]?.armor?.kind === "oak_bolete_only";
+  private hasPierceOnlyArmor(enemy: EnemyState): boolean {
+    return this.enemyTypes[enemy.typeId]?.armor?.kind === "pierce_only";
   }
 
   private applySlow(enemy: EnemyState, factor: number, duration: number): void {
@@ -1260,6 +1510,36 @@ export class MushroomDefenseGame {
       factor: existing ? Math.min(existing.factor, factor) : factor,
       remaining: Math.max(existing?.remaining ?? 0, duration)
     };
+  }
+
+  /** Apply a tower's data-driven on-hit status effects. Content-agnostic: keyed on attack.statusOnHit. */
+  private applyStatusOnHit(towerTypeId: string, enemy: EnemyState): void {
+    const spec = (this.towerTypes[towerTypeId]?.attack as { statusOnHit?: StatusEffectSpec } | undefined)?.statusOnHit;
+    if (!spec) return;
+    this.applyStatusEffect(enemy, spec);
+  }
+
+  /**
+   * Apply a status-effect spec to an enemy. The shared primitive behind both a tower's
+   * `attack.statusOnHit` (via applyStatusOnHit) and an ability's `{kind:"status"}` effect
+   * (via applyAbilityEffect) — one status vocabulary, two triggers.
+   */
+  private applyStatusEffect(enemy: EnemyState, spec: StatusEffectSpec): void {
+    if (spec.slow) {
+      this.applySlow(enemy, spec.slow.factor, spec.slow.duration);
+    }
+    if (typeof spec.stun === "number" && spec.stun > 0) {
+      enemy.statuses ??= {};
+      enemy.statuses.stun = { remaining: Math.max(enemy.statuses.stun?.remaining ?? 0, spec.stun) };
+    }
+    if (spec.poison && spec.poison.dps > 0 && spec.poison.duration > 0) {
+      enemy.statuses ??= {};
+      const existing = enemy.statuses.poison;
+      enemy.statuses.poison = {
+        dps: Math.max(existing?.dps ?? 0, spec.poison.dps),
+        remaining: Math.max(existing?.remaining ?? 0, spec.poison.duration)
+      };
+    }
   }
 
   private triggerEnemyPhaseSpawns(): void {
@@ -1375,10 +1655,10 @@ export class MushroomDefenseGame {
     return this.temporaryWaterTiles.some((tile) => coordKey(tile) === key && tile.expiresIn > 0);
   }
 
-  private isInsideAnyChaga(enemy: EnemyState): boolean {
+  private isInsideAnyPulse(enemy: EnemyState): boolean {
     return (
       this.enemyTargetClass(enemy) === "ground" &&
-      this.towers.some((tower) => this.isChagaTower(tower) && this.enemyInRange(tower, enemy, this.towerRange(tower)))
+      this.towers.some((tower) => this.isPulseTower(tower) && this.enemyInRange(tower, enemy, this.towerRange(tower)))
     );
   }
 
@@ -1400,7 +1680,7 @@ export class MushroomDefenseGame {
     }
 
     if (type.requiresAuraFrom && !this.isInsideSupportAura(type.requiresAuraFrom, coord)) {
-      return this.fail(`${type.label} needs oak roots aura.`, "reason.needsRootsAura", { tower: typeId });
+      return this.fail(`${type.label} needs a support aura.`, "reason.needsAura", { tower: typeId });
     }
 
     const footprint = this.map.tilesWithin(coord, type.footprintRadius);
@@ -1415,13 +1695,13 @@ export class MushroomDefenseGame {
 
     for (const tile of footprint) {
       if (tile.terrain === "water") {
-        return this.fail("Cannot plant on water.", "reason.water");
+        return this.fail("Cannot build on water.", "reason.water");
       }
       if (tile.terrain !== "buildable") {
-        return this.fail("Can only plant outside the path.", "reason.path");
+        return this.fail("Can only build outside the path.", "reason.path");
       }
       if (tile.occupiedBy && tile.occupiedBy !== ignoreTowerId) {
-        return this.fail("Another fungus already grows here.", "reason.occupied");
+        return this.fail("Another tower already occupies this tile.", "reason.occupied");
       }
     }
 
@@ -1477,12 +1757,9 @@ export class MushroomDefenseGame {
           type: "enemyKilled",
           enemyId: enemy.id,
           enemyTypeId: enemy.typeId,
-          coins: reward.coins,
+          coins: reward.coins ?? 0,
           resources: reward
         });
-        if (reward.oakRoots > 0) {
-          this.lastEvents.push({ type: "oakRootUnlocked", amount: reward.oakRoots });
-        }
         spawned.push(...this.spawnOnDeathChildren(enemy));
       }
     }
@@ -1590,11 +1867,13 @@ export class MushroomDefenseGame {
     return side * Math.max(0, strength) * 0.68;
   }
 
+  /** Build a full bag over the declared currency set, defaulting any missing currency to 0. */
   private cloneResources(resources: ResourceBag): ResourceBag {
-    return {
-      coins: resources.coins ?? 0,
-      oakRoots: resources.oakRoots ?? 0
-    };
+    const bag: ResourceBag = {};
+    for (const id of this.currencyIds) {
+      bag[id] = Number(resources?.[id]) || 0;
+    }
+    return bag;
   }
 
   private cleanCoord(coord: HexCoord): HexCoord {
@@ -1602,36 +1881,31 @@ export class MushroomDefenseGame {
   }
 
   private normalizeCost(cost: ResourceCost): ResourceBag {
-    return {
-      coins: cost.coins ?? 0,
-      oakRoots: cost.oakRoots ?? 0
-    };
+    return this.cloneResources(cost);
   }
 
   private hasResources(cost: ResourceCost): boolean {
-    const normalized = this.normalizeCost(cost);
-    return this.resources.coins >= normalized.coins && this.resources.oakRoots >= normalized.oakRoots;
+    return this.currencyIds.every((id) => (this.resources[id] ?? 0) >= (Number(cost?.[id]) || 0));
   }
 
   private spendResources(cost: ResourceCost): void {
-    const normalized = this.normalizeCost(cost);
-    this.resources.coins -= normalized.coins;
-    this.resources.oakRoots -= normalized.oakRoots;
+    for (const id of this.currencyIds) {
+      this.resources[id] = (this.resources[id] ?? 0) - (Number(cost?.[id]) || 0);
+    }
   }
 
   private addResources(resources: ResourceBag): void {
-    this.resources.coins += resources.coins;
-    this.resources.oakRoots += resources.oakRoots;
+    for (const id of this.currencyIds) {
+      this.resources[id] = (this.resources[id] ?? 0) + (Number(resources?.[id]) || 0);
+    }
   }
 
   private formatCost(cost: ResourceCost): string {
     const normalized = this.normalizeCost(cost);
     const parts: string[] = [];
-    if (normalized.coins > 0) {
-      parts.push(`${normalized.coins} coins`);
-    }
-    if (normalized.oakRoots > 0) {
-      parts.push(`${normalized.oakRoots} oak root${normalized.oakRoots === 1 ? "" : "s"}`);
+    for (const currency of this.currencies) {
+      const amount = normalized[currency.id] ?? 0;
+      if (amount > 0) parts.push(`${amount} ${currency.label}`);
     }
     return parts.join(" and ") || "resources";
   }
@@ -1645,10 +1919,6 @@ export class MushroomDefenseGame {
   }
 
   private costReasonParams(cost: ResourceCost): ActionResult["reasonParams"] {
-    const normalized = this.normalizeCost(cost);
-    return {
-      coins: normalized.coins,
-      oakRoots: normalized.oakRoots
-    };
+    return this.normalizeCost(cost);
   }
 }

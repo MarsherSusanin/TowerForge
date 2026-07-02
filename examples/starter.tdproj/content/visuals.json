@@ -1,8 +1,6 @@
 {
   "schemaVersion": 1,
   "assetsRoot": "assets",
-  "terrainTextureSize": 128,
-  "creatureFrameSize": 512,
   "atlases": {},
   "sprites": {},
   "bindings": {
@@ -18,6 +16,12 @@
     "tiles": {},
     "ui": {}
   },
+  "audio": {
+    "sounds": {},
+    "events": {}
+  },
+  "terrainTextureSize": 128,
+  "creatureFrameSize": 512,
   "frames": {
     "creatures": {
       "basic_grunt": 0,

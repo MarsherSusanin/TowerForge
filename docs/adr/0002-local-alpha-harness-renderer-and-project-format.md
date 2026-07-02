@@ -8,14 +8,14 @@ Accepted
 
 ## Context
 
-Mycelium Kit needs to move from MVP constructor to local open-source alpha without weakening the core boundary: gameplay rules belong in `packages/engine`, while filesystem, project loading, migration, map compilation, and build output belong outside the engine.
+TowerForge needs to move from MVP constructor to local open-source alpha without weakening the core boundary: gameplay rules belong in `packages/engine`, while filesystem, project loading, migration, map compilation, and build output belong outside the engine.
 
 The generated player and Studio preview also need a shared rendering boundary so visual work does not duplicate gameplay logic.
 
 ## Decision
 
 - Add `packages/renderer` as a browser-only canvas renderer over serializable engine snapshots and map definitions.
-- Keep Phaser deferred behind the renderer contract.
+- Keep renderers behind generated-player adapters. The canvas target is the shared renderer contract; the optional Phaser target is vendored into builds when selected and remains outside `packages/engine`.
 - Add `.tdproj` schema normalization and in-memory migrations in `packages/cli/lib`.
 - Add explicit `npm run migrate -- --write` for persisted schema upgrades with backups.
 - Compile `maps/src/*.tmj` to `maps/compiled/maps.json` through `packages/cli/lib/map-compiler.mjs`.
@@ -26,6 +26,7 @@ The generated player and Studio preview also need a shared rendering boundary so
 ## Consequences
 
 - Engine remains pure TypeScript and does not import renderer, Studio, Node, or filesystem modules.
-- Studio and generated player share renderer behavior through `@mycelium/renderer`.
+- Studio and generated player share renderer behavior through `@towerforge/renderer`.
+- Phaser can evolve as an optional build target without changing engine or content-registry contracts; it may temporarily lag canvas visual-catalog parity.
 - Project format changes require migrations and tests.
 - Browser and build verification become part of normal development, not manual-only QA.

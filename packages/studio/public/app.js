@@ -1,4 +1,5 @@
 import { createCanvasRenderer } from "/renderer/index.mjs";
+import { AUDIO_EVENTS } from "/renderer/audio.mjs";
 
 // ── SVG Icons ─────────────────────────────────────────────────────────────────
 const ICO = {
@@ -120,6 +121,7 @@ async function save() {
       missions:         S.project.missions,
       abilities:        S.project.abilities,
       constants:        S.project.constants,
+      currencies:       projCurrencies(),
       defaultMissionId: S.project.defaultMissionId,
       worldMap:         S.project.worldMap,
       visuals:          S.project.visuals,
@@ -167,10 +169,146 @@ function renderActiveTab() {
   else if (t === "maps") renderMapsTab();
   else if (t === "playtest") renderPlaytestTab();
   else if (t === "balance") renderBalanceTab();
+  else if (t === "ai") renderAiTab();
   else if (t === "assets") renderAssetsTab();
   else if (t === "settings") renderSettingsTab();
   else if (t === "buildtargets") renderBuildTargetsTab();
   refreshValidationUI();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// AI CO-DESIGNER — chat panel driving the MCP tool surface (author→simulate→diagnose→patch)
+// ═════════════════════════════════════════════════════════════════════════════
+const AI = { messages: [], busy: false, controller: null, wired: false };
+const AI_KEY_LS = "towerforge:anthropic-key";
+const AI_MODEL_LS = "towerforge:ai-model";
+const aiHasKey = () => !!localStorage.getItem(AI_KEY_LS);
+
+/** Tiny safe markdown: escape, then **bold**, `code`, and newlines. */
+function aiMarkdown(text) {
+  return esc(String(text))
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\n/g, "<br>");
+}
+
+function renderAiTab() {
+  const model = $("ai-model");
+  if (model && !model.dataset.init) {
+    model.value = localStorage.getItem(AI_MODEL_LS) || model.value;
+    model.dataset.init = "1";
+    model.addEventListener("change", () => localStorage.setItem(AI_MODEL_LS, model.value));
+  }
+  if (!AI.wired) wireAi();
+  const t = $("ai-transcript");
+  if (t && !AI.messages.length) {
+    t.innerHTML = `<div class="ai-empty">${aiHasKey() ? "" : "<b>Set your Anthropic API key</b> to begin — stored only in this browser, never committed.<br><br>"}Ask the co-designer to balance a mission, add a tower, or diagnose difficulty. It runs the deterministic <b>simulate → diagnose → patch</b> loop and edits the <b>saved</b> project.</div>`;
+  }
+  if (!aiHasKey()) toggleAiKeyRow(true);
+}
+
+function wireAi() {
+  AI.wired = true;
+  $("ai-key-btn")?.addEventListener("click", () => toggleAiKeyRow());
+  $("ai-key-save")?.addEventListener("click", () => {
+    const v = $("ai-key-input")?.value.trim();
+    if (v) { localStorage.setItem(AI_KEY_LS, v); $("ai-key-input").value = ""; toggleAiKeyRow(false); toast("API key saved (this browser only).", "ok"); renderAiTab(); }
+  });
+  $("ai-form")?.addEventListener("submit", (e) => { e.preventDefault(); aiSend(); });
+  $("ai-stop")?.addEventListener("click", () => AI.controller?.abort());
+  $("ai-input")?.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); aiSend(); } });
+}
+
+function toggleAiKeyRow(show) {
+  const row = $("ai-key-row");
+  if (!row) return;
+  row.hidden = show === undefined ? !row.hidden : !show;
+  if (!row.hidden) $("ai-key-input")?.focus();
+}
+
+function aiBubble(role, html) {
+  const t = $("ai-transcript");
+  const div = document.createElement("div");
+  div.className = `ai-msg ai-${role}`;
+  div.innerHTML = html;
+  t.appendChild(div);
+  t.scrollTop = t.scrollHeight;
+  return div;
+}
+
+function aiSetBusy(b) {
+  AI.busy = b;
+  if ($("ai-send")) $("ai-send").hidden = b;
+  if ($("ai-stop")) $("ai-stop").hidden = !b;
+  if ($("ai-input")) $("ai-input").disabled = b;
+}
+
+async function aiSend() {
+  if (AI.busy) return;
+  const input = $("ai-input");
+  const text = input?.value.trim();
+  if (!text) return;
+  const apiKey = localStorage.getItem(AI_KEY_LS);
+  if (!apiKey) { toggleAiKeyRow(true); toast("Set your Anthropic API key first.", "warn"); return; }
+  if (S.dirty) {
+    const ok = await confirmDialog({ title: "Save before AI edits?", message: "The AI co-designer edits the saved project on disk. Save your local changes first so they aren't overwritten when the editor reloads.", confirmLabel: "Save & continue", danger: false });
+    if (!ok) return;
+    await save();
+  }
+
+  input.value = "";
+  $("ai-transcript")?.querySelector(".ai-empty")?.remove();
+  // Snapshot so an aborted/failed turn (no authoritative `done`) doesn't leave AI.messages with a
+  // dangling user turn that diverges from what the server actually ran.
+  const snapshot = AI.messages.slice();
+  AI.messages.push({ role: "user", content: text });
+  aiBubble("user", esc(text));
+  const wrap = aiBubble("assistant", `<div class="ai-steps"></div>`);
+  const steps = wrap.querySelector(".ai-steps");
+  aiSetBusy(true);
+  AI.controller = new AbortController();
+  let appliedPatch = false;
+  let gotDone = false;
+  try {
+    const res = await fetch("/api/ai/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: AI.controller.signal,
+      body: JSON.stringify({ apiKey, model: $("ai-model")?.value, messages: AI.messages })
+    });
+    if (!res.ok || !res.body) throw new Error(`Server returned ${res.status}`);
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "text") steps.insertAdjacentHTML("beforeend", `<div class="ai-text">${aiMarkdown(ev.text)}</div>`);
+        else if (ev.type === "tool_call") steps.insertAdjacentHTML("beforeend", `<div class="ai-tool" data-id="${esc(ev.id)}"><span class="ai-tool-name">⚙ ${esc(ev.name)}</span> <code>${esc(JSON.stringify(ev.input).slice(0, 160))}</code> <span class="ai-tool-status">running…</span></div>`);
+        else if (ev.type === "tool_result") {
+          const el = steps.querySelector(`.ai-tool[data-id="${CSS.escape(ev.id)}"] .ai-tool-status`);
+          if (el) { el.textContent = ev.ok ? "✓ done" : "✗ error"; el.className = `ai-tool-status ${ev.ok ? "ok" : "err"}`; el.title = JSON.stringify(ev.summary ?? {}).slice(0, 500); }
+        }
+        else if (ev.type === "error") steps.insertAdjacentHTML("beforeend", `<div class="ai-error">⚠ ${esc(ev.error)}</div>`);
+        else if (ev.type === "done") { gotDone = true; if (Array.isArray(ev.messages)) AI.messages = ev.messages; appliedPatch = !!ev.appliedPatch; }
+        $("ai-transcript").scrollTop = $("ai-transcript").scrollHeight;
+      }
+    }
+  } catch (e) {
+    steps.insertAdjacentHTML("beforeend", `<div class="ai-error">${e.name === "AbortError" ? "Stopped." : "⚠ " + esc(e.message)}</div>`);
+  } finally {
+    if (!gotDone) AI.messages = snapshot; // turn didn't complete — keep history consistent with the server
+    aiSetBusy(false);
+    AI.controller = null;
+  }
+  if (appliedPatch) {
+    toast("AI applied balance changes — reloading project.", "ok");
+    await load(); // refetch the on-disk project the AI just patched (renderActiveTab re-renders the AI tab)
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -516,6 +654,126 @@ $("btn-add-enemy")?.addEventListener("click", () => {
   markDirty(true); renderEnemiesTab();
 });
 
+// ── Currencies ────────────────────────────────────────────────────────────────
+// The project declares its spendable currencies in S.project.currencies; "coins" is the
+// guaranteed primary. Resource bags (costs/rewards/startingResources) are edited dynamically
+// over this set so a project can have any number of currencies.
+function projCurrencies() {
+  const list = Array.isArray(S.project?.currencies) ? S.project.currencies.filter(c => c && c.id) : [];
+  if (!list.some(c => c.id === "coins")) list.unshift({ id: "coins", label: "Coins" });
+  return list;
+}
+function currencyLabel(cid) {
+  const c = projCurrencies().find(c => c.id === cid);
+  return c ? c.label : cid;
+}
+/** One number input per currency for a resource bag; input ids are `${idPrefix}-${cid}`. */
+function currencyBagFields(bag, idPrefix, labelSuffix = "") {
+  return projCurrencies().map(c =>
+    `<div class="field"><label>${esc(c.label)}${labelSuffix}</label>` +
+    `<input id="${idPrefix}-${esc(c.id)}" type="number" min="0" step="1" value="${(bag && bag[c.id]) || 0}"></div>`
+  ).join("");
+}
+/** Read a resource bag from `${idPrefix}-${cid}` inputs; omits zero amounts to keep JSON tidy. */
+function readCurrencyBag(idPrefix) {
+  const out = {};
+  for (const c of projCurrencies()) {
+    const v = parseFloat($(`${idPrefix}-${c.id}`)?.value) || 0;
+    if (v) out[c.id] = v;
+  }
+  return out;
+}
+/** Compact summary like "4 Coins + 1 Gems" for list tags. */
+function costTag(bag) {
+  const parts = projCurrencies().map(c => (bag && bag[c.id]) ? `${bag[c.id]} ${c.label}` : null).filter(Boolean);
+  return parts.join(" + ") || "free";
+}
+/** Every resource bag in the project, as live object references (for rename/remove remapping). */
+function allResourceBags() {
+  const P = S.project, bags = [];
+  const push = b => { if (b && typeof b === "object") bags.push(b); };
+  push(P.constants?.startingResources); push(P.constants?.moveTowerCost);
+  for (const t of Object.values(P.towers ?? {})) { push(t.cost); for (const uc of (t.attack?.upgradeCosts ?? [])) push(uc); }
+  for (const e of Object.values(P.enemies ?? {})) push(e.reward);
+  for (const m of Object.values(P.missions ?? {})) push(m.startingResources);
+  return bags;
+}
+function colorToHex(n) {
+  return typeof n === "number" && Number.isFinite(n) ? "#" + n.toString(16).padStart(6, "0") : "#f5c542";
+}
+function renderCurrenciesPanel() {
+  const panel = $("currencies-panel");
+  if (!panel) return;
+  if (!Array.isArray(S.project.currencies) || !S.project.currencies.length) S.project.currencies = projCurrencies();
+  const list = S.project.currencies;
+  panel.innerHTML = list.map((cur, i) => {
+    const isPrimary = cur.id === "coins";
+    return `<div class="form-row cur-row" data-i="${i}" style="align-items:flex-end;gap:8px;margin-bottom:6px">
+      <div class="field" style="flex:0 0 150px"><label>ID${isPrimary ? " (primary)" : ""}</label>
+        <input class="cur-id mono" type="text" value="${esc(cur.id)}"${isPrimary ? " disabled" : ""}></div>
+      <div class="field"><label>Label</label><input class="cur-label" type="text" value="${esc(cur.label ?? cur.id)}"></div>
+      <div class="field" style="flex:0 0 64px"><label>Color</label><input class="cur-color" type="color" value="${colorToHex(cur.color)}"></div>
+      ${isPrimary ? "" : `<button class="btn-icon cur-del" title="Remove currency" aria-label="Remove currency">${ICO.trash}</button>`}
+    </div>`;
+  }).join("");
+
+  panel.querySelectorAll(".cur-row").forEach(row => {
+    const i = +row.dataset.i, cur = list[i];
+    row.querySelector(".cur-label")?.addEventListener("change", e => { cur.label = e.target.value || cur.id; markDirty(true); });
+    row.querySelector(".cur-color")?.addEventListener("change", e => { cur.color = parseInt(e.target.value.slice(1), 16); markDirty(true); });
+    const idInp = row.querySelector(".cur-id");
+    idInp?.addEventListener("change", e => {
+      const next = e.target.value.trim();
+      if (!next || next === cur.id) { e.target.value = cur.id; return; }
+      if (list.some(c => c.id === next)) { toast?.(`Currency id "${next}" already exists.`); e.target.value = cur.id; return; }
+      const prev = cur.id;
+      for (const bag of allResourceBags()) if (bag[prev] !== undefined) { bag[next] = bag[prev]; delete bag[prev]; }
+      cur.id = next;
+      markDirty(true); renderCurrenciesPanel();
+    });
+    row.querySelector(".cur-del")?.addEventListener("click", () => {
+      for (const bag of allResourceBags()) delete bag[cur.id];
+      list.splice(i, 1);
+      markDirty(true); renderCurrenciesPanel();
+    });
+  });
+}
+
+function renderResistancesPanel(enemyId) {
+  const panel = $("ef-resist-panel");
+  const enemy = S.project.enemies?.[enemyId];
+  if (!panel || !enemy) return;
+  const entries = Object.entries(enemy.resistances ?? {});
+  panel.innerHTML = entries.length
+    ? entries.map(([type, mult], i) =>
+        `<div class="form-row cur-row" data-i="${i}" style="align-items:flex-end;gap:8px;margin-bottom:6px">
+          <div class="field"><label>Damage type</label><input class="res-type mono" type="text" value="${esc(type)}"></div>
+          <div class="field" style="flex:0 0 120px"><label>Multiplier</label><input class="res-mult" type="number" min="0" step="0.1" value="${mult}"></div>
+          <button class="btn-icon res-del" title="Remove resistance" aria-label="Remove">${ICO.trash}</button>
+        </div>`).join("")
+    : `<div class="text-muted" style="font-size:12px">No resistances — takes normal damage from every type.</div>`;
+
+  const rebuild = () => {
+    // Fetch fresh: persistEnemy may have replaced the enemy object on a sibling field change.
+    const target = S.project.enemies?.[enemyId];
+    if (!target) return;
+    const out = {};
+    for (const row of panel.querySelectorAll(".cur-row")) {
+      const type = row.querySelector(".res-type")?.value.trim();
+      const mult = parseFloat(row.querySelector(".res-mult")?.value);
+      if (type && Number.isFinite(mult) && mult >= 0) out[type] = mult;
+    }
+    if (Object.keys(out).length) target.resistances = out; else delete target.resistances;
+    markDirty(true);
+  };
+  panel.querySelectorAll(".res-type, .res-mult").forEach(inp => inp.addEventListener("change", rebuild));
+  panel.querySelectorAll(".res-del").forEach(btn => btn.addEventListener("click", () => {
+    btn.closest(".cur-row")?.remove();
+    rebuild();
+    renderResistancesPanel(enemyId);
+  }));
+}
+
 function renderEnemyDetail(id) {
   const detail = $("enemy-detail");
   if (!detail) return;
@@ -554,8 +812,7 @@ function renderEnemyDetail(id) {
         <div class="field"><label>Core Damage</label><input id="ef-coreDamage" type="number" min="0" step="1" value="${e.coreDamage}"></div>
       </div>
       <div class="form-row">
-        <div class="field"><label>Coin Reward</label><input id="ef-coinReward" type="number" min="0" value="${e.reward?.coins ?? e.coinReward ?? 0}"></div>
-        <div class="field"><label>OakRoots Reward</label><input id="ef-oakRoots" type="number" min="0" value="${e.reward?.oakRoots ?? 0}"></div>
+        ${currencyBagFields(e.reward, "ef-reward", " Reward")}
         <div class="field">
           <label>Color</label>
           <div style="display:flex;gap:6px;align-items:center">
@@ -632,9 +889,43 @@ function renderEnemyDetail(id) {
         </div>
       </div>
 
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;margin-bottom:8px">
+        <input id="ef-disrupt-enable" type="checkbox"${e.towerDisrupt?" checked":""}>
+        <label style="margin:0;font-size:12px">Tower Disrupt (boss) ${helpIcon("Boss pattern: every Interval time-units, silences towers within Radius hexes for Duration — they can't fire while disabled.")}</label>
+      </div>
+      <div id="disrupt-fields" style="${e.towerDisrupt?"":"display:none"}">
+        <div class="attack-section">
+          <div class="form-row">
+            <div class="field"><label>Interval</label><input id="ef-disrupt-interval" type="number" min="0.1" step="0.5" value="${e.towerDisrupt?.interval??5}"></div>
+            <div class="field"><label>Radius (hex)</label><input id="ef-disrupt-radius" type="number" min="0.5" step="0.5" value="${e.towerDisrupt?.radius??3}"></div>
+            <div class="field"><label>Duration</label><input id="ef-disrupt-duration" type="number" min="0.1" step="0.5" value="${e.towerDisrupt?.duration??4}"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;margin-bottom:8px">
+        <input id="ef-atk-enable" type="checkbox"${e.towerAttack?" checked":""}>
+        <label style="margin:0;font-size:12px">Tower Attack (boss) ${helpIcon("Boss pattern: every Interval time-units, deals Damage to the nearest tower within Range hexes; a tower with maxHp is destroyed at 0 HP.")}</label>
+      </div>
+      <div id="atk-fields" style="${e.towerAttack?"":"display:none"}">
+        <div class="attack-section">
+          <div class="form-row">
+            <div class="field"><label>Interval</label><input id="ef-atk-interval" type="number" min="0.1" step="0.5" value="${e.towerAttack?.interval??4}"></div>
+            <div class="field"><label>Damage</label><input id="ef-atk-damage" type="number" min="0.1" step="1" value="${e.towerAttack?.damage??20}"></div>
+            <div class="field"><label>Range (hex)</label><input id="ef-atk-range" type="number" min="0.5" step="0.5" value="${e.towerAttack?.range??2}"></div>
+          </div>
+        </div>
+      </div>
+
       <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
         <input id="ef-armor-enable" type="checkbox"${e.armor?" checked":""}>
-        <label style="margin:0;font-size:12px">Armor (oak_bolete_only)</label>
+        <label style="margin:0;font-size:12px">Armor (pierce_only)</label>
+      </div>
+
+      <div class="form-section" style="margin-top:12px">
+        <div class="form-section-title">Damage Resistances ${helpIcon("Per-damage-type multiplier for incoming tower damage. 0.5 = takes half, 2 = takes double. Types are author-defined and match a tower's Damage Type.")}</div>
+        <div id="ef-resist-panel"></div>
+        <button id="ef-resist-add" class="btn btn-outline" type="button" style="margin-top:6px">+ Add resistance</button>
       </div>
     </div>`;
 
@@ -652,6 +943,23 @@ function renderEnemyDetail(id) {
   });
   $("ef-healAura-enable")?.addEventListener("change", () => {
     $("healAura-fields").style.display = $("ef-healAura-enable").checked ? "" : "none";
+  });
+  $("ef-disrupt-enable")?.addEventListener("change", () => {
+    $("disrupt-fields").style.display = $("ef-disrupt-enable").checked ? "" : "none";
+  });
+  $("ef-atk-enable")?.addEventListener("change", () => {
+    $("atk-fields").style.display = $("ef-atk-enable").checked ? "" : "none";
+  });
+
+  // Damage resistances editor
+  renderResistancesPanel(id);
+  $("ef-resist-add")?.addEventListener("click", () => {
+    const enemy = S.project.enemies[id];
+    enemy.resistances ??= {};
+    let n = 1, key = "type";
+    while (enemy.resistances[key] !== undefined) key = "type" + (++n);
+    enemy.resistances[key] = 1;
+    markDirty(true); renderResistancesPanel(id);
   });
 
   // Persist on any change
@@ -682,12 +990,8 @@ function persistEnemy(oldId) {
     maxHp:       parseFloat($("ef-maxHp")?.value)       || e.maxHp,
     speed:       parseFloat($("ef-speed")?.value)       || e.speed,
     coreDamage:  parseFloat($("ef-coreDamage")?.value)  ?? e.coreDamage,
-    coinReward:  parseFloat($("ef-coinReward")?.value)  || 0,
-    reward: {
-      ...(e.reward ?? {}),
-      coins:    parseFloat($("ef-coinReward")?.value)   || 0,
-      oakRoots: parseFloat($("ef-oakRoots")?.value)     || 0,
-    },
+    coinReward:  parseFloat($("ef-reward-coins")?.value) || 0,
+    reward: readCurrencyBag("ef-reward"),
     color: colorNum,
     hitRadius:   parseFloat($("ef-hitRadius")?.value)   || e.hitRadius,
     movementKind: $("ef-movKind")?.value || undefined,
@@ -717,8 +1021,26 @@ function persistEnemy(oldId) {
     };
   } else { delete updated.healAura; }
 
+  // Tower disrupt (boss)
+  if ($("ef-disrupt-enable")?.checked) {
+    updated.towerDisrupt = {
+      interval: parseFloat($("ef-disrupt-interval")?.value) || 5,
+      radius:   parseFloat($("ef-disrupt-radius")?.value)   || 3,
+      duration: parseFloat($("ef-disrupt-duration")?.value) || 4,
+    };
+  } else { delete updated.towerDisrupt; }
+
+  // Tower attack (boss) — damages/destroys towers
+  if ($("ef-atk-enable")?.checked) {
+    updated.towerAttack = {
+      interval: parseFloat($("ef-atk-interval")?.value) || 4,
+      damage:   parseFloat($("ef-atk-damage")?.value)   || 20,
+      range:    parseFloat($("ef-atk-range")?.value)    || 2,
+    };
+  } else { delete updated.towerAttack; }
+
   // Armor
-  if ($("ef-armor-enable")?.checked) { updated.armor = { kind: "oak_bolete_only" }; }
+  if ($("ef-armor-enable")?.checked) { updated.armor = { kind: "pierce_only" }; }
   else { delete updated.armor; }
 
   if (newId !== oldId) { delete enemies[oldId]; S.selectedEnemyId = newId; }
@@ -746,7 +1068,7 @@ function renderTowersTab() {
       <div class="item-name">${entityVisual("towers", id, towerColorHex(t))}${esc(t.label || id)}</div>
       <div class="item-badges">
         <span class="tag">${esc(t.attack?.kind ?? "?")}</span>
-        <span class="tag">${t.cost?.coins ?? 0}c${t.cost?.oakRoots ? " + " + t.cost.oakRoots + "r" : ""}</span>
+        <span class="tag">${esc(costTag(t.cost))}</span>
       </div>`;
     div.dataset.eid = id;
     div.addEventListener("click", () => { S.selectedTowerId = id; renderTowersTab(); });
@@ -766,7 +1088,7 @@ $("btn-add-tower")?.addEventListener("click", () => {
   S.project.towers[id] = {
     id, label: "New Tower",
     cost: { coins: 4 }, footprintRadius: 1, range: 5,
-    attack: { kind: "honey", fireRate: 1, damagePerMushroom: 0.5, startingMushrooms: 3, maxMushrooms: 10, upgradeCost: 3 },
+    attack: { kind: "single", fireRate: 1, damagePerStack: 0.5, startingStacks: 3, maxStacks: 10, upgradeCost: 3 },
   };
   S.selectedTowerId = id;
   markDirty(true); renderTowersTab();
@@ -785,7 +1107,7 @@ function renderTowerDetail(id) {
     .filter(tid => tid !== id)
     .map(tid => `<option value="${esc(tid)}"${tid===t.requiresAuraFrom?" selected":""}>${esc(tid)}</option>`)
     .join("");
-  const kinds = ["honey","chaga","oak_bolete","chanterelle","slippery_jack","support","support_buff"];
+  const kinds = ["single","pulse","sniper","antiair","splash","support","support_buff"];
 
   detail.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)">
@@ -810,12 +1132,12 @@ function renderTowerDetail(id) {
     <div class="form-section">
       <div class="form-section-title">Placement</div>
       <div class="form-row">
-        <div class="field"><label>Cost (coins)</label><input id="tf-cost-coins" type="number" min="0" value="${t.cost?.coins ?? 0}"></div>
-        <div class="field"><label>Cost (oakRoots)</label><input id="tf-cost-oak" type="number" min="0" value="${t.cost?.oakRoots ?? 0}"></div>
+        ${currencyBagFields(t.cost, "tf-cost", " Cost")}
       </div>
       <div class="form-row">
         <div class="field"><label>Footprint Radius${helpIcon("How many hex rings the tower occupies. 0 = a single tile; 1 = a 7-tile cluster.")}</label><input id="tf-footprint" type="number" step="0.5" min="0" value="${t.footprintRadius ?? 1}"></div>
         <div class="field"><label>Range${helpIcon("Targeting radius in hex tiles.")}</label><input id="tf-range" type="number" step="0.5" min="0.5" value="${t.range ?? 5}"></div>
+        <div class="field"><label>Max HP${helpIcon("Optional. If set, the tower can be damaged/destroyed by boss enemies with towerAttack. Blank = indestructible.")}</label><input id="tf-maxhp" type="number" step="1" min="0" value="${t.maxHp ?? ""}"></div>
         <div class="field">
           <label>Requires Aura From${helpIcon("If set, this tower can only be placed inside the named support tower's aura.")}</label>
           <select id="tf-requires">
@@ -875,19 +1197,20 @@ function buildAttackFields(a) {
     `<div class="field field-full"><label>${esc(label)}${help ? helpIcon(help) : ""}</label>${towerCheckGrid(key, a[key] ?? [])}</div>`;
   const title = kind => `<div class="attack-section-title">${kind}${helpIcon(ATTACK_HELP[a.kind] ?? "")}</div>`;
 
+  const perKind = () => {
   switch (a.kind) {
-    case "honey":
-      return `${title("Honey Attack")}
-        <div class="form-row">${v("fireRate", 1, 0.05, "Fire Rate", "Shots per time-unit.")}${v("damagePerMushroom", 0.5, 0.05, "Damage / Mushroom")}</div>
-        <div class="form-row">${v("startingMushrooms", 3, 1, "Starting Mushrooms")}${v("maxMushrooms", 10, 1, "Max Mushrooms")}${v("upgradeCost", 2, 1, "Upgrade Cost", "Coins per added mushroom.")}</div>`;
-    case "chaga":
-      return `${title("Chaga Attack")}
+    case "single":
+      return `${title("Single-Target Attack")}
+        <div class="form-row">${v("fireRate", 1, 0.05, "Fire Rate", "Shots per time-unit.")}${v("damagePerStack", 0.5, 0.05, "Damage / Stack")}</div>
+        <div class="form-row">${v("startingStacks", 3, 1, "Starting Stacks")}${v("maxStacks", 10, 1, "Max Stacks")}${v("upgradeCost", 2, 1, "Upgrade Cost", "Coins per added stack.")}</div>`;
+    case "pulse":
+      return `${title("Pulse Attack")}
         <div class="form-row">${v("pulseRate", 1, 0.05, "Pulse Rate")}${v("pulseDamage", 0.5, 0.05, "Pulse Damage")}</div>
-        <div class="form-row">${v("sporeDamagePerUnit", 0.1, 0.01, "Spore Dmg / Unit", "Lingering damage applied per time-unit after leaving the aura.")}${v("sporeDuration", 30, 1, "Spore Duration")}</div>
+        <div class="form-row">${v("dotDamagePerUnit", 0.1, 0.01, "DoT Dmg / Unit", "Lingering damage applied per time-unit after leaving the aura.")}${v("dotDuration", 30, 1, "DoT Duration")}</div>
         ${lvl("pulseRateByLevel", [1, 1.25, 1.6], "Pulse Rate by Level")}
         ${costs("Upgrade Costs")}`;
-    case "oak_bolete":
-      return `${title("Oak Bolete Attack")}
+    case "sniper":
+      return `${title("Sniper Attack")}
         <div class="form-row">${v("interval", 2.4, 0.05, "Interval (s)", "Seconds between shots.")}${v("damage", 4, 0.5, "Damage")}</div>
         <div class="form-row"><div class="field"><label>Target Priority${helpIcon("Which enemy this tower aims at first.")}</label>
           <select class="af-sel" data-f="targetPriority">
@@ -896,16 +1219,16 @@ function buildAttackFields(a) {
           </select></div></div>
         ${lvl("rangeByLevel", [6, 7, 8], "Range by Level", { step: 0.5 })}
         ${costs("Upgrade Costs")}`;
-    case "chanterelle":
-      return `${title("Chanterelle Attack")}
+    case "antiair":
+      return `${title("Anti-Air Attack")}
         <div class="form-row">${v("fireRate", 1.4, 0.05, "Fire Rate")}${v("damage", 1, 0.5, "Damage")}</div>
         ${lvl("maxTargetsByLevel", [1, 2, 3, 4], "Max Targets by Level", { int: true }, "How many flying enemies it can hit at once, per level.")}
         ${costs("Upgrade Costs")}`;
-    case "slippery_jack":
-      return `${title("Slippery Jack Attack")}
+    case "splash":
+      return `${title("Splash Attack")}
         <div class="form-row">${v("interval", 1.7, 0.05, "Interval (s)")}${v("damage", 0.32, 0.01, "Damage")}${v("splashDamage", 0.14, 0.01, "Splash Damage")}</div>
         <div class="form-row">${v("splashRadius", 1, 0.1, "Splash Radius")}${slider("slowFactor", 0.55, "Slow Factor", { min: 0.05, max: 0.95, step: 0.05 }, "Speed multiplier while slowed — must be below 1.")}${v("slowDuration", 4, 0.5, "Slow Duration (s)")}</div>
-        <div class="form-row">${v("armoredChipDamage", 0.08, 0.01, "Armored Chip Dmg", "Capped damage dealt to oak-bolete-armored enemies.")}</div>
+        <div class="form-row">${v("armoredChipDamage", 0.08, 0.01, "Armored Chip Dmg", "Capped damage dealt to pierce-only-armored enemies.")}</div>
         ${lvl("intervalByLevel", [1.7, 1.45, 1.2], "Interval by Level")}
         ${costs("Upgrade Costs")}`;
     case "support":
@@ -923,6 +1246,41 @@ function buildAttackFields(a) {
     default:
       return `<div class="text-muted" style="padding:8px">Select an attack kind above.</div>`;
   }
+  };
+  const damaging = ["single", "pulse", "sniper", "antiair", "splash"].includes(a.kind);
+  return perKind() + (damaging ? damageTypeField(a) + statusOnHitEditor(a) : "") + (a.kind === "single" ? chainEditor(a) : "");
+}
+
+// Optional composable delivery: after a hit, a single-kind shot chains hop-by-hop to nearby
+// ground enemies, reusing this tower's resistances/armor/on-hit effects for every hop.
+function chainEditor(a) {
+  const c = a.chain ?? {};
+  const on = !!a.chain;
+  const num = (path, val, step, label) =>
+    `<div class="field"><label>${esc(label)}</label><input class="af-chain" data-cf="${path}" type="number" min="0" step="${step}" value="${val ?? ""}"></div>`;
+  return `<div class="attack-section-title" style="margin-top:12px">Chain ${helpIcon("Optional: after a hit, the shot jumps hop-by-hop to nearby ground enemies (up to Max Jumps, within Jump Radius of the last-hit enemy), each hop's damage multiplied by Damage Falloff. Reuses this tower's resistances/armor/on-hit effects for every hop.")}
+      <label style="font-weight:400;font-size:12px;margin-left:auto;display:inline-flex;gap:6px;align-items:center">
+        <input type="checkbox" id="af-chain-enable" ${on ? "checked" : ""}> enable</label></div>
+    ${on ? `<div class="form-row">${num("maxJumps", c.maxJumps, 1, "Max Jumps")}${num("jumpRadius", c.jumpRadius, 0.5, "Jump Radius")}${num("damageFalloff", c.damageFalloff, 0.05, "Damage Falloff")}</div>` : ""}`;
+}
+
+// Optional author-defined damage type (matched against enemy resistances). Empty = "physical".
+function damageTypeField(a) {
+  return `<div class="form-row"><div class="field"><label>Damage Type ${helpIcon("Author-defined damage type (e.g. fire, ice). Enemies scale incoming damage by their resistance for this type. Empty = physical.")}</label>
+    <input class="af-str" data-f="damageType" type="text" placeholder="physical" value="${esc(a.damageType ?? "")}"></div></div>`;
+}
+
+// Optional data-driven on-hit status effects (stun / slow / poison) for any damaging tower.
+function statusOnHitEditor(a) {
+  const s = a.statusOnHit ?? {};
+  const on = !!a.statusOnHit;
+  const num = (path, val, step, label) =>
+    `<div class="field"><label>${esc(label)}</label><input class="af-status" data-sf="${path}" type="number" min="0" step="${step}" value="${val ?? ""}"></div>`;
+  return `<div class="attack-section-title" style="margin-top:12px">On-Hit Effects ${helpIcon("Optional status effects applied to enemies this tower damages.")}
+      <label style="font-weight:400;font-size:12px;margin-left:auto;display:inline-flex;gap:6px;align-items:center">
+        <input type="checkbox" id="af-status-enable" ${on ? "checked" : ""}> enable</label></div>
+    ${on ? `<div class="form-row">${num("stun", s.stun, 0.5, "Stun (s)")}${num("poison.dps", s.poison?.dps, 0.5, "Poison DPS")}${num("poison.duration", s.poison?.duration, 0.5, "Poison Duration (s)")}</div>
+    <div class="form-row">${num("slow.factor", s.slow?.factor, 0.05, "Slow Factor (<1)")}${num("slow.duration", s.slow?.duration, 0.5, "Slow Duration (s)")}</div>` : ""}`;
 }
 
 function bindAttackFieldListeners(id) {
@@ -932,6 +1290,8 @@ function bindAttackFieldListeners(id) {
 
   document.querySelectorAll(".af").forEach(inp =>
     inp.addEventListener("change", () => { attack()[inp.dataset.f] = parseFloat(inp.value) || 0; markDirty(true); }));
+  document.querySelectorAll(".af-str").forEach(inp =>
+    inp.addEventListener("change", () => { const v = inp.value.trim(); if (v) attack()[inp.dataset.f] = v; else delete attack()[inp.dataset.f]; markDirty(true); }));
   document.querySelectorAll(".af-sel").forEach(sel =>
     sel.addEventListener("change", () => { attack()[sel.dataset.f] = sel.value; markDirty(true); }));
   document.querySelectorAll(".af-slider").forEach(sl =>
@@ -966,7 +1326,7 @@ function bindAttackFieldListeners(id) {
     const map = {};
     document.querySelectorAll(".af-cost").forEach(inp => { (map[+inp.dataset.idx] ??= {})[inp.dataset.field] = parseFloat(inp.value) || 0; });
     attack().upgradeCosts = Object.keys(map).map(Number).sort((x, y) => x - y).map(i => {
-      const o = {}; if (map[i].coins) o.coins = map[i].coins; if (map[i].oakRoots) o.oakRoots = map[i].oakRoots; return o;
+      const o = {}; for (const cur of projCurrencies()) if (map[i][cur.id]) o[cur.id] = map[i][cur.id]; return o;
     });
   };
   document.querySelectorAll(".af-cost").forEach(inp => inp.addEventListener("change", () => { rebuildCosts(); markDirty(true); }));
@@ -982,6 +1342,44 @@ function bindAttackFieldListeners(id) {
       attack()[key] = [...document.querySelectorAll(`.af-towers[data-arrkey="${key}"]:checked`)].map(c => c.dataset.tid);
       markDirty(true);
     }));
+
+  // On-hit status effects (nested statusOnHit object, rebuilt from .af-status inputs)
+  $("af-status-enable")?.addEventListener("change", (e) => {
+    if (e.target.checked) attack().statusOnHit ??= {}; else delete attack().statusOnHit;
+    markDirty(true); refresh();
+  });
+  const rebuildStatus = () => {
+    const out = {};
+    for (const inp of document.querySelectorAll(".af-status")) {
+      const val = parseFloat(inp.value);
+      if (!Number.isFinite(val) || val <= 0) continue;
+      const [group, field] = inp.dataset.sf.split(".");
+      if (field) { (out[group] ??= {})[field] = val; } else { out[group] = val; }
+    }
+    // Drop partial slow/poison groups (need both fields) so validation stays clean.
+    if (out.slow && (out.slow.factor === undefined || out.slow.duration === undefined)) delete out.slow;
+    if (out.poison && (out.poison.dps === undefined || out.poison.duration === undefined)) delete out.poison;
+    attack().statusOnHit = out;
+    markDirty(true);
+  };
+  document.querySelectorAll(".af-status").forEach(inp => inp.addEventListener("change", rebuildStatus));
+
+  // Chain delivery (nested chain object, single-kind only; rebuilt from .af-chain inputs)
+  $("af-chain-enable")?.addEventListener("change", (e) => {
+    if (e.target.checked) attack().chain ??= { maxJumps: 2, jumpRadius: 2, damageFalloff: 0.6 };
+    else delete attack().chain;
+    markDirty(true); refresh();
+  });
+  const rebuildChain = () => {
+    const out = {};
+    for (const inp of document.querySelectorAll(".af-chain")) {
+      const val = parseFloat(inp.value);
+      if (Number.isFinite(val) && val > 0) out[inp.dataset.cf] = val;
+    }
+    attack().chain = out;
+    markDirty(true);
+  };
+  document.querySelectorAll(".af-chain").forEach(inp => inp.addEventListener("change", rebuildChain));
 }
 
 function persistTower(oldId) {
@@ -996,12 +1394,11 @@ function persistTower(oldId) {
     label:          $("tf-label")?.value ?? t.label,
     footprintRadius: parseFloat($("tf-footprint")?.value) || 1,
     range:           parseFloat($("tf-range")?.value)     || 5,
-    cost: {
-      coins:    parseFloat($("tf-cost-coins")?.value) || 0,
-      oakRoots: parseFloat($("tf-cost-oak")?.value)   || 0,
-    },
+    cost: readCurrencyBag("tf-cost"),
     attack: t.attack ?? {},
   };
+  const maxHpVal = parseFloat($("tf-maxhp")?.value);
+  if (Number.isFinite(maxHpVal) && maxHpVal > 0) updated.maxHp = maxHpVal; else delete updated.maxHp;
   const req = $("tf-requires")?.value;
   if (req) updated.requiresAuraFrom = req; else delete updated.requiresAuraFrom;
 
@@ -1051,7 +1448,7 @@ $("btn-add-mission")?.addEventListener("click", () => {
   S.project.missions[id] = {
     id, label: "New Mission", description: "", availability: "playable",
     mapId: firstMap, waveSetId: firstWaveSet,
-    startingCoreHp: 20, startingResources: { coins: 6, oakRoots: 0 },
+    startingCoreHp: 20, startingResources: { coins: 6 },
     prepTimeUnits: 20, buildTowerIds: [], abilityIds: [],
   };
   S.selectedMissionEdId = id;
@@ -1128,8 +1525,7 @@ function renderMissionDetail(id) {
       </div>
       <div class="form-row">
         <div class="field"><label>Starting Core HP</label><input id="mf-coreHp" type="number" min="1" value="${m.startingCoreHp ?? 20}"></div>
-        <div class="field"><label>Starting Coins</label><input id="mf-coins" type="number" min="0" value="${m.startingResources?.coins ?? 6}"></div>
-        <div class="field"><label>Starting OakRoots</label><input id="mf-oak" type="number" min="0" value="${m.startingResources?.oakRoots ?? 0}"></div>
+        ${currencyBagFields(m.startingResources, "mf-start", " (start)")}
         <div class="field"><label>Prep Time (units)</label><input id="mf-prep" type="number" min="0" value="${m.prepTimeUnits ?? 20}"></div>
       </div>
     </div>
@@ -1207,10 +1603,7 @@ function persistMission(oldId) {
     mapId:           $("mf-mapId")?.value ?? m.mapId,
     waveSetId:       $("mf-waveSetId")?.value ?? m.waveSetId,
     startingCoreHp:  parseFloat($("mf-coreHp")?.value) || 20,
-    startingResources: {
-      coins:    parseFloat($("mf-coins")?.value) || 0,
-      oakRoots: parseFloat($("mf-oak")?.value)   || 0,
-    },
+    startingResources: readCurrencyBag("mf-start"),
     prepTimeUnits:   parseFloat($("mf-prep")?.value) || 20,
     buildTowerIds,
     abilityIds,
@@ -1782,7 +2175,7 @@ function parseJsonInput(value, fallback) {
 // ASSET CATALOG
 // ─────────────────────────────────────────────────────────────────────────────
 function renderAssetsTab() {
-  if (!S.project.visuals) S.project.visuals = { schemaVersion: 1, assetsRoot: "assets", atlases: {}, sprites: {}, bindings: { towers: {}, enemies: {}, tiles: {}, ui: {} } };
+  if (!S.project.visuals) S.project.visuals = { schemaVersion: 1, assetsRoot: "assets", atlases: {}, sprites: {}, bindings: { towers: {}, enemies: {}, tiles: {}, ui: {} }, audio: { sounds: {}, events: {} } };
   const textarea = $("visuals-json");
   if (textarea) {
     textarea.value = JSON.stringify(S.project.visuals, null, 2);
@@ -1790,12 +2183,140 @@ function renderAssetsTab() {
       try {
         S.project.visuals = JSON.parse(textarea.value);
         markDirty(true);
+        renderSoundBindings();
         toast("Visual catalog updated.", "ok");
       } catch (e) {
         toast("Invalid visuals JSON: " + e.message, "err");
       }
     };
   }
+  renderSoundBindings();
+  renderAtlasFrames();
+}
+
+const afImages = new Map();
+function afAtlasUrl(src) {
+  return "/project-file/" + String(src).split("/").map(encodeURIComponent).join("/");
+}
+function afLoadImage(src, onload) {
+  let img = afImages.get(src);
+  if (!img) {
+    img = new Image();
+    img.addEventListener("load", onload);
+    img.src = afAtlasUrl(src);
+    afImages.set(src, img);
+  }
+  // The caller re-checks img.complete after this returns and draws when ready, so a
+  // cached-complete image needs no synchronous onload() — that would recurse into the caller.
+  return img;
+}
+function renderAtlasFrames() {
+  const panel = $("atlas-frames-panel");
+  if (!panel || !S.project.visuals) return;
+  const v = S.project.visuals;
+  v.atlases ??= {};
+  v.sprites ??= {};
+  const atlasIds = Object.keys(v.atlases).filter(id => typeof v.atlases[id]?.src === "string");
+  const frameSprites = Object.entries(v.sprites).filter(([, s]) => s && typeof s === "object" && s.atlas);
+  if (!atlasIds.length) {
+    panel.innerHTML = `<p class="text-dim" style="font-size:11px;margin:0">Import an atlas image above (Kind = atlas) to slice frames from it.</p>`;
+    return;
+  }
+  panel.innerHTML = `
+    <div class="form-row">
+      <div class="field"><label>Atlas</label><select id="af-atlas">${atlasIds.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("")}</select></div>
+      <div class="field"><label>New sprite ID</label><input id="af-id" class="mono" placeholder="hero_idle"></div>
+    </div>
+    <div class="form-row">
+      <div class="field"><label>X</label><input id="af-x" type="number" min="0" step="1" value="0"></div>
+      <div class="field"><label>Y</label><input id="af-y" type="number" min="0" step="1" value="0"></div>
+      <div class="field"><label>W</label><input id="af-w" type="number" min="1" step="1" value="32"></div>
+      <div class="field"><label>H</label><input id="af-h" type="number" min="1" step="1" value="32"></div>
+    </div>
+    <div style="display:flex;gap:12px;align-items:center;margin:6px 0 4px">
+      <canvas id="af-preview" width="72" height="72" style="border:1px solid var(--border);border-radius:4px;background:#0002;image-rendering:pixelated"></canvas>
+      <span id="af-dims" class="text-muted mono" style="font-size:11px"></span>
+      <button id="af-add" class="btn btn-primary" style="margin-left:auto">Add frame sprite</button>
+    </div>
+    ${frameSprites.length ? `<div class="form-section-title" style="margin-top:8px">Frame sprites</div>` + frameSprites.map(([id, s]) =>
+      `<div class="snd-row"><span class="snd-label mono">${esc(id)}</span><span class="text-muted mono" style="font-size:11px">${esc(s.atlas)} @ ${esc(s.frame?.x ?? "?")},${esc(s.frame?.y ?? "?")} · ${esc(s.frame?.w ?? "?")}×${esc(s.frame?.h ?? "?")}</span><button class="btn-icon af-del" data-id="${esc(id)}" title="Remove frame sprite" aria-label="Remove frame sprite">${ICO.trash}</button></div>`
+    ).join("") : ""}
+  `;
+
+  const num = (id, min) => { const n = Math.floor(Number($(id).value)); return Number.isFinite(n) ? Math.max(min, n) : min; };
+  const drawPreview = () => {
+    const canvas = $("af-preview");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const atlas = v.atlases[$("af-atlas").value];
+    const x = num("af-x", 0), y = num("af-y", 0), w = num("af-w", 1), h = num("af-h", 1);
+    $("af-dims").textContent = `${w}×${h}`;
+    if (!atlas?.src) return;
+    const img = afLoadImage(atlas.src, drawPreview);
+    if (!img.complete || !img.naturalWidth) return;
+    const scale = Math.min(canvas.width / w, canvas.height / h, 4);
+    const dw = w * scale, dh = h * scale;
+    ctx.imageSmoothingEnabled = false;
+    try {
+      ctx.drawImage(img, x, y, w, h, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+    } catch { /* out-of-bounds frame — leave blank */ }
+  };
+  ["af-atlas", "af-x", "af-y", "af-w", "af-h"].forEach(id => $(id).addEventListener("input", drawPreview));
+  drawPreview();
+
+  $("af-add").addEventListener("click", () => {
+    const id = $("af-id").value.trim();
+    if (!id) { toast("Enter a sprite ID.", "warn"); return; }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(id)) { toast("Sprite ID may use letters, digits, _ . - only.", "warn"); return; }
+    if (v.sprites[id]) { toast(`Sprite "${id}" already exists.`, "warn"); return; }
+    v.sprites[id] = { atlas: $("af-atlas").value, frame: { x: num("af-x", 0), y: num("af-y", 0), w: num("af-w", 1), h: num("af-h", 1) } };
+    markDirty(true);
+    toast(`Added frame sprite "${id}".`, "ok");
+    renderAssetsTab();
+  });
+
+  panel.querySelectorAll(".af-del").forEach(btn => btn.addEventListener("click", () => {
+    const id = btn.dataset.id;
+    delete v.sprites[id];
+    markDirty(true);
+    renderAssetsTab();
+  }));
+}
+
+let assetsAudio = null;
+const ICO_PLAY = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>`;
+function renderSoundBindings() {
+  const box = $("sound-bindings");
+  if (!box || !S.project.visuals) return;
+  S.project.visuals.audio ??= { sounds: {}, events: {} };
+  const audio = S.project.visuals.audio;
+  audio.sounds ??= {};
+  audio.events ??= {};
+  const soundIds = Object.keys(audio.sounds);
+  box.innerHTML = AUDIO_EVENTS.map(ev => {
+    const cur = audio.events[ev.id] || "";
+    const opts = `<option value="">— synth default —</option>` +
+      soundIds.map(sid => `<option value="${esc(sid)}"${sid === cur ? " selected" : ""}>${esc(sid)}</option>`).join("");
+    const hasCustom = cur && audio.sounds[cur]?.src;
+    return `<div class="snd-row">
+      <span class="snd-label">${esc(ev.label)}</span>
+      <select class="snd-bind" data-ev="${esc(ev.id)}" aria-label="${esc(ev.label)} sound">${opts}</select>
+      <button class="btn-icon snd-preview" data-ev="${esc(ev.id)}" title="Preview sound"${hasCustom ? "" : " disabled"}>${ICO_PLAY}</button>
+    </div>`;
+  }).join("") + (soundIds.length ? "" : `<p class="text-dim" style="font-size:11px;margin-top:6px">No sounds imported yet — import an audio file with Kind = sound to assign it.</p>`);
+
+  box.querySelectorAll(".snd-bind").forEach(sel => sel.addEventListener("change", () => {
+    if (sel.value) audio.events[sel.dataset.ev] = sel.value; else delete audio.events[sel.dataset.ev];
+    markDirty(true);
+    renderSoundBindings();
+  }));
+  box.querySelectorAll(".snd-preview").forEach(btn => btn.addEventListener("click", async () => {
+    const src = audio.sounds[audio.events[btn.dataset.ev]]?.src;
+    if (!src) return;
+    if (!assetsAudio) { try { const m = await import("/renderer/audio.mjs"); assetsAudio = m.createAudioPlayer({ assetBase: "/project-file/" }); } catch { return; } }
+    assetsAudio.previewSound(src);
+  }));
 }
 
 $("btn-import-asset")?.addEventListener("click", async () => {
@@ -1824,6 +2345,15 @@ $("btn-import-asset")?.addEventListener("click", async () => {
 // ─────────────────────────────────────────────────────────────────────────────
 function renderSettingsTab() {
   const c = S.project.constants ?? {};
+  renderCurrenciesPanel();
+  const addCur = $("btn-add-currency");
+  if (addCur) addCur.onclick = () => {
+    const list = (S.project.currencies = projCurrencies());
+    let n = list.length, id = `currency_${n}`;
+    while (list.some(x => x.id === id)) id = `currency_${++n}`;
+    list.push({ id, label: "New Currency", color: 0x8db0ff });
+    markDirty(true); renderCurrenciesPanel();
+  };
   const FIELDS = [
     ["timeUnitSeconds",            "Time Unit (seconds)",            0.001],
     ["startingCoreHp",             "Starting Core HP (default)",     1    ],
@@ -1894,7 +2424,7 @@ function renderSettingsTab() {
 function setupAppearanceSettings() {
   const themeSel = $("setting-theme"), densitySel = $("setting-density");
   if (themeSel) { themeSel.value = currentTheme(); themeSel.onchange = () => applyTheme(themeSel.value); }
-  if (densitySel) { densitySel.value = localStorage.getItem("mycelium:density") || "comfortable"; densitySel.onchange = () => applyDensity(densitySel.value); }
+  if (densitySel) { densitySel.value = localStorage.getItem("towerforge:density") || "comfortable"; densitySel.onchange = () => applyDensity(densitySel.value); }
 }
 
 // ── MCP integration toggle ──────────────────────────────────────────────────
@@ -1964,12 +2494,13 @@ function renderBuildTargetsTab() {
   for (const [tid, target] of Object.entries(bt.targets ?? {})) {
     const card = document.createElement("div");
     card.className = "target-card";
-    const fields = ["appId","appName","appTitle","platform","market","storeChannel","webDir","backgroundColor","appVersion"];
     card.innerHTML = `
       <div class="target-card-head">
         <div class="target-card-title">${esc(tid)}</div>
         <span class="badge ${target.platform === "web" ? "badge-ok" : "badge-dim"}">${esc(target.platform ?? "?")}</span>
         <button class="btn btn-outline btn-target-build" data-tid="${esc(tid)}">Build</button>
+        <button class="btn btn-outline btn-target-package" data-tid="${esc(tid)}" data-kind="mobile" title="Wrap the web build into a Capacitor mobile app (Android/iOS)">Package mobile</button>
+        <button class="btn btn-outline btn-target-package" data-tid="${esc(tid)}" data-kind="desktop" title="Wrap the web build into a Tauri desktop app (Windows/macOS/Linux)">Package desktop</button>
         <button class="btn btn-danger btn-target-del" data-tid="${esc(tid)}">Remove</button>
       </div>
       <div class="form-row">
@@ -2045,6 +2576,27 @@ function renderBuildTargetsTab() {
         } catch (e) {
           toast("Build failed: " + e.message, "err");
           setStatus("Build failed");
+        }
+      });
+    });
+  });
+
+  document.querySelectorAll(".btn-target-package").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (S.dirty) { toast("Save changes before packaging.", "warn"); return; }
+      const tid = btn.dataset.tid;
+      const kind = btn.dataset.kind === "desktop" ? "desktop" : "mobile";
+      const tool = kind === "desktop" ? "Tauri desktop" : "Capacitor mobile";
+      setStatus(`Packaging ${tid} for ${kind}…`);
+      await withButtonSpinner(btn, async () => {
+        try {
+          const result = await apiPost(`/api/package/${encodeURIComponent(tid)}`, { kind });
+          toast(`${kind === "desktop" ? "Desktop" : "Mobile"} project ready → ${result.outDir?.split("/").pop() || kind}/`, "ok");
+          setStatus(`${kind} package ready`);
+          showBuildResult(tid, `${tool} project → ${result.outDir}\nApp id: ${result.app?.appId}  version ${result.app?.version}\n\nNext:\n  ${(result.nextSteps || []).join("\n  ")}\n\nSee ${kind}/README.md for the full checklist.`);
+        } catch (e) {
+          toast("Packaging failed: " + e.message, "err");
+          setStatus("Packaging failed");
         }
       });
     });
@@ -2447,12 +2999,13 @@ function svgCurve(waveStats, key, unit) {
 // LIVE PLAYTEST
 // ═════════════════════════════════════════════════════════════════════════════
 const PT = { mod: null, rmod: null, content: null, game: null, renderer: null, raf: null, towerId: null, missionId: null, dirty: true, lastFrame: 0, error: null };
-const PT_KIND_COLOR = { honey: "#e8a44a", chaga: "#a07ec8", oak_bolete: "#7eb87e", chanterelle: "#e8c84a", slippery_jack: "#6ea8d8", support: "#7ec8b8", support_buff: "#c87e9c" };
+const PT_KIND_COLOR = { single: "#e8a44a", pulse: "#a07ec8", sniper: "#7eb87e", antiair: "#e8c84a", splash: "#6ea8d8", support: "#7ec8b8", support_buff: "#c87e9c" };
 
 function assembleBalance() {
   const P = S.project;
   return {
     constants: P.constants ?? {},
+    currencies: projCurrencies(),
     defaultMissionId: P.defaultMissionId ?? Object.keys(P.missions ?? {})[0] ?? "",
     abilities: P.abilities ?? {}, enemies: P.enemies ?? {}, towers: P.towers ?? {},
     waveSets: P.waveSets ?? {}, missions: P.missions ?? {}
@@ -2485,7 +3038,7 @@ function newPlaytestGame() {
   if (!PT.missionId || !PT.content.missions[PT.missionId])
     PT.missionId = (PT.content.defaultMissionId && PT.content.missions[PT.content.defaultMissionId]) ? PT.content.defaultMissionId : ids[0];
   if (!PT.missionId) { PT.error = "No playable missions in this project."; PT.game = null; return null; }
-  try { PT.game = new PT.mod.MushroomDefenseGame({ missionId: PT.missionId, content: PT.content }); }
+  try { PT.game = new PT.mod.TowerDefenseGame({ missionId: PT.missionId, content: PT.content }); }
   catch (e) { PT.error = "Cannot start mission: " + e.message; PT.game = null; return null; }
   const m = PT.content.missions[PT.missionId];
   const tids = (m.buildTowerIds?.length ? m.buildTowerIds : Object.keys(PT.content.towers));
@@ -2502,7 +3055,10 @@ async function renderPlaytestTab() {
   const canvas = $("playtest-canvas");
   if (!PT.renderer) PT.renderer = PT.rmod.createCanvasRenderer({ canvas, content: PT.content, assetBase: "/project-file/" });
   else PT.renderer.content = PT.content;
-  if (!PT.audio && PT.amod) PT.audio = PT.amod.createAudioPlayer();
+  if (PT.amod) {
+    if (!PT.audio) PT.audio = PT.amod.createAudioPlayer({ audio: PT.content.visuals?.audio, assetBase: "/project-file/" });
+    else PT.audio.setCatalog(PT.content.visuals?.audio, "/project-file/");
+  }
   PT.renderer.resize();
   const sel = $("pt-mission");
   if (sel) { sel.innerHTML = Object.keys(PT.content.missions).map(id => `<option value="${esc(id)}"${id === PT.missionId ? " selected" : ""}>${esc(PT.content.missions[id]?.label || id)}</option>`).join(""); sel.value = PT.missionId; }
@@ -2519,10 +3075,30 @@ function renderPlaytestPalette() {
     const t = PT.content.towers[tid];
     if (!t) continue;
     const btn = document.createElement("button");
-    btn.className = "pt-tower" + (tid === PT.towerId ? " active" : "");
+    btn.className = "pt-tower" + (tid === PT.towerId && !PT.armed ? " active" : "");
     btn.innerHTML = `<span class="sw" style="background:${PT_KIND_COLOR[t.attack?.kind] ?? "#7eb87e"}"></span><span class="pt-tname">${esc(t.label || tid)}</span><span class="pt-tcost">${t.cost?.coins ?? 0}c</span>`;
-    btn.addEventListener("click", () => { PT.towerId = tid; renderPlaytestPalette(); });
+    btn.addEventListener("click", () => { PT.towerId = tid; PT.armed = null; renderPlaytestPalette(); });
     list.appendChild(btn);
+  }
+  // Mission abilities — click to arm, then click the map to use.
+  const abilities = Object.values(PT.game?.getSnapshot().abilities ?? {});
+  if (abilities.length) {
+    const sep = document.createElement("div");
+    sep.className = "pt-ability-sep";
+    sep.textContent = "Abilities";
+    list.appendChild(sep);
+    for (const a of abilities) {
+      const btn = document.createElement("button");
+      btn.className = "pt-tower pt-ability" + (PT.armed === a.id ? " active" : "");
+      btn.dataset.aid = a.id;
+      btn.innerHTML = `<span class="sw" style="background:#8db0ff"></span><span class="pt-tname">✦ ${esc(a.label || a.id)}</span><span class="pt-tcost">r${a.radius}</span>`;
+      btn.addEventListener("click", () => {
+        PT.armed = PT.armed === a.id ? null : a.id;
+        renderPlaytestPalette();
+        const el = $("pt-msg"); if (el) el.textContent = PT.armed ? `Click the map to use ${a.label || a.id}.` : "Ability disarmed.";
+      });
+      list.appendChild(btn);
+    }
   }
 }
 function startPlaytestLoop() {
@@ -2533,11 +3109,13 @@ function startPlaytestLoop() {
     const dt = Math.min(0.05, (now - PT.lastFrame) / 1000);
     PT.lastFrame = now;
     const speed = Number($("pt-speed")?.value) || 0;
-    if (speed > 0 && PT.game.getSnapshot().outcome === "playing") {
+    const ticked = speed > 0 && PT.game.getSnapshot().outcome === "playing";
+    if (ticked) {
       const tu = PT.content.constants.timeUnitSeconds || 1;
       PT.game.tick((dt / tu) * speed);
     }
     const rsnap = PT.game.getRenderSnapshot();
+    if (!ticked) rsnap.lastEvents = []; // don't replay last tick's sounds/effects on idle frames
     PT.renderer.drawSnapshot(rsnap);
     if (PT.audio && $("pt-sound")?.checked) PT.audio.handleEvents(rsnap.lastEvents);
     updatePlaytestHud();
@@ -2555,6 +3133,14 @@ function updatePlaytestHud() {
   set("pt-wave", `${s.startedWaveCount}/${s.totalWaves} ${s.waveState}`);
   set("pt-enemies", String(s.enemies.length));
   set("pt-towers-count", String(s.towers.length));
+  for (const btn of document.querySelectorAll(".pt-ability")) {
+    const a = s.abilities?.[btn.dataset.aid];
+    const cd = Math.ceil(a?.cooldownRemaining ?? 0);
+    btn.disabled = !(a && a.ready);
+    const cost = btn.querySelector(".pt-tcost");
+    if (cost) cost.textContent = cd > 0 ? cd + "s" : "r" + (a?.radius ?? "");
+    if (btn.disabled && PT.armed === btn.dataset.aid) { PT.armed = null; btn.classList.remove("active"); }
+  }
 }
 function ptMsg(result) { const el = $("pt-msg"); if (el) el.textContent = result.ok ? "Tower planted." : (result.reason || "Action rejected."); }
 $("pt-mission")?.addEventListener("change", () => { PT.missionId = $("pt-mission").value; newPlaytestGame(); renderPlaytestPalette(); const el = $("pt-msg"); if (el) el.textContent = "Mission loaded — place towers and start a wave."; });
@@ -2564,9 +3150,11 @@ $("pt-speed")?.addEventListener("input", () => { const o = $("pt-speed-out"); if
 $("pt-sound")?.addEventListener("change", () => { if ($("pt-sound").checked) PT.audio?.resume(); });
 $("playtest-canvas")?.addEventListener("click", e => {
   PT.audio?.resume();
-  if (!PT.game || !PT.towerId) return;
+  if (!PT.game) return;
   const coord = PT.renderer.pickTile(e, PT.game.getSnapshot().tiles);
-  if (coord) ptMsg(PT.game.placeTower(PT.towerId, coord));
+  if (!coord) return;
+  if (PT.armed) { const r = PT.game.useAbility(PT.armed, coord); ptMsg(r); return; }
+  if (PT.towerId) ptMsg(PT.game.placeTower(PT.towerId, coord));
 });
 window.addEventListener("resize", () => { if (S.activeTab === "playtest" && PT.renderer) PT.renderer.resize(); });
 
@@ -2621,11 +3209,11 @@ function helpIcon(text) {
   return `<span class="help" tabindex="0" role="img" aria-label="${esc(text)}" title="${esc(text)}">?</span>`;
 }
 const ATTACK_HELP = {
-  honey: "Single-target. Damage scales with the number of mushrooms; upgrading adds mushrooms.",
-  chaga: "Area pulse that leaves lingering spore damage on enemies after they leave the aura.",
-  oak_bolete: "Long-range single-target sniper — the only weapon that fully pierces oak-bolete armor.",
-  chanterelle: "Anti-air. Hits multiple flying targets per volley (count scales by level).",
-  slippery_jack: "Splash + slow. Damages nearby enemies and slows them; chips armored enemies.",
+  single: "Single-target. Damage scales with the number of stacks; upgrading adds stacks.",
+  pulse: "Area pulse that leaves lingering damage-over-time on enemies after they leave the aura.",
+  sniper: "Long-range single-target sniper — the only weapon that fully pierces pierce-only armor.",
+  antiair: "Anti-air. Hits multiple flying targets per volley (count scales by level).",
+  splash: "Splash + slow. Damages nearby enemies and slows them; chips armored enemies.",
   support: "Aura tower. Unlocks dependent towers placed within its radius (no direct damage).",
   support_buff: "Aura tower. Multiplies the fire rate of affected towers within range."
 };
@@ -2657,7 +3245,7 @@ function levelArrayEditor(key, values, { step = 0.05, int = false } = {}) {
 }
 function costArrayEditor(costs) {
   const rows = (costs ?? []).map((c, i) =>
-    `<div class="cost-row" data-idx="${i}"><span class="level-idx">${i + 1}→${i + 2}</span><input class="af-cost" data-idx="${i}" data-field="coins" type="number" min="0" step="1" value="${c?.coins ?? 0}"><span class="cost-unit">coins</span><input class="af-cost" data-idx="${i}" data-field="oakRoots" type="number" min="0" step="1" value="${c?.oakRoots ?? 0}"><span class="cost-unit">roots</span>${iconBtn("trash", "Remove level", "af-cost-del")}</div>`
+    `<div class="cost-row" data-idx="${i}"><span class="level-idx">${i + 1}→${i + 2}</span>${projCurrencies().map(cur => `<input class="af-cost" data-idx="${i}" data-field="${esc(cur.id)}" type="number" min="0" step="1" value="${(c && c[cur.id]) || 0}"><span class="cost-unit">${esc(cur.label)}</span>`).join("")}${iconBtn("trash", "Remove level", "af-cost-del")}</div>`
   ).join("");
   return `<div class="cost-array">${rows}<button type="button" class="add-btn arr-add af-cost-add">${ICO.plus} Upgrade level</button></div>`;
 }
@@ -2762,7 +3350,7 @@ document.addEventListener("keydown", e => {
 // AUTOSAVE DRAFT + RECOVERY (localStorage)
 // ═════════════════════════════════════════════════════════════════════════════
 let autosaveTimer = null;
-function draftKey() { return "mycelium:draft:" + (S.project?.manifest?.name || "untitled"); }
+function draftKey() { return "towerforge:draft:" + (S.project?.manifest?.name || "untitled"); }
 function scheduleAutosave() { clearTimeout(autosaveTimer); autosaveTimer = setTimeout(writeDraft, 800); }
 function writeDraft() {
   if (!S.project) return;
@@ -2796,7 +3384,7 @@ function diffSection(base, cur) {
 function showChangeReview() {
   const base = S.serverSnapshot || {}, cur = S.project || {};
   const mapSections = [["enemies", "Enemies"], ["towers", "Towers"], ["waveSets", "Wave sets"], ["missions", "Missions"], ["abilities", "Abilities"], ["maps", "Maps"], ["mapSources", "Map sources"]];
-  const scalarSections = [["constants", "Constants"], ["worldMap", "World map"], ["visuals", "Visuals"], ["buildTargets", "Build targets"], ["manifest", "Manifest"], ["defaultMissionId", "Default mission"]];
+  const scalarSections = [["constants", "Constants"], ["currencies", "Currencies"], ["worldMap", "World map"], ["visuals", "Visuals"], ["buildTargets", "Build targets"], ["manifest", "Manifest"], ["defaultMissionId", "Default mission"]];
   let rows = "";
   for (const [key, label] of mapSections) {
     const d = diffSection(base[key], cur[key]);
@@ -2887,17 +3475,17 @@ function flagHtml(flag) {
 // ═════════════════════════════════════════════════════════════════════════════
 const SUN_ICON  = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
 const MOON_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`;
-function currentTheme() { try { return localStorage.getItem("mycelium:theme") || "dark"; } catch { return "dark"; } }
+function currentTheme() { try { return localStorage.getItem("towerforge:theme") || "dark"; } catch { return "dark"; } }
 function resolvedDark(theme) { return theme === "dark" || (theme === "system" && matchMedia("(prefers-color-scheme: dark)").matches); }
 function applyTheme(theme) {
-  try { localStorage.setItem("mycelium:theme", theme); } catch { /* ignore */ }
+  try { localStorage.setItem("towerforge:theme", theme); } catch { /* ignore */ }
   const dark = resolvedDark(theme);
   document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
   const btn = $("btn-theme");
   if (btn) { btn.innerHTML = dark ? SUN_ICON : MOON_ICON; btn.title = dark ? "Switch to light theme" : "Switch to dark theme"; }
 }
 function applyDensity(d) {
-  try { localStorage.setItem("mycelium:density", d); } catch { /* ignore */ }
+  try { localStorage.setItem("towerforge:density", d); } catch { /* ignore */ }
   document.documentElement.setAttribute("data-density", d);
 }
 $("btn-theme")?.addEventListener("click", () => {
@@ -2911,13 +3499,13 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { 
 // ONBOARDING — first-run welcome + help
 // ═════════════════════════════════════════════════════════════════════════════
 function showWelcome() { $("welcome-overlay")?.classList.remove("hidden"); $("btn-welcome-start")?.focus(); }
-function closeWelcome() { $("welcome-overlay")?.classList.add("hidden"); try { localStorage.setItem("mycelium:welcomed", "1"); } catch { /* ignore */ } }
+function closeWelcome() { $("welcome-overlay")?.classList.add("hidden"); try { localStorage.setItem("towerforge:welcomed", "1"); } catch { /* ignore */ } }
 $("btn-help")?.addEventListener("click", showWelcome);
 $("btn-close-welcome")?.addEventListener("click", closeWelcome);
 $("btn-welcome-start")?.addEventListener("click", closeWelcome);
 $("welcome-overlay")?.addEventListener("click", e => { if (e.target === $("welcome-overlay")) closeWelcome(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("welcome-overlay")?.classList.contains("hidden")) closeWelcome(); });
-try { if (!localStorage.getItem("mycelium:welcomed")) setTimeout(showWelcome, 400); } catch { /* ignore */ }
+try { if (!localStorage.getItem("towerforge:welcomed")) setTimeout(showWelcome, 400); } catch { /* ignore */ }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BOOT

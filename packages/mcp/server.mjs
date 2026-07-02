@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Mycelium Constructor MCP server.
+ * TowerForge AI MCP server.
  *
  * A zero-dependency Model Context Protocol server (JSON-RPC 2.0 over newline-delimited stdio)
  * that exposes the .tdproj constructor toolset — validate, simulate, compile maps, build, inspect,
@@ -19,7 +19,7 @@ import { resolveProjectDir } from "../cli/lib/project-loader.mjs";
 import { TOOLS, callTool } from "./tools.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
-const SERVER_INFO = { name: "mycelium-constructor", version: "0.1.0" };
+const SERVER_INFO = { name: "towerforge-ai", version: "0.1.0" };
 const defaultProjectDir = resolveProjectDir(null, process.argv.slice(2));
 
 function send(message) {
@@ -110,4 +110,4 @@ rl.on("close", () => {
   drainAndExit();
 });
 
-process.stderr.write(`Mycelium Constructor MCP server ready.\n  Project: ${defaultProjectDir}\n  Tools: ${TOOLS.map((t) => t.name).join(", ")}\n`);
+process.stderr.write(`TowerForge AI MCP server ready.\n  Project: ${defaultProjectDir}\n  Tools: ${TOOLS.map((t) => t.name).join(", ")}\n`);

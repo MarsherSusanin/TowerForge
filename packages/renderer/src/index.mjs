@@ -1,8 +1,8 @@
 export function createCanvasRenderer(options) {
-  return new MyceliumCanvasRenderer(options);
+  return new TowerForgeCanvasRenderer(options);
 }
 
-export class MyceliumCanvasRenderer {
+export class TowerForgeCanvasRenderer {
   constructor(options) {
     if (!options?.canvas) throw new Error("createCanvasRenderer requires a canvas.");
     this.canvas = options.canvas;
@@ -146,15 +146,35 @@ export class MyceliumCanvasRenderer {
     this.ctx.fillText(win ? "VICTORY" : "DEFEAT", this.canvas.width / 2, this.canvas.height / 2);
   }
 
+  /** Resolve a bound sprite to a draw descriptor { img, sx, sy, sw, sh }, or null if unavailable.
+   *  A sprite is either a standalone image ({ src }) or a frame of an atlas ({ atlas, frame }). */
   spriteFor(kind, id) {
     const visuals = this.content.visuals;
     const spriteId = visuals && visuals.bindings && visuals.bindings[kind] ? visuals.bindings[kind][id] : null;
-    const src = spriteId && visuals.sprites && visuals.sprites[spriteId] ? visuals.sprites[spriteId].src : null;
+    const sprite = spriteId && visuals.sprites ? visuals.sprites[spriteId] : null;
+    if (!sprite || typeof sprite !== "object") return null;
+    if (sprite.atlas && sprite.frame) {
+      const atlas = visuals.atlases ? visuals.atlases[sprite.atlas] : null;
+      const img = this.loadImage(atlas && atlas.src);
+      if (!img) return null;
+      const f = sprite.frame;
+      // Reject degenerate/negative frames so a malformed catalog draws nothing rather than
+      // feeding a negative or non-finite source rect into drawImage (NaN >= 0 is false).
+      if (!(f.w > 0) || !(f.h > 0) || !(f.x >= 0) || !(f.y >= 0)) return null;
+      return { img, sx: f.x, sy: f.y, sw: f.w, sh: f.h };
+    }
+    const img = this.loadImage(sprite.src);
+    return img ? { img, sx: 0, sy: 0, sw: img.naturalWidth, sh: img.naturalHeight } : null;
+  }
+
+  loadImage(src) {
     if (!src || typeof globalThis.Image !== "function") return null;
     let img = this.images.get(src);
     if (img === undefined) {
       img = new globalThis.Image();
-      img.src = this.assetBase + src;
+      // Encode each path segment so filenames with spaces/unicode/reserved chars resolve (the
+      // studio /project-file/ route decodeURIComponent's the path).
+      img.src = this.assetBase + String(src).split("/").map(encodeURIComponent).join("/");
       this.images.set(src, img);
     }
     return img && img.complete && img.naturalWidth ? img : null;
@@ -222,23 +242,47 @@ export class MyceliumCanvasRenderer {
 
   drawTower(tower, geom) {
     const p = this.center(tower.coord, geom);
+    const disabled = (tower.disabledFor ?? 0) > 0; // silenced by an enemy tower-disrupt pulse
     const sprite = this.spriteFor("towers", tower.typeId);
+    this.ctx.save();
+    if (disabled) this.ctx.globalAlpha = 0.4;
     if (sprite) {
       const s = geom.r * 1.4;
-      this.ctx.drawImage(sprite, p.x - s / 2, p.y - s / 2, s, s);
-      return;
+      this.ctx.drawImage(sprite.img, sprite.sx, sprite.sy, sprite.sw, sprite.sh, p.x - s / 2, p.y - s / 2, s, s);
+    } else {
+      this.ctx.beginPath();
+      this.ctx.arc(p.x, p.y, geom.r * 0.52, 0, Math.PI * 2);
+      this.ctx.fillStyle = this.theme.tower;
+      this.ctx.fill();
+      this.ctx.strokeStyle = this.theme.towerStroke;
+      this.ctx.stroke();
+      this.ctx.fillStyle = this.theme.bg;
+      this.ctx.font = `${Math.max(10, geom.r * 0.42)}px sans-serif`;
+      this.ctx.textAlign = "center";
+      this.ctx.textBaseline = "middle";
+      this.ctx.fillText((this.content.towers?.[tower.typeId]?.label || tower.typeId).slice(0, 2), p.x, p.y);
     }
-    this.ctx.beginPath();
-    this.ctx.arc(p.x, p.y, geom.r * 0.52, 0, Math.PI * 2);
-    this.ctx.fillStyle = this.theme.tower;
-    this.ctx.fill();
-    this.ctx.strokeStyle = this.theme.towerStroke;
-    this.ctx.stroke();
-    this.ctx.fillStyle = this.theme.bg;
-    this.ctx.font = `${Math.max(10, geom.r * 0.42)}px sans-serif`;
-    this.ctx.textAlign = "center";
-    this.ctx.textBaseline = "middle";
-    this.ctx.fillText((this.content.towers?.[tower.typeId]?.label || tower.typeId).slice(0, 2), p.x, p.y);
+    this.ctx.restore();
+    if (disabled) {
+      this.ctx.save();
+      this.ctx.strokeStyle = "#d9776b";
+      this.ctx.lineWidth = 2;
+      this.ctx.setLineDash([3, 3]);
+      this.ctx.beginPath();
+      this.ctx.arc(p.x, p.y, geom.r * 0.64, 0, Math.PI * 2);
+      this.ctx.stroke();
+      this.ctx.restore();
+    }
+    // Health bar for damaged destructible towers (hp defined and below the type's maxHp).
+    const maxHp = this.content.towers?.[tower.typeId]?.maxHp;
+    if (typeof tower.hp === "number" && typeof maxHp === "number" && maxHp > 0 && tower.hp < maxHp) {
+      const frac = Math.max(0, Math.min(1, tower.hp / maxHp));
+      const w = geom.r * 1.1, h = Math.max(2, geom.r * 0.14), bx = p.x - w / 2, by = p.y - geom.r * 0.9;
+      this.ctx.fillStyle = "rgba(0,0,0,0.55)";
+      this.ctx.fillRect(bx - 1, by - 1, w + 2, h + 2);
+      this.ctx.fillStyle = frac > 0.5 ? "#6fcf7e" : frac > 0.25 ? "#e0c060" : "#d9776b";
+      this.ctx.fillRect(bx, by, w * frac, h);
+    }
   }
 
   drawEnemy(enemy, snapshot, geom) {
@@ -246,7 +290,7 @@ export class MyceliumCanvasRenderer {
     const sprite = this.spriteFor("enemies", enemy.typeId);
     if (sprite) {
       const s = geom.r * 0.95;
-      this.ctx.drawImage(sprite, p.x - s / 2, p.y - s / 2, s, s);
+      this.ctx.drawImage(sprite.img, sprite.sx, sprite.sy, sprite.sw, sprite.sh, p.x - s / 2, p.y - s / 2, s, s);
     } else {
       this.ctx.beginPath();
       this.ctx.arc(p.x, p.y, geom.r * 0.38, 0, Math.PI * 2);

@@ -13,6 +13,10 @@ export function defaultVisuals() {
       enemies: {},
       tiles: {},
       ui: {}
+    },
+    audio: {
+      sounds: {},
+      events: {}
     }
   };
 }
@@ -54,13 +58,27 @@ export function normalizeVisuals(input) {
       sprite.src = normalizeRelativeAssetPath(sprite.src, visuals.assetsRoot);
     }
   }
+  visuals.audio = visuals.audio && typeof visuals.audio === "object" ? visuals.audio : {};
+  visuals.audio.sounds ??= {};
+  visuals.audio.events ??= {};
+  for (const sound of Object.values(visuals.audio.sounds)) {
+    if (sound && typeof sound === "object" && typeof sound.src === "string") {
+      sound.src = normalizeRelativeAssetPath(sound.src, visuals.assetsRoot);
+    }
+  }
   return visuals;
+}
+
+/** Mirrors the engine's deriveValidationCode (packages/engine/src/content/validate.ts) so issues
+ *  merged from both sources carry a consistent, stable machine-branchable code. */
+function deriveValidationCode(entityKind, fieldPath) {
+  return `${entityKind}_${fieldPath}`.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
 export function validateProjectSchemas(files) {
   const issues = [];
-  const issue = (severity, entityKind, entityId, fieldPath, message) => {
-    issues.push({ severity, entityKind, entityId, fieldPath, message });
+  const issue = (severity, entityKind, entityId, fieldPath, message, extra = {}) => {
+    issues.push({ severity, entityKind, entityId, fieldPath, message, code: extra.code ?? deriveValidationCode(entityKind, fieldPath), hint: extra.hint, expected: extra.expected, got: extra.got });
   };
   const err = (...args) => issue("error", ...args);
   const warn = (...args) => issue("warning", ...args);
@@ -120,6 +138,9 @@ export function listVisualAssetPaths(visuals) {
   for (const [spriteId, sprite] of Object.entries(visuals?.sprites ?? {})) {
     if (typeof sprite?.src === "string") add({ kind: "sprite", id: spriteId, path: sprite.src });
   }
+  for (const [soundId, sound] of Object.entries(visuals?.audio?.sounds ?? {})) {
+    if (typeof sound?.src === "string") add({ kind: "sound", id: soundId, path: sound.src });
+  }
   return paths;
 }
 
@@ -149,9 +170,51 @@ function validateVisuals(visuals, err, warn) {
       err("visuals", spriteId, `sprites.${spriteId}`, `Sprite "${spriteId}" must be an object.`);
       continue;
     }
+    const hasFrameShape = sprite.atlas !== undefined || sprite.frame !== undefined;
+    // The renderer prefers the atlas/frame branch when it is present, so a sprite that sets BOTH
+    // src and atlas/frame is ambiguous — validate the frame regardless of src and reject the mix.
+    if (sprite.src !== undefined && hasFrameShape) {
+      err("visuals", spriteId, `sprites.${spriteId}`, `Sprite "${spriteId}" must not set both "src" and "atlas"/"frame" — use a standalone image or an atlas frame, not both.`);
+    }
     if (sprite.src !== undefined) {
       const safeIssue = validateSafeAssetPath(sprite.src, `sprites.${spriteId}.src`);
       if (safeIssue) err("visuals", spriteId, `sprites.${spriteId}.src`, safeIssue);
+    }
+    if (hasFrameShape) {
+      // Atlas-frame sprite: a sub-rectangle of an existing atlas image.
+      if (typeof sprite.atlas !== "string" || !(visuals.atlases && visuals.atlases[sprite.atlas])) {
+        err("visuals", spriteId, `sprites.${spriteId}.atlas`, `Sprite "${spriteId}" references unknown atlas "${sprite.atlas}".`);
+      }
+      const frame = sprite.frame;
+      if (!frame || typeof frame !== "object") {
+        err("visuals", spriteId, `sprites.${spriteId}.frame`, `Sprite "${spriteId}" atlas frame must be an object { x, y, w, h }.`);
+      } else {
+        for (const key of ["x", "y"]) {
+          if (!Number.isFinite(frame[key]) || frame[key] < 0) err("visuals", spriteId, `sprites.${spriteId}.frame.${key}`, `Sprite "${spriteId}" frame.${key} must be a number >= 0.`);
+        }
+        for (const key of ["w", "h"]) {
+          if (!Number.isFinite(frame[key]) || frame[key] <= 0) err("visuals", spriteId, `sprites.${spriteId}.frame.${key}`, `Sprite "${spriteId}" frame.${key} must be a number > 0.`);
+        }
+      }
+    } else if (sprite.src === undefined) {
+      warn("visuals", spriteId, `sprites.${spriteId}`, `Sprite "${spriteId}" has no image src or atlas frame yet.`);
+    }
+  }
+
+  const sounds = visuals.audio?.sounds ?? {};
+  for (const [soundId, sound] of Object.entries(sounds)) {
+    if (!sound || typeof sound !== "object") {
+      err("visuals", soundId, `audio.sounds.${soundId}`, `Sound "${soundId}" must be an object.`);
+      continue;
+    }
+    if (sound.src !== undefined) {
+      const safeIssue = validateSafeAssetPath(sound.src, `audio.sounds.${soundId}.src`);
+      if (safeIssue) err("visuals", soundId, `audio.sounds.${soundId}.src`, safeIssue);
+    }
+  }
+  for (const [event, soundId] of Object.entries(visuals.audio?.events ?? {})) {
+    if (soundId && !sounds[soundId]) {
+      warn("visuals", event, `audio.events.${event}`, `Action "${event}" is bound to unknown sound "${soundId}".`);
     }
   }
 }

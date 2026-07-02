@@ -9,12 +9,13 @@
       "platform": "web",
       "market": "pwa",
       "storeChannel": "pwa",
-      "appId": "local.mycelium.starter",
+      "appId": "local.towerforge.starter",
       "appName": "Web PWA",
       "appTitle": "Starter Tower Defense",
       "webDir": "dist",
       "backgroundColor": "#111111",
-      "appVersion": "0.1.0"
+      "appVersion": "0.1.0",
+      "renderer": "canvas"
     }
   }
 }

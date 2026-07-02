@@ -1,20 +1,21 @@
 # Tower Defense Constructor Architecture
 
-Codename: **Mycelium Kit**.
+Codename: **TowerForge**.
 
-Mycelium Kit is an open-source, local-first constructor for 2D hex tower-defense games. The reference game is Mushroom Rouge / Rizoma; the kit must reuse its proven data-driven and deterministic simulation ideas without depending on that game repository at runtime.
+TowerForge is an open-source, local-first constructor for 2D hex tower-defense games. It is content-agnostic and draws on proven data-driven, deterministic-simulation ideas — without depending on any specific game at runtime, so any creator can build their own tower-defense game.
 
 ## Current State
 
 This repository is already a working constructor MVP:
 
-- `@mycelium/engine` is a pure TypeScript deterministic simulation engine.
-- `@mycelium/cli` validates `.tdproj` projects, applies schema migrations, compiles map sources, runs headless simulations, scaffolds new projects, and builds a playable static web bundle.
-- `@mycelium/renderer` is a browser canvas renderer over engine snapshots and map definitions.
-- `@mycelium/studio` is a local browser editor for waves, enemies, towers, missions, map sources, asset catalogs, world map data, settings, and build targets.
+- `@towerforge/engine` is a pure TypeScript deterministic simulation engine.
+- `@towerforge/cli` validates `.tdproj` projects, applies schema migrations, compiles map sources, runs headless simulations, scaffolds new projects, and builds a playable static web bundle.
+- `@towerforge/renderer` is a browser rendering adapter over engine snapshots and map definitions. The static player can be emitted as a lightweight canvas player or a vendored Phaser player.
+- `@towerforge/studio` is a local browser editor for waves, enemies, towers, missions, map sources, asset catalogs, world map data, settings, and build targets.
+- `@towerforge/mcp` exposes the constructor through MCP tools used by external agents and the Studio AI Designer.
 - `examples/starter.tdproj` is the canonical starter project.
 
-The current implementation deliberately avoids a Phaser dependency in the kit. The generated player is engine-backed DOM UI plus `@mycelium/renderer` canvas rendering. A future Phaser renderer can be added as a separate renderer package without changing the engine contract.
+The current implementation keeps Phaser out of the engine and vendors it only for the optional Phaser build target. The generated player is engine-backed DOM UI plus either `@towerforge/renderer` canvas rendering or a Phaser scene adapter, without changing the engine contract.
 
 ## MVP Boundary
 
@@ -25,17 +26,18 @@ The current "full constructor" means:
 - Edit source maps and asset catalog data in Studio.
 - Save project files with conflict protection and backups.
 - Validate cross-references and numeric guards with engine validation.
-- Run headless mission smoke simulations.
+- Run headless mission smoke simulations and multi-strategy balance sweeps.
+- Use AI Designer or external MCP agents to inspect, simulate, validate, patch, build, and package local projects through validation-gated tools.
 - Build a playable static web bundle.
+- Export Capacitor mobile and Tauri desktop scaffolds around the built web bundle.
 - Preview and interact with the built game in a browser.
 
 Non-goals for this iteration:
 
 - Full Tiled-style layer authoring UI.
-- Phaser renderer package.
-- Desktop/Tauri packaging.
+- Cloud publishing or hosted gallery/remix services.
 - Online services, accounts, cloud saves, or analytics.
-- Native mobile packaging.
+- Store submission, signing automation, and upload/publish automation.
 
 ## Package Architecture
 
@@ -49,6 +51,9 @@ packages/cli
 
 packages/studio
   local Node server and browser editor UI
+
+packages/mcp
+  transport-agnostic tool registry plus stdio MCP server for agents
 
 packages/renderer
   browser canvas rendering over snapshots and map definitions
@@ -75,10 +80,10 @@ my-game.tdproj/
     compiled/maps.json
   assets/
   build-targets.json
-  .mycelium/
+  .towerforge/
 ```
 
-Source data is JSON so projects are portable and git-friendly. `.mycelium/` is local editor state and backup storage.
+Source data is JSON so projects are portable and git-friendly. `.towerforge/` is local editor state and backup storage.
 
 ## Content Model
 
@@ -103,12 +108,25 @@ The engine exposes:
 
 - `createGameContentRegistry`
 - `validateGameContentRegistry`
-- `MushroomDefenseGame`
+- `TowerDefenseGame`
 - `runHeadlessMission`
 - serializable `SimulationAction`
 - immutable `GameSnapshot`
 
 Studio and CLI must call those APIs instead of duplicating gameplay behavior. Validation and simulation are engine-backed in the current implementation.
+
+## Agent And MCP Contract
+
+`packages/mcp/tools.mjs` is the shared constructor tool registry for the stdio MCP server and the Studio AI Designer. Current tools cover project summary, mission listing, validation, simulation, map compilation, web build, mobile/desktop packaging, balance reports, dry-run balance patches, validated balance patches, granular enemy/tower/wave edits, and sprite binding.
+
+Agent-facing write tools are local-only and validation-gated:
+
+- `dry_run_balance_patch` and `compile_maps_dry_run` compute without source-file writes.
+- `apply_validated_patch`, `apply_balance_patch`, `set_enemy_stat`, `upsert_tower`, and `add_wave_group` write `content/balance.json` only after a successful dry-run and keep rollback backups under `.towerforge/mcp-backups`.
+- `bind_sprite` writes `content/visuals.json` only after schema validation and rollback protection.
+- `build_project`, `package_mobile`, and `package_desktop` write generated output or scaffolds under the active project.
+
+Remaining agent-surface gaps are schema introspection, generic entity CRUD/delete, source map authoring, optimistic revision tokens, and broader eval fixtures.
 
 ## Studio Modules
 
@@ -122,7 +140,10 @@ Current Studio modules:
 - Settings: global constants and project manifest.
 - Build Targets: target metadata plus one-click web build.
 - Map Authoring: source map dimensions, spawn/core, path centerline, named routes, terrain overrides, and compile action.
-- Asset Catalog: safe project-relative asset import and `content/visuals.json` editing.
+- Playtest: engine-backed live canvas playtest with tower placement, wave start, speed, and abilities.
+- Balance: deterministic multi-strategy balance report with advisor flags.
+- AI Designer: Anthropic-backed chat loop that reuses MCP `callTool`, streams tool calls/results, and reloads patched projects from disk.
+- Asset Catalog: safe project-relative asset import, sound preview/binding, atlas frame picking, sprite bindings, and `content/visuals.json` editing.
 
 Top-bar actions:
 
@@ -136,16 +157,24 @@ Top-bar actions:
 npm run validate
 npm run sim tutorial_01 60
 npm run sim tutorial_01 60 -- --json
+npm run balance -- --project examples/starter.tdproj
 npm run maps:compile -- --project examples/starter.tdproj
 npm run migrate -- --project examples/starter.tdproj --write
 npm run build
 npm run build -- --json
+node packages/cli/package.mjs --project examples/starter.tdproj --kind desktop
+node packages/cli/package.mjs --project examples/starter.tdproj --kind mobile
+npm run mcp -- --project examples/starter.tdproj
 npm run test:e2e
 npm run studio
 node packages/cli/create.mjs my-game --dir /tmp
 ```
 
 `npm run build` validates the project, compiles `packages/engine` to ES modules, copies the compiled engine and renderer into the target output, copies safe referenced visual assets, emits `project-data.js`, and writes a playable web player.
+
+`node packages/cli/package.mjs` wraps a web build into a native project scaffold. It does not install Android Studio, Xcode, Rust, or Tauri toolchains, and it does not sign or publish binaries.
+
+`npm run mcp` starts the stdio MCP server. Use `tools/list` to inspect tool schemas, `riskClass`, and `sideEffect` metadata.
 
 ## Build Output
 
@@ -164,7 +193,7 @@ examples/starter.tdproj/dist/
   assets/
 ```
 
-The player imports `./engine/index.js`, runs `MushroomDefenseGame` in the browser, and renders with `./renderer/index.mjs`. It provides mission/tower selection, tower placement, wave start, reset, speed control, HUD state, and canvas rendering.
+The player imports `./engine/index.js`, runs `TowerDefenseGame` in the browser, and renders with `./renderer/index.mjs`. It provides mission/tower selection, tower placement, wave start, reset, speed control, HUD state, and canvas rendering.
 
 Preview with:
 
@@ -172,15 +201,15 @@ Preview with:
 python3 -m http.server 5175 --bind 127.0.0.1 --directory examples/starter.tdproj/dist
 ```
 
-## Reference Game Usage
+## Design Heritage
 
-Mushroom Rouge / Rizoma is a source of gameplay and visual direction:
+TowerForge draws on proven tower-defense design ideas without depending on any specific game at runtime:
 
 - deterministic headless simulation
 - data-driven content
 - hex TD mechanics
 - balance-oriented CLI workflows
-- organic/mycelium visual tone
+- a cohesive default visual tone (fully overridable per project)
 
 The kit must not import from the reference repository, hardcode its local path, or require its private assets. Any extracted pattern must become generic `.tdproj` data, engine code, docs, or examples.
 
@@ -214,19 +243,21 @@ Studio saves:
 - `project.json`
 - `build-targets.json`
 
-Writes are atomic per file and guarded by a content hash across mutable project files. Before overwriting, Studio creates `.mycelium/*.bak` backups.
+Writes are atomic per file and guarded by a content hash across mutable project files. Before overwriting, Studio creates `.towerforge/*.bak` backups.
 
-Studio writes action traces for save, sim, build, map compile, and asset import under `.mycelium/runs/*.jsonl`.
+Studio writes action traces for save, sim, build, map compile, and asset import under `.towerforge/runs/*.jsonl`.
 
 ## Roadmap
 
 Next high-value work:
 
-1. Add richer sprite-sheet frame picking and visual previews in the asset catalog.
-2. Expand map authoring toward layer-style editing and route tooling.
-3. Add a Phaser renderer package behind the renderer contract if canvas v2 becomes limiting.
-4. Add more fixture projects for balance, migration, and malformed project edge cases.
-5. Prepare package publishing once API stability is acceptable.
+1. Move mechanics toward a composable trigger/effect model instead of closed unions for attack kinds, abilities, and statuses.
+2. Add schema introspection, generic entity CRUD/delete, source map authoring, and revision tokens to the MCP surface.
+3. Add richer visual previews, binding workflows, and themed asset-pack import around the existing sprite/atlas catalog.
+4. Expand map authoring toward layer-style editing and route tooling.
+5. Keep the canvas and Phaser players aligned as new mechanics and visual catalog features land.
+6. Add more fixture projects for balance, migration, malformed project, and agent-tool edge cases.
+7. Prepare package publishing once API stability is acceptable.
 
 ## Done Criteria For Constructor Changes
 

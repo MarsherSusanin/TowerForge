@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mycelium Studio</title>
+  <title>TowerForge Editor</title>
   <script>
     // Apply theme/density before first paint to avoid a flash.
     try {
-      var t = localStorage.getItem("mycelium:theme") || "dark";
+      var t = localStorage.getItem("towerforge:theme") || "dark";
       var dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
       document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
-      document.documentElement.setAttribute("data-density", localStorage.getItem("mycelium:density") || "comfortable");
+      document.documentElement.setAttribute("data-density", localStorage.getItem("towerforge:density") || "comfortable");
     } catch (e) { document.documentElement.setAttribute("data-theme", "dark"); }
   </script>
   <link rel="stylesheet" href="/styles.css">
@@ -21,7 +21,7 @@
 <header id="topbar">
   <div class="topbar-logo">
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
-    Mycelium Studio
+    TowerForge Editor
   </div>
   <div class="topbar-sep"></div>
   <span id="project-name">—</span>
@@ -87,6 +87,10 @@
       <button class="nav-tab" data-tab="balance" role="tab">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8a6 6 0 1 1-11.4 0"/><path d="M13 12.5 16 9"/></svg>
         <span>Balance</span>
+      </button>
+      <button class="nav-tab" data-tab="ai" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"/><path d="M5 17l.8 2.2L8 20l-2.2.8L5 23l-.8-2.2L2 20l2.2-.8L5 17z"/></svg>
+        <span>AI Designer</span>
       </button>
     </div>
     <div class="nav-group">
@@ -325,14 +329,24 @@
           <section class="tool-card">
             <div class="form-section-title">Import Project Asset</div>
             <div class="form-row">
-              <div class="field"><label>Source path</label><input id="asset-source-path" class="mono" placeholder="imports/spore.png"></div>
-              <div class="field"><label>Target path under assets/</label><input id="asset-target-path" class="mono" placeholder="sprites/spore.png"></div>
+              <div class="field"><label>Source path</label><input id="asset-source-path" class="mono" placeholder="imports/tower.png"></div>
+              <div class="field"><label>Target path under assets/</label><input id="asset-target-path" class="mono" placeholder="sprites/tower.png"></div>
             </div>
             <div class="form-row">
-              <div class="field"><label>ID</label><input id="asset-id" class="mono" placeholder="spore"></div>
-              <div class="field"><label>Kind</label><select id="asset-kind"><option value="sprite">sprite</option><option value="atlas">atlas</option></select></div>
+              <div class="field"><label>ID</label><input id="asset-id" class="mono" placeholder="tower"></div>
+              <div class="field"><label>Kind</label><select id="asset-kind"><option value="sprite">sprite</option><option value="atlas">atlas</option><option value="sound">sound</option></select></div>
               <button id="btn-import-asset" class="btn btn-outline" style="align-self:flex-end">Import</button>
             </div>
+          </section>
+          <section class="tool-card">
+            <div class="form-section-title">Action Sounds</div>
+            <p class="text-muted" style="font-size:11.5px;margin:0 0 10px">Assign a custom sound to each game action, or leave it on the built-in synth. Import audio above with Kind = sound.</p>
+            <div id="sound-bindings"></div>
+          </section>
+          <section class="tool-card">
+            <div class="form-section-title">Sprite Frames (from atlas)</div>
+            <p class="text-muted" style="font-size:11.5px;margin:0 0 10px">Slice one atlas image into named sprites. Import an atlas above (Kind = atlas), pick a frame rectangle, then bind the sprite to a tower/enemy in the Visual Catalog JSON.</p>
+            <div id="atlas-frames-panel"></div>
           </section>
           <section class="tool-card">
             <div class="form-section-title">Visual Catalog JSON</div>
@@ -352,6 +366,12 @@
           <div class="form-section">
             <div class="form-section-title">Global Game Constants</div>
             <table class="constants-table" id="constants-table"></table>
+          </div>
+          <div class="form-section">
+            <div class="form-section-title">Currencies</div>
+            <p class="text-muted" style="font-size:12px;margin:0 0 8px">Spendable currencies for tower costs, enemy rewards, and starting resources. <b>coins</b> is the primary currency and cannot be removed.</p>
+            <div id="currencies-panel"></div>
+            <button id="btn-add-currency" class="btn btn-outline" style="margin-top:8px">+ Add currency</button>
           </div>
           <div class="form-section">
             <div class="form-section-title">Project Manifest</div>
@@ -468,6 +488,32 @@
       <div class="detail-panel" id="balance-results"></div>
     </section>
 
+    <section id="tab-ai" class="tab-panel" role="tabpanel">
+      <div class="panel-header">
+        <h2>AI Designer</h2>
+        <span class="text-muted" style="font-size:11.5px">Chat with a co-designer that inspects, simulates, diagnoses, and patches your project to hit a target balance.</span>
+        <span style="flex:1"></span>
+        <select id="ai-model" class="btn btn-outline" title="Model" style="max-width:190px">
+          <option value="claude-sonnet-4-6">Sonnet 4.6 (fast)</option>
+          <option value="claude-opus-4-8">Opus 4.8 (deep)</option>
+          <option value="claude-haiku-4-5-20251001">Haiku 4.5 (cheap)</option>
+        </select>
+        <button id="ai-key-btn" class="btn btn-outline" title="Set Anthropic API key">API key</button>
+      </div>
+      <div class="ai-shell">
+        <div id="ai-transcript" class="ai-transcript"></div>
+        <div id="ai-key-row" class="ai-key-row" hidden>
+          <input id="ai-key-input" type="password" class="mono" placeholder="sk-ant-… (stored in this browser only, never committed)" autocomplete="off">
+          <button id="ai-key-save" class="btn btn-primary">Save key</button>
+        </div>
+        <form id="ai-form" class="ai-input-row">
+          <textarea id="ai-input" rows="2" placeholder="e.g. Make tutorial_01 winnable but not trivial — target 60–80% win-rate."></textarea>
+          <button id="ai-send" class="btn btn-primary" type="submit">Send</button>
+          <button id="ai-stop" class="btn btn-outline" type="button" hidden>Stop</button>
+        </form>
+      </div>
+    </section>
+
   </main>
 </div>
 
@@ -475,11 +521,11 @@
 <div id="toast-container" aria-live="assertive" aria-atomic="true"></div>
 
 <!-- ── Welcome / onboarding ─────────────────────────────────────────────────── -->
-<div id="welcome-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Welcome to Mycelium Studio">
+<div id="welcome-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Welcome to TowerForge Editor">
   <div class="overlay-panel welcome-panel">
     <div class="overlay-header">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
-      <h3>Welcome to Mycelium Studio</h3>
+      <h3>Welcome to TowerForge Editor</h3>
       <button id="btn-close-welcome" class="btn-icon" aria-label="Close">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>

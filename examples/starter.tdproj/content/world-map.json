@@ -6,7 +6,12 @@
       "id": "forest",
       "label": "The Forest",
       "description": "A peaceful forest under threat",
-      "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 800,
+        "height": 600
+      },
       "accent": "#4a7c4a",
       "biome": "meadow",
       "connections": []

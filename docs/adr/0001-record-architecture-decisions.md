@@ -8,7 +8,7 @@ Accepted
 
 ## Context
 
-Mycelium Kit is becoming an open-source constructor with separate engine, CLI, Studio, project format, and generated player concerns. Changes to package boundaries, project schema, build outputs, or validation behavior can affect every game project built with the kit.
+TowerForge is becoming an open-source constructor with separate engine, CLI, Studio, project format, and generated player concerns. Changes to package boundaries, project schema, build outputs, or validation behavior can affect every game project built with the kit.
 
 ## Decision
 

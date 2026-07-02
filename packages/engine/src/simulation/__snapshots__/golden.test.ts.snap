@@ -1,0 +1,307 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`determinism (Wave A safety net) > matches the committed golden snapshot 1`] = `
+{
+  "abilities": {
+    "strike": {
+      "cooldown": 8,
+      "cooldownRemaining": 7.9,
+      "duration": 0,
+      "id": "strike",
+      "label": "Strike",
+      "radius": 2,
+      "ready": false,
+    },
+  },
+  "coins": 174,
+  "coreCoord": {
+    "q": 8,
+    "r": 1,
+  },
+  "coreHp": 30,
+  "enemies": [],
+  "lastEvents": [],
+  "maxCoreHp": 30,
+  "missionElapsed": 8.099999999999984,
+  "missionId": "golden",
+  "missionLabel": "golden",
+  "nextWaveDelayUnits": 0,
+  "nextWaveRemaining": 0,
+  "outcome": "victory",
+  "pathCenterline": [
+    {
+      "q": 0,
+      "r": 1,
+    },
+    {
+      "q": 1,
+      "r": 1,
+    },
+    {
+      "q": 2,
+      "r": 1,
+    },
+    {
+      "q": 3,
+      "r": 1,
+    },
+    {
+      "q": 4,
+      "r": 1,
+    },
+    {
+      "q": 5,
+      "r": 1,
+    },
+    {
+      "q": 6,
+      "r": 1,
+    },
+    {
+      "q": 7,
+      "r": 1,
+    },
+    {
+      "q": 8,
+      "r": 1,
+    },
+  ],
+  "pathRoutes": [
+    {
+      "id": "main",
+      "pathCenterline": [
+        {
+          "q": 0,
+          "r": 1,
+        },
+        {
+          "q": 1,
+          "r": 1,
+        },
+        {
+          "q": 2,
+          "r": 1,
+        },
+        {
+          "q": 3,
+          "r": 1,
+        },
+        {
+          "q": 4,
+          "r": 1,
+        },
+        {
+          "q": 5,
+          "r": 1,
+        },
+        {
+          "q": 6,
+          "r": 1,
+        },
+        {
+          "q": 7,
+          "r": 1,
+        },
+        {
+          "q": 8,
+          "r": 1,
+        },
+      ],
+    },
+  ],
+  "prepRemaining": 0,
+  "resources": {
+    "coins": 174,
+    "gems": 2,
+  },
+  "spawnCoord": {
+    "q": 0,
+    "r": 1,
+  },
+  "startedWaveCount": 2,
+  "sunlightTiles": [],
+  "temporaryWaterTiles": [],
+  "tiles": [
+    {
+      "q": 0,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "occupiedBy": "tower_1",
+      "q": 1,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "q": 2,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "q": 3,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "occupiedBy": "tower_2",
+      "q": 4,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "q": 5,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "q": 6,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "q": 7,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "q": 8,
+      "r": 0,
+      "terrain": "buildable",
+    },
+    {
+      "q": 0,
+      "r": 1,
+      "terrain": "spawn",
+    },
+    {
+      "q": 1,
+      "r": 1,
+      "terrain": "path",
+    },
+    {
+      "q": 2,
+      "r": 1,
+      "terrain": "path",
+    },
+    {
+      "q": 3,
+      "r": 1,
+      "terrain": "path",
+    },
+    {
+      "q": 4,
+      "r": 1,
+      "terrain": "path",
+    },
+    {
+      "q": 5,
+      "r": 1,
+      "terrain": "path",
+    },
+    {
+      "q": 6,
+      "r": 1,
+      "terrain": "path",
+    },
+    {
+      "q": 7,
+      "r": 1,
+      "terrain": "path",
+    },
+    {
+      "q": 8,
+      "r": 1,
+      "terrain": "core",
+    },
+    {
+      "q": 0,
+      "r": 2,
+      "terrain": "buildable",
+    },
+    {
+      "q": 1,
+      "r": 2,
+      "terrain": "buildable",
+    },
+    {
+      "q": 2,
+      "r": 2,
+      "terrain": "buildable",
+    },
+    {
+      "q": 3,
+      "r": 2,
+      "terrain": "buildable",
+    },
+    {
+      "q": 4,
+      "r": 2,
+      "terrain": "buildable",
+    },
+    {
+      "q": 5,
+      "r": 2,
+      "terrain": "buildable",
+    },
+    {
+      "q": 6,
+      "r": 2,
+      "terrain": "buildable",
+    },
+    {
+      "q": 7,
+      "r": 2,
+      "terrain": "buildable",
+    },
+    {
+      "q": 8,
+      "r": 2,
+      "terrain": "buildable",
+    },
+  ],
+  "totalWaves": 2,
+  "towers": [
+    {
+      "cooldown": 0,
+      "coord": {
+        "q": 1,
+        "r": 0,
+      },
+      "footprint": [
+        {
+          "q": 1,
+          "r": 0,
+        },
+      ],
+      "hp": undefined,
+      "id": "tower_1",
+      "level": 1,
+      "stacks": 2,
+      "targetMode": undefined,
+      "typeId": "pelter",
+    },
+    {
+      "cooldown": 0.9000000000000029,
+      "coord": {
+        "q": 4,
+        "r": 0,
+      },
+      "footprint": [
+        {
+          "q": 4,
+          "r": 0,
+        },
+      ],
+      "hp": undefined,
+      "id": "tower_2",
+      "level": 1,
+      "stacks": 0,
+      "targetMode": "largest_hp",
+      "typeId": "marksman",
+    },
+  ],
+  "waveIndex": 1,
+  "waveState": "complete",
+}
+`;

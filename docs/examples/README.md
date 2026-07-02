@@ -13,12 +13,16 @@ Reference examples show expected project and code patterns.
 | Engine validation | `packages/engine/src/content/validate.ts` | Canonical cross-reference and numeric guard implementation. |
 | Headless smoke sim | `packages/cli/sim.mjs` | CLI wrapper for engine-backed mission smoke runs. |
 | Static web build | `packages/cli/build.mjs` | Generates the playable web bundle from project data, compiled engine modules, renderer, and safe assets. |
-| Canvas renderer | `packages/renderer/src/index.mjs` | Shared browser renderer for Studio map preview and generated player. |
-| Studio editor shell | `packages/studio/public/app.js` | Browser UI pattern for data editors, validation, sim, save, and build actions. |
+| Native packaging | `packages/cli/lib/packaging.mjs` | Canonical Capacitor/Tauri scaffold generation around a built web bundle. |
+| MCP tool registry | `packages/mcp/tools.mjs` | Canonical agent tool contracts, risk metadata, dry-run/validated writes, and rollback paths. |
+| Canvas renderer | `packages/renderer/src/index.mjs` | Shared browser renderer for Studio map/playtest preview and generated canvas player, including sprite and atlas-frame drawing. |
+| Phaser player target | `packages/cli/build.mjs` | Canonical optional vendored Phaser build target; stays outside the engine boundary. |
+| Studio editor shell | `packages/studio/public/app.js` | Browser UI pattern for data editors, validation, sim, balance, AI Designer, save, and build actions. |
 
 ## Add Examples For
 
 - A focused engine unit test when adding new mechanics.
 - A `.tdproj` migration when changing schema shape.
 - Additional invalid `.tdproj` fixtures for migration, asset path, and map route regressions.
-- A Phaser renderer example if a future renderer package is added behind the renderer contract.
+- Balance fixtures for misleading placement strategies, boss-heavy waves, flying-heavy waves, idle economy, roguelike variants, and multi-currency projects.
+- MCP fixtures for invalid patch rollback, granular writes, schema-introspection once added, and agent-authored source maps once added.

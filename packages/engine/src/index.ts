@@ -3,6 +3,7 @@ export * from "./simulation/hex.js";
 export * from "./simulation/map.js";
 export * from "./simulation/headless.js";
 export * from "./simulation/balance.js";
-export * from "./simulation/MushroomDefenseGame.js";
+export * from "./simulation/TowerDefenseGame.js";
 export * from "./content/registry.js";
 export * from "./content/validate.js";
+export * from "./content/schema-descriptor.js";

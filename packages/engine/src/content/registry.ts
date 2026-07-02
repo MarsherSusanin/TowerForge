@@ -1,5 +1,6 @@
 import { HexMap, type HexMapDefinition } from "../simulation/map.js";
 import type {
+  CurrencyDefinition,
   EnemyType,
   MissionAbilityDefinition,
   MissionAbilityId,
@@ -9,6 +10,8 @@ import type {
   TowerType,
   WaveDefinition
 } from "../simulation/types.js";
+
+export const DEFAULT_CURRENCIES: CurrencyDefinition[] = [{ id: "coins", label: "Coins", color: 0xf5c542 }];
 
 export interface WorldRegionDefinition {
   id: string;
@@ -76,8 +79,9 @@ export interface MissionContentDefinition extends MissionDefinition {
 
 export interface GameBalanceData {
   constants: GameBalanceConstants;
+  currencies?: CurrencyDefinition[];
   defaultMissionId: string;
-  abilities: Record<MissionAbilityId, MissionAbilityDefinition>;
+  abilities: Partial<Record<MissionAbilityId, MissionAbilityDefinition>>;
   enemies: Record<string, EnemyType>;
   towers: Record<string, TowerType>;
   waveSets: Record<string, WaveDefinition[]>;
@@ -86,8 +90,9 @@ export interface GameBalanceData {
 
 export interface GameContentRegistry {
   constants: GameBalanceConstants;
+  currencies: CurrencyDefinition[];
   defaultMissionId: string;
-  abilities: Record<MissionAbilityId, MissionAbilityDefinition>;
+  abilities: Partial<Record<MissionAbilityId, MissionAbilityDefinition>>;
   enemies: Record<string, EnemyType>;
   towers: Record<string, TowerType>;
   waveSets: Record<string, WaveDefinition[]>;
@@ -141,6 +146,7 @@ export function createGameContentRegistry(options: GameContentInput): GameConten
 
   return {
     constants: balance.constants,
+    currencies: balance.currencies && balance.currencies.length > 0 ? balance.currencies : DEFAULT_CURRENCIES,
     defaultMissionId: balance.defaultMissionId,
     abilities: balance.abilities,
     enemies: balance.enemies,

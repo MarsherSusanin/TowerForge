@@ -1,4 +1,4 @@
-/* ── Mycelium Studio — Design Tokens ────────────────────────────────────────── */
+/* ── TowerForge Editor — Design Tokens ────────────────────────────────────────── */
 :root {
   --bg:          #111111;
   --surface:     #1a1a1a;
@@ -665,6 +665,11 @@ label .help { font-weight: 700; }
 /* ── Empty-state CTA ─────────────────────────────────────────────────────────── */
 .empty-cta { margin-top: 6px; }
 
+/* ── Action-sound bindings ───────────────────────────────────────────────────── */
+.snd-row { display: grid; grid-template-columns: 150px 1fr 28px; gap: 8px; align-items: center; margin-bottom: 5px; }
+.snd-row .snd-label { font-size: 12px; color: var(--text-muted); }
+.snd-preview svg { width: 11px; height: 11px; }
+
 /* ── Command palette (⌘K) ────────────────────────────────────────────────────── */
 #cmdk-overlay { align-items: flex-start; }
 .cmdk-panel {
@@ -785,3 +790,30 @@ html[data-density="compact"] .form-row { margin-bottom: 6px; }
 .bal-flag.warning { background: var(--warn-bg); border-left: 3px solid var(--warn); }
 .bal-flag.info { background: var(--surface-2); border-left: 3px solid var(--border-2); }
 .bal-flag.ok { background: var(--ok-bg); border-left: 3px solid var(--ok); color: var(--ok); }
+
+/* ── AI co-designer ─────────────────────────────────────────────────────────── */
+.ai-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px; }
+.ai-transcript { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 4px; }
+.ai-empty { color: var(--text-muted); font-size: 13px; max-width: 620px; margin: auto; text-align: center; line-height: 1.65; }
+.ai-msg { max-width: 780px; }
+.ai-user { align-self: flex-end; background: var(--accent); color: #0c130c; padding: 8px 12px; border-radius: 10px 10px 2px 10px; white-space: pre-wrap; font-size: 13.5px; }
+.ai-assistant { align-self: stretch; width: 100%; max-width: none; }
+.ai-steps { display: flex; flex-direction: column; gap: 8px; }
+.ai-text { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px 10px 10px 2px; padding: 10px 12px; line-height: 1.55; font-size: 13.5px; }
+.ai-text code, .ai-tool code { background: var(--surface-3); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.ai-tool { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); background: var(--surface); border: 1px dashed var(--border-2); border-radius: 8px; padding: 6px 10px; flex-wrap: wrap; }
+.ai-tool-name { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.ai-tool code { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.ai-tool-status { margin-left: auto; white-space: nowrap; }
+.ai-tool-status.ok { color: var(--accent); }
+.ai-tool-status.err { color: #d9776b; }
+.ai-error { color: #d9776b; font-size: 13px; padding: 6px 10px; }
+.ai-key-row { display: flex; gap: 8px; }
+.ai-key-row input { flex: 1; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border-2); background: var(--surface-2); color: var(--text); }
+.ai-input-row { display: flex; gap: 8px; align-items: flex-end; }
+.ai-input-row textarea { flex: 1; resize: vertical; min-height: 44px; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border-2); background: var(--surface-2); color: var(--text); font: inherit; }
+
+/* ── Playtest abilities ──────────────────────────────────────────────────────── */
+.pt-ability-sep { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; padding: 8px 2px 2px; }
+.pt-ability.active { border-color: #8db0ff; box-shadow: 0 0 0 1px #8db0ff inset; }
+.pt-tower:disabled { opacity: .45; cursor: default; }

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Mycelium Kit is a local-first constructor for 2D hex tower-defense games. Agents work on a TypeScript simulation engine, Node CLI, browser Studio, `.tdproj` project format, and generated static web player.
+TowerForge is a local-first constructor for 2D hex tower-defense games. Agents work on a TypeScript simulation engine, Node CLI, browser Studio, `.tdproj` project format, and generated static web player.
 
 ## Tooling
 
@@ -12,8 +12,11 @@ Run the relevant checks before declaring work complete:
 - `npm run build:engine` after engine or project-loader changes.
 - `npm run validate` after content/schema/loader changes.
 - `npm run sim tutorial_01 60` after simulation, balance, map, or content changes.
+- `npm run balance -- --project examples/starter.tdproj` after balance-strategy, advisor, economy, template, or MCP balance-tool changes.
 - `npm run maps:compile -- --project examples/starter.tdproj` after source map compiler or map source changes.
 - `npm run build` after CLI build, target, engine export, or player changes.
+- `node packages/cli/package.mjs --project examples/starter.tdproj --kind mobile` and `node packages/cli/package.mjs --project examples/starter.tdproj --kind desktop` after native packaging changes.
+- `npm run test` after shared logic, CLI library, engine, MCP, renderer, or migration changes.
 - `npm run test:e2e` after Studio, renderer, generated player, or browser interaction changes.
 
 ## Work Cycle
@@ -31,11 +34,15 @@ Run the relevant checks before declaring work complete:
 - MUST use `createGameContentRegistry` and `validateGameContentRegistry` as the canonical content contract.
 - MUST keep Studio as an editor over project data; it MUST NOT duplicate gameplay rules that belong in the engine.
 - MUST keep `packages/renderer` as a browser rendering adapter over snapshots/map definitions; it MUST NOT own gameplay rules or import Node/filesystem code.
+- MUST keep `packages/mcp/tools.mjs` transport-agnostic and reuse existing CLI/loader/validation functions instead of bypassing project contracts.
+- MUST expose local write tools with narrow schemas, `riskClass`/`sideEffect` metadata, validation before write, backups, and rollback or an explicit dry-run/commit split.
+- MUST prefer granular or dry-run MCP tools (`dry_run_balance_patch`, `apply_validated_patch`, `set_enemy_stat`, `upsert_tower`, `add_wave_group`, `bind_sprite`) before broad section replacement.
 - MUST update `ARCHITECTURE.md` or an ADR when changing package boundaries, project format, build outputs, or validation semantics.
 
 ## Security / Secrets
 
 - MUST NOT commit secrets, tokens, private keys, credentials, or user-local paths as required project inputs.
+- MUST keep AI provider keys out of project files, traces, and committed docs; Studio AI keys live in browser `localStorage` only.
 - MUST bind local Studio/dev servers to loopback only unless a documented runbook change explains otherwise.
 - MUST treat imported project files as untrusted data and validate before simulation or build.
 - MUST reject absolute paths, external URLs, and `..` traversal in project asset paths.

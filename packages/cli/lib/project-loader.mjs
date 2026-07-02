@@ -81,6 +81,7 @@ export function projectSummary(files) {
   return {
     manifest: files.manifest,
     constants: files.balance.constants,
+    currencies: files.balance.currencies,
     defaultMissionId: files.balance.defaultMissionId,
     abilities: files.balance.abilities,
     enemies: files.balance.enemies,
@@ -146,18 +147,35 @@ export async function runMissionSmoke(projectDir, missionId, duration = 180) {
     throw new Error(`Mission "${resolvedMissionId}" not found.${available.length ? ` Available missions: ${available.join(", ")}` : ""}`);
   }
 
-  const game = new engine.MushroomDefenseGame({ missionId: resolvedMissionId, content });
+  const game = new engine.TowerDefenseGame({ missionId: resolvedMissionId, content });
   const placements = autoPlaceInitialTowers(game, content.missions[resolvedMissionId].buildTowerIds ?? []);
   const startResult = game.startNextWave();
+  const eventCounts = {};
+  const eventTimeline = [];
+  const resourceTimeline = [];
+  const milestones = [];
+  const maxTimelineEvents = 200;
+  const maxResourceSamples = 80;
+  const milestoneTargets = [0, 0.25, 0.5, 0.75, 1].map((n) => duration * n);
+  recordEvents(eventCounts, eventTimeline, game.lastEvents, 0, maxTimelineEvents);
+  recordMilestones(milestones, game.getSnapshot(), 0, milestoneTargets);
+  recordResourceSample(resourceTimeline, game.getSnapshot(), 0, maxResourceSamples);
 
   const tickStep = 0.1;
   let elapsed = 0;
   while (elapsed < duration && game.getSnapshot().outcome === "playing") {
-    game.tick(Math.min(tickStep, duration - elapsed));
-    elapsed += tickStep;
+    const step = Math.min(tickStep, duration - elapsed);
+    game.tick(step);
+    elapsed += step;
+    const tickElapsed = Math.round(elapsed * 10) / 10;
+    const tickSnapshot = game.getSnapshot();
+    recordEvents(eventCounts, eventTimeline, game.lastEvents, tickElapsed, maxTimelineEvents);
+    recordMilestones(milestones, tickSnapshot, tickElapsed, milestoneTargets);
+    recordResourceSample(resourceTimeline, tickSnapshot, tickElapsed, maxResourceSamples);
   }
 
   const snapshot = game.getSnapshot();
+  recordFinalMilestone(milestones, snapshot, Math.round(elapsed * 10) / 10);
   const mission = content.missions[resolvedMissionId];
   const map = files.maps[mission.mapId];
 
@@ -185,8 +203,17 @@ export async function runMissionSmoke(projectDir, missionId, duration = 180) {
     placements,
     availableTowers: mission.buildTowerIds ?? [],
     startingResources: mission.startingResources,
-    eventCounts: countEvents(snapshot.lastEvents),
-    waveStats: summarizeWaves(mission.waves, content.enemies)
+    strategy: {
+      placement: "auto_nearest_path",
+      towerOrder: mission.buildTowerIds ?? [],
+      tickStep
+    },
+    eventCounts,
+    eventTimeline,
+    resourceTimeline,
+    milestones,
+    waveStats: summarizeWaves(mission.waves, content.enemies),
+    nextValidActions: nextValidActionsForSmoke(snapshot)
   };
 }
 
@@ -230,7 +257,7 @@ function ensureEngineBuilt() {
     encoding: "utf8"
   });
   if (result.status !== 0) {
-    throw new Error(`Failed to build @mycelium/engine.\n${result.stdout ?? ""}${result.stderr ?? ""}`.trim());
+    throw new Error(`Failed to build @towerforge/engine.\n${result.stdout ?? ""}${result.stderr ?? ""}`.trim());
   }
   return distIndex;
 }
@@ -248,8 +275,9 @@ function newestMtime(dir) {
 function normalizeBalance(input) {
   const balance = structuredCloneCompat(input);
   balance.constants ??= {};
-  balance.constants.startingResources ??= { coins: balance.constants.startingCoins ?? 0, oakRoots: 0 };
-  balance.constants.moveTowerCost ??= { coins: 0, oakRoots: 0 };
+  balance.currencies = normalizeCurrencies(balance.currencies);
+  balance.constants.startingResources ??= { coins: balance.constants.startingCoins ?? 0 };
+  balance.constants.moveTowerCost ??= { coins: 0 };
   balance.abilities ??= {};
   balance.enemies ??= {};
   balance.towers ??= {};
@@ -269,7 +297,7 @@ function normalizeBalance(input) {
   for (const [towerId, tower] of Object.entries(balance.towers)) {
     tower.id ??= towerId;
     tower.label ??= towerId;
-    tower.cost ??= { coins: 0, oakRoots: 0 };
+    tower.cost ??= { coins: 0 };
     tower.footprintRadius ??= 1;
     tower.range ??= 1;
     normalizeAttack(tower.attack);
@@ -301,7 +329,7 @@ function normalizeBalance(input) {
     mission.buildTowerIds ??= [];
     mission.abilityIds ??= [];
     mission.startingCoreHp ??= balance.constants.startingCoreHp ?? 1;
-    mission.startingResources ??= balance.constants.startingResources ?? { coins: balance.constants.startingCoins ?? 0, oakRoots: 0 };
+    mission.startingResources ??= balance.constants.startingResources ?? { coins: balance.constants.startingCoins ?? 0 };
     mission.prepTimeUnits ??= balance.constants.prepTimeUnits ?? 0;
     if (mission.sunlightModifier && !mission.sunlight) {
       mission.sunlight = mission.sunlightModifier;
@@ -312,9 +340,30 @@ function normalizeBalance(input) {
   return balance;
 }
 
+const DEFAULT_PRIMARY_CURRENCY = { id: "coins", label: "Coins", color: 0xf5c542 };
+
+/** Normalize the project currency registry: dedupe by id, default labels, guarantee a primary `coins`. */
+function normalizeCurrencies(input) {
+  const list = Array.isArray(input) ? input : [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of list) {
+    if (!entry || typeof entry.id !== "string" || !entry.id || seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    const currency = { id: entry.id, label: typeof entry.label === "string" && entry.label ? entry.label : entry.id };
+    if (entry.color !== undefined) currency.color = normalizeColor(entry.color);
+    out.push(currency);
+  }
+  if (!seen.has("coins")) out.unshift({ ...DEFAULT_PRIMARY_CURRENCY });
+  // coins is the primary currency — keep it first so HUD/UI order is consistent.
+  const coinsIndex = out.findIndex((c) => c.id === "coins");
+  if (coinsIndex > 0) out.unshift(out.splice(coinsIndex, 1)[0]);
+  return out;
+}
+
 function normalizeAttack(attack) {
   if (!attack) return;
-  if (attack.kind === "chanterelle") {
+  if (attack.kind === "antiair") {
     attack.maxTargetsByLevel ??= [1, 2, 3, 4];
     attack.upgradeCosts ??= [];
   }
@@ -455,12 +504,67 @@ function summarizeWaves(waves, enemies) {
   });
 }
 
-function countEvents(events) {
-  const counts = {};
-  for (const event of events) {
+function recordEvents(counts, timeline, events, elapsed, maxTimelineEvents) {
+  for (const event of events ?? []) {
     counts[event.type] = (counts[event.type] ?? 0) + 1;
+    if (timeline.length < maxTimelineEvents) {
+      timeline.push(summarizeEvent(event, elapsed));
+    }
   }
-  return counts;
+}
+
+function summarizeEvent(event, elapsed) {
+  const entry = { at: elapsed, type: event.type };
+  for (const key of ["enemyId", "enemyTypeId", "towerId", "towerTypeId", "waveIndex", "damage", "coins", "resources"]) {
+    if (event[key] !== undefined) entry[key] = event[key];
+  }
+  return entry;
+}
+
+function recordResourceSample(samples, snapshot, elapsed, maxSamples) {
+  if (samples.length >= maxSamples) return;
+  const last = samples[samples.length - 1];
+  const serialized = JSON.stringify(snapshot.resources ?? {});
+  if (last && JSON.stringify(last.resources ?? {}) === serialized && last.coreHp === snapshot.coreHp && last.waveIndex === snapshot.waveIndex) return;
+  samples.push({
+    at: elapsed,
+    coreHp: snapshot.coreHp,
+    waveIndex: snapshot.waveIndex,
+    resources: snapshot.resources
+  });
+}
+
+function recordMilestones(milestones, snapshot, elapsed, targets) {
+  while (milestones.length < targets.length && elapsed + 0.0001 >= targets[milestones.length]) {
+    milestones.push(summarizeSnapshot(snapshot, elapsed, milestones.length === 0 ? "start" : `${Math.round((targets[milestones.length] / targets[targets.length - 1]) * 100)}%`));
+  }
+}
+
+function recordFinalMilestone(milestones, snapshot, elapsed) {
+  const last = milestones[milestones.length - 1];
+  if (!last || last.at !== elapsed || last.outcome !== snapshot.outcome) {
+    milestones.push(summarizeSnapshot(snapshot, elapsed, snapshot.outcome === "playing" ? "final" : snapshot.outcome));
+  }
+}
+
+function summarizeSnapshot(snapshot, elapsed, label) {
+  return {
+    label,
+    at: elapsed,
+    outcome: snapshot.outcome,
+    coreHp: snapshot.coreHp,
+    resources: snapshot.resources,
+    waveIndex: snapshot.waveIndex,
+    startedWaveCount: snapshot.startedWaveCount,
+    activeEnemies: snapshot.enemies.length,
+    towersBuilt: snapshot.towers.length
+  };
+}
+
+function nextValidActionsForSmoke(snapshot) {
+  if (snapshot.outcome === "victory") return ["balance_report", "build_project"];
+  if (snapshot.outcome === "defeat") return ["balance_report", "inspect_wave_pressure", "apply_validated_patch"];
+  return ["simulate_mission_longer", "balance_report", "validate_project"];
 }
 
 function structuredCloneCompat(value) {

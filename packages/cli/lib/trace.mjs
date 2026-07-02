@@ -10,7 +10,7 @@ export function printJson(data) {
 }
 
 export function writeRunTrace(projectDir, event) {
-  const runsDir = path.join(projectDir, ".mycelium", "runs");
+  const runsDir = path.join(projectDir, ".towerforge", "runs");
   fs.mkdirSync(runsDir, { recursive: true });
   const day = new Date().toISOString().slice(0, 10);
   const filePath = path.join(runsDir, `${day}.jsonl`);

@@ -1,6 +1,6 @@
 import { type GameContentRegistry } from "../content/registry.js";
 import { hexDistance } from "./hex.js";
-import { MushroomDefenseGame } from "./MushroomDefenseGame.js";
+import { TowerDefenseGame } from "./TowerDefenseGame.js";
 import type { GameSnapshot, HexCoord } from "./types.js";
 
 /**
@@ -18,11 +18,14 @@ export interface BalanceStrategy {
   label: string;
   towerIds: string[];
   upgrade: boolean;
+  placement: "near_path" | "far_path" | "near_core";
+  rebuildInterval: number;
 }
 
 export interface StrategyResult {
   strategyId: string;
   label: string;
+  strategy: BalanceStrategy;
   outcome: GameSnapshot["outcome"];
   win: boolean;
   coreHpRemaining: number; // 0..1
@@ -67,8 +70,10 @@ export interface BalanceSweepOptions {
 }
 
 export function runBalanceSweep(content: GameContentRegistry, options: BalanceSweepOptions = {}): BalanceReport {
-  const simSeconds = options.simSeconds ?? 600;
-  const tickStep = options.tickStep ?? 0.25;
+  // Clamp at the source so every call site (CLI/MCP/Studio) is bounded: a non-positive or absurd
+  // value can otherwise hang the loop (tickStep <= 0) or run effectively forever (huge simSeconds).
+  const simSeconds = options.simSeconds && options.simSeconds > 0 ? Math.min(options.simSeconds, 3600) : 600;
+  const tickStep = options.tickStep && options.tickStep > 0 ? Math.max(0.05, Math.min(options.tickStep, 1)) : 0.25;
   const missionIds = options.missionIds?.length ? options.missionIds : Object.keys(content.missions);
 
   const missions: MissionBalance[] = [];
@@ -95,10 +100,47 @@ export function runBalanceSweep(content: GameContentRegistry, options: BalanceSw
 function buildStrategies(available: string[], max?: number): BalanceStrategy[] {
   const strategies: BalanceStrategy[] = [];
   for (const id of available) {
-    strategies.push({ id: `solo_${id}`, label: `Only ${id}`, towerIds: [id], upgrade: true });
+    strategies.push({
+      id: `solo_${id}`,
+      label: `Only ${id}`,
+      towerIds: [id],
+      upgrade: true,
+      placement: "near_path",
+      rebuildInterval: 2
+    });
   }
-  strategies.push({ id: "all_flat", label: "All towers, no upgrades", towerIds: available, upgrade: false });
-  strategies.push({ id: "all_upgrade", label: "All towers, upgraded", towerIds: available, upgrade: true });
+  strategies.push({
+    id: "all_flat",
+    label: "All towers, no upgrades",
+    towerIds: available,
+    upgrade: false,
+    placement: "near_path",
+    rebuildInterval: 2
+  });
+  strategies.push({
+    id: "all_upgrade",
+    label: "All towers, upgraded",
+    towerIds: available,
+    upgrade: true,
+    placement: "near_path",
+    rebuildInterval: 2
+  });
+  strategies.push({
+    id: "all_far_path",
+    label: "All towers, far from path",
+    towerIds: available,
+    upgrade: true,
+    placement: "far_path",
+    rebuildInterval: 4
+  });
+  strategies.push({
+    id: "all_core_guard",
+    label: "All towers near core",
+    towerIds: available,
+    upgrade: true,
+    placement: "near_core",
+    rebuildInterval: 3
+  });
   return typeof max === "number" ? strategies.slice(0, Math.max(1, max)) : strategies;
 }
 
@@ -109,7 +151,7 @@ function runStrategy(
   simSeconds: number,
   tickStep: number
 ): StrategyResult {
-  const game = new MushroomDefenseGame({ missionId, content });
+  const game = new TowerDefenseGame({ missionId, content });
   const towerCounts: Record<string, number> = {};
 
   placeTowers(game, strategy, towerCounts);
@@ -125,7 +167,7 @@ function runStrategy(
     if (elapsed >= nextBuildAt) {
       placeTowers(game, strategy, towerCounts);
       if (strategy.upgrade) upgradeAll(game);
-      nextBuildAt = elapsed + 2;
+      nextBuildAt = elapsed + strategy.rebuildInterval;
     }
     elapsed += tickStep;
   }
@@ -134,6 +176,7 @@ function runStrategy(
   return {
     strategyId: strategy.id,
     label: strategy.label,
+    strategy: { ...strategy, towerIds: [...strategy.towerIds] },
     outcome: snap.outcome,
     win: snap.outcome === "victory",
     coreHpRemaining: snap.maxCoreHp > 0 ? Math.max(0, snap.coreHp) / snap.maxCoreHp : 0,
@@ -144,7 +187,7 @@ function runStrategy(
   };
 }
 
-function placeTowers(game: MushroomDefenseGame, strategy: BalanceStrategy, counts: Record<string, number>): void {
+function placeTowers(game: TowerDefenseGame, strategy: BalanceStrategy, counts: Record<string, number>): void {
   let placedAny = true;
   let guard = 0;
   while (placedAny && guard < 80) {
@@ -154,7 +197,7 @@ function placeTowers(game: MushroomDefenseGame, strategy: BalanceStrategy, count
     if (snap.outcome !== "playing") return;
     const buildable = snap.tiles
       .filter((tile) => tile.terrain === "buildable" && !tile.occupiedBy)
-      .sort((a, b) => distanceToPath(a, snap.pathCenterline) - distanceToPath(b, snap.pathCenterline));
+      .sort((a, b) => comparePlacement(a, b, snap, strategy.placement));
     for (const towerId of strategy.towerIds) {
       if (!game.canPlaceTowerAnywhere(towerId).ok) continue;
       for (const tile of buildable) {
@@ -168,7 +211,13 @@ function placeTowers(game: MushroomDefenseGame, strategy: BalanceStrategy, count
   }
 }
 
-function upgradeAll(game: MushroomDefenseGame): void {
+function comparePlacement(a: HexCoord, b: HexCoord, snap: GameSnapshot, placement: BalanceStrategy["placement"]): number {
+  if (placement === "far_path") return distanceToPath(b, snap.pathCenterline) - distanceToPath(a, snap.pathCenterline);
+  if (placement === "near_core") return hexDistance(a, snap.coreCoord) - hexDistance(b, snap.coreCoord);
+  return distanceToPath(a, snap.pathCenterline) - distanceToPath(b, snap.pathCenterline);
+}
+
+function upgradeAll(game: TowerDefenseGame): void {
   for (const tower of game.towers) {
     let guard = 0;
     while (guard < 4 && game.upgradeTower(tower.id).ok) guard += 1;
@@ -233,7 +282,10 @@ function diagnose(
     });
   }
 
-  if (soloWinners.length === 1) {
+  // Only "dominant" if there were genuine alternatives to lose to — a mission with a single
+  // buildable tower trivially has one solo winner and must not be flagged.
+  const soloTotal = results.filter((r) => r.strategyId.startsWith("solo_")).length;
+  if (soloWinners.length === 1 && soloTotal > 1) {
     flags.push({
       severity: "warning",
       code: "dominant_tower",

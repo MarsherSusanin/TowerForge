@@ -1,4 +1,4 @@
-// validate.mjs — Validate a .tdproj project's content files with @mycelium/engine.
+// validate.mjs — Validate a .tdproj project's content files with @towerforge/engine.
 // Usage: node validate.mjs [--project <path>] | PROJECT_DIR=<path> node validate.mjs
 import process from "node:process";
 import { resolveProjectDir, validateProjectDir } from "./lib/project-loader.mjs";

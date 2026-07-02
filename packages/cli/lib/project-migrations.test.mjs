@@ -26,6 +26,68 @@ describe("project migrations", () => {
     expect(migrations.map((migration) => migration.id)).toContain("visual-catalog-v1");
   });
 
+  it("maps legacy mushroom-themed attack kinds, fields, and armor to generic names", () => {
+    const { files, migrations } = migrateProjectFiles({
+      manifest: { schemaVersion: 1 },
+      balance: {
+        towers: {
+          arrow: { attack: { kind: "honey", damagePerMushroom: 1, startingMushrooms: 3, maxMushrooms: 8 } },
+          fungus: { attack: { kind: "chaga", sporeDamagePerUnit: 2, sporeDuration: 30 } },
+          sniper: { attack: { kind: "oak_bolete", interval: 2 } },
+          flak: { attack: { kind: "chanterelle", damage: 4 } },
+          mortar: { attack: { kind: "slippery_jack", splashDamage: 2 } }
+        },
+        enemies: {
+          brute: { id: "brute", maxHp: 80, armor: { kind: "oak_bolete_only" } }
+        }
+      }
+    });
+
+    expect(files.balance.towers.arrow.attack).toEqual({
+      kind: "single",
+      damagePerStack: 1,
+      startingStacks: 3,
+      maxStacks: 8
+    });
+    expect(files.balance.towers.fungus.attack).toEqual({
+      kind: "pulse",
+      dotDamagePerUnit: 2,
+      dotDuration: 30
+    });
+    expect(files.balance.towers.sniper.attack.kind).toBe("sniper");
+    expect(files.balance.towers.flak.attack.kind).toBe("antiair");
+    expect(files.balance.towers.mortar.attack.kind).toBe("splash");
+    expect(files.balance.enemies.brute.armor.kind).toBe("pierce_only");
+
+    const ids = migrations.map((migration) => migration.id);
+    expect(ids).toContain("attack-kind-taxonomy");
+    expect(ids).toContain("attack-field-taxonomy");
+    expect(ids).toContain("armor-kind-taxonomy");
+  });
+
+  it("declares a currency registry for legacy projects that only implied currencies via bags", () => {
+    const { files, migrations } = migrateProjectFiles({
+      manifest: { schemaVersion: 1 },
+      balance: {
+        constants: { startingResources: { coins: 100, oakRoots: 5 }, moveTowerCost: { coins: 1 } },
+        towers: { t: { attack: { kind: "single" }, cost: { coins: 50, oakRoots: 1 } } },
+        enemies: { e: { reward: { coins: 5, oakRoots: 1 } } },
+        missions: { m: { startingResources: { coins: 100, oakRoots: 5 } } }
+      }
+    });
+
+    expect(files.balance.currencies).toEqual([
+      { id: "coins", label: "Coins" },
+      { id: "oakRoots", label: "Oak Roots" }
+    ]);
+    expect(migrations.map((m) => m.id)).toContain("currency-registry");
+
+    // Idempotent: a project that already declares its currencies is left untouched.
+    const again = migrateProjectFiles(files);
+    expect(again.files.balance.currencies).toEqual(files.balance.currencies);
+    expect(again.migrations.map((m) => m.id)).not.toContain("currency-registry");
+  });
+
   it("tags legacy oak_stump enemies as path blockers", () => {
     const { files, migrations } = migrateProjectFiles({
       manifest: { schemaVersion: 1 },

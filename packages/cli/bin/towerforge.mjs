@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-// mycelium — Mycelium CLI for .tdproj projects.
+// towerforge — TowerForge CLI for .tdproj projects.
 //
 // Commands:
-//   mycelium validate [--project <path>]
-//   mycelium sim <missionId> [duration] [--project <path>]
-//   mycelium build [--project <path>] [--target <targetId>]
-//   mycelium maps:compile [--project <path>]
-//   mycelium migrate [--project <path>] [--write]
-//   mycelium studio [--project <path>] [--port <port>]
-//   mycelium create <name> [--dir <path>]
+//   towerforge validate [--project <path>]
+//   towerforge sim <missionId> [duration] [--project <path>]
+//   towerforge build [--project <path>] [--target <targetId>]
+//   towerforge maps:compile [--project <path>]
+//   towerforge migrate [--project <path>] [--write]
+//   towerforge studio [--project <path>] [--port <port>]
+//   towerforge create <name> [--dir <path>]
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,22 +20,23 @@ const cliDir = path.resolve(__dirname, "..");
 const studioScript = path.resolve(cliDir, "../studio/server.mjs");
 const mcpScript = path.resolve(cliDir, "../mcp/server.mjs");
 
-const COMMANDS = ["validate", "sim", "balance", "build", "maps:compile", "migrate", "studio", "create", "mcp"];
+const COMMANDS = ["validate", "sim", "balance", "build", "package", "maps:compile", "migrate", "studio", "create", "mcp"];
 
 const [, , cmd, ...rest] = process.argv;
 
 function usage() {
   console.log(`
-Mycelium CLI — tools for .tdproj projects.
+TowerForge CLI — tools for .tdproj projects.
 
 Usage:
-  mycelium <command> [options]
+  towerforge <command> [options]
 
 Commands:
   validate              Validate project content files.
   sim <missionId>       Run a headless mission smoke simulation.
   balance               Simulation-driven balance report (win-rate, advisor flags).
   build                 Build a playable static web bundle.
+  package               Wrap the web build into a native app (--kind mobile|desktop).
   maps:compile          Compile maps/src/*.tmj into maps/compiled/maps.json.
   migrate               Inspect or write .tdproj schema migrations.
   studio                Launch the visual studio editor.
@@ -61,16 +62,16 @@ Options for build:
   --out <dir>           Output directory inside the project.
 
 Options for migrate:
-  --write               Persist migrated files and create .mycelium backups.
+  --write               Persist migrated files and create .towerforge backups.
 
 Examples:
-  mycelium validate --project ./my-game.tdproj
-  mycelium sim meadow_01 --project ./my-game.tdproj
-  mycelium build --project ./my-game.tdproj --target web-pwa
-  mycelium maps:compile --project ./my-game.tdproj
-  mycelium migrate --project ./my-game.tdproj --write
-  mycelium studio --project ./my-game.tdproj --port 3000
-  mycelium create my-game --dir ~/Projects
+  towerforge validate --project ./my-game.tdproj
+  towerforge sim meadow_01 --project ./my-game.tdproj
+  towerforge build --project ./my-game.tdproj --target web-pwa
+  towerforge maps:compile --project ./my-game.tdproj
+  towerforge migrate --project ./my-game.tdproj --write
+  towerforge studio --project ./my-game.tdproj --port 3000
+  towerforge create my-game --dir ~/Projects
 `.trim());
 }
 
@@ -82,7 +83,7 @@ if (!cmd || cmd === "--help" || cmd === "-h") {
 if (!COMMANDS.includes(cmd)) {
   console.error(`Unknown command: "${cmd}"`);
   console.error(`Available commands: ${COMMANDS.join(", ")}`);
-  console.error(`Run "mycelium --help" for usage.`);
+  console.error(`Run "towerforge --help" for usage.`);
   process.exit(1);
 }
 
@@ -117,6 +118,10 @@ if (cmd === "balance") {
 
 if (cmd === "build") {
   runScript(path.join(cliDir, "build.mjs"), rest);
+}
+
+if (cmd === "package") {
+  runScript(path.join(cliDir, "package.mjs"), rest);
 }
 
 if (cmd === "maps:compile") {

@@ -28,6 +28,9 @@ export function importProjectAsset(projectDir, visuals, request) {
   updatedVisuals.sprites ??= {};
   updatedVisuals.atlases ??= {};
   updatedVisuals.bindings ??= { towers: {}, enemies: {}, tiles: {}, ui: {} };
+  updatedVisuals.audio ??= { sounds: {}, events: {} };
+  updatedVisuals.audio.sounds ??= {};
+  updatedVisuals.audio.events ??= {};
 
   const id = request?.id || path.basename(targetRel, path.extname(targetRel)).replace(/[^a-zA-Z0-9_-]+/g, "_");
   const kind = request?.kind || "sprite";
@@ -37,6 +40,11 @@ export function importProjectAsset(projectDir, visuals, request) {
       src: assetRelPath,
       columns: Number(request?.columns ?? updatedVisuals.atlases[id]?.columns ?? 1),
       rows: Number(request?.rows ?? updatedVisuals.atlases[id]?.rows ?? 1)
+    };
+  } else if (kind === "sound") {
+    updatedVisuals.audio.sounds[id] = {
+      ...(updatedVisuals.audio.sounds[id] ?? {}),
+      src: assetRelPath
     };
   } else {
     updatedVisuals.sprites[id] = {

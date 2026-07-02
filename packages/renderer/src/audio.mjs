@@ -4,16 +4,42 @@
 // from a snapshot's `lastEvents`. Events are coalesced per frame so rapid fire doesn't turn into a
 // cacophony. The AudioContext is created lazily and resumed on the first user gesture.
 
+/** Canonical list of game actions that can carry a sound (synth default, overridable per project). */
+export const AUDIO_EVENTS = [
+  { id: "towerPlaced", label: "Place tower" },
+  { id: "towerUpgraded", label: "Upgrade tower" },
+  { id: "towerFired", label: "Tower fires" },
+  { id: "enemyHit", label: "Enemy hit" },
+  { id: "enemyKilled", label: "Enemy killed" },
+  { id: "enemyLeaked", label: "Enemy leaks (core hit)" },
+  { id: "areaPulse", label: "Area pulse" },
+  { id: "waveStarted", label: "Wave starts" },
+  { id: "victory", label: "Victory" },
+  { id: "defeat", label: "Defeat" }
+];
+
 export function createAudioPlayer(options = {}) {
-  return new MyceliumAudio(options);
+  return new TowerForgeAudio(options);
 }
 
-export class MyceliumAudio {
+export class TowerForgeAudio {
   constructor(options = {}) {
     this.enabled = options.enabled !== false;
     this.volume = typeof options.volume === "number" ? options.volume : 0.5;
     this.ctx = null;
     this.master = null;
+    // Custom-sound catalog: { sounds: { id: { src } }, events: { eventType: soundId } }
+    this.audio = options.audio || null;
+    this.assetBase = options.assetBase ?? "";
+    this.buffers = new Map(); // src -> decoded AudioBuffer
+    this.loading = new Set();
+  }
+
+  /** Swap the custom-sound catalog (e.g. when the project is re-loaded in the Studio playtest). */
+  setCatalog(audio, assetBase) {
+    this.audio = audio || null;
+    if (typeof assetBase === "string") this.assetBase = assetBase;
+    this.preload();
   }
 
   setEnabled(enabled) {
@@ -25,6 +51,77 @@ export class MyceliumAudio {
   resume() {
     this.ensureContext();
     if (this.ctx && this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
+    this.preload();
+  }
+
+  // ── custom sounds ──────────────────────────────────────────────────────────
+  eventSrc(eventType) {
+    const soundId = this.audio && this.audio.events ? this.audio.events[eventType] : null;
+    if (!soundId) return null;
+    const sound = this.audio.sounds ? this.audio.sounds[soundId] : null;
+    return sound && typeof sound.src === "string" ? sound.src : null;
+  }
+  assetUrl(src) {
+    return this.assetBase + String(src).split("/").map(encodeURIComponent).join("/");
+  }
+  async preload() {
+    if (!this.audio || !this.audio.events) return;
+    this.ensureContext();
+    if (!this.ctx || typeof globalThis.fetch !== "function") return;
+    const srcs = new Set();
+    for (const eventType of Object.keys(this.audio.events)) { const s = this.eventSrc(eventType); if (s) srcs.add(s); }
+    for (const src of srcs) {
+      if (this.buffers.has(src) || this.loading.has(src)) continue;
+      this.loading.add(src);
+      try {
+        const res = await globalThis.fetch(this.assetUrl(src));
+        const arr = await res.arrayBuffer();
+        this.buffers.set(src, await this.ctx.decodeAudioData(arr));
+      } catch { /* keep the synth fallback */ }
+      this.loading.delete(src);
+    }
+  }
+  playBuffer(buffer, delay = 0) {
+    const t0 = this.ctx.currentTime + delay;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(this.master);
+    src.start(t0);
+  }
+  /** Decode and play an arbitrary asset once (used by the Studio preview button). */
+  async previewSound(src) {
+    this.resume();
+    if (!this.ctx) return;
+    let buffer = this.buffers.get(src);
+    if (!buffer) {
+      try {
+        const res = await globalThis.fetch(this.assetUrl(src));
+        buffer = await this.ctx.decodeAudioData(await res.arrayBuffer());
+        this.buffers.set(src, buffer);
+      } catch { return; }
+    }
+    this.playBuffer(buffer);
+  }
+  /** Play the bound custom sound for an action, falling back to the synth default. */
+  playFor(eventType, delay = 0) {
+    const src = this.eventSrc(eventType);
+    if (src) { const buffer = this.buffers.get(src); if (buffer) { this.playBuffer(buffer, delay); return; } }
+    this.synth(eventType, delay);
+  }
+  synth(eventType, delay = 0) {
+    switch (eventType) {
+      case "towerPlaced": this.tone({ freq: 300, glideTo: 200, type: "sine", dur: 0.12, gain: 0.12, delay }); break;
+      case "towerUpgraded": this.tone({ freq: 520, glideTo: 920, type: "triangle", dur: 0.16, gain: 0.14, delay }); break;
+      case "towerFired": this.shoot(delay); break;
+      case "enemyHit": this.tick(delay); break;
+      case "enemyKilled": this.pop(delay); break;
+      case "enemyLeaked": this.thud(delay); break;
+      case "areaPulse": this.sweep(delay); break;
+      case "waveStarted": this.horn(delay); break;
+      case "victory": this.victory(delay); break;
+      case "defeat": this.defeat(delay); break;
+      default: break;
+    }
   }
 
   ensureContext() {
@@ -37,30 +134,28 @@ export class MyceliumAudio {
     this.master.connect(this.ctx.destination);
   }
 
-  /** Coalesce a frame's events into a small set of sounds and play them. */
+  /** Coalesce a frame's events into a small set of sounds and play them (custom-or-synth). */
   handleEvents(events) {
     if (!this.enabled || !events || !events.length) return;
     this.ensureContext();
     if (!this.ctx) return;
-    let fired = false, hit = false, kills = 0, leak = false, pulse = false;
+    let fired = false, hit = false, kills = 0;
+    const once = new Set();
     for (const ev of events) {
       switch (ev.type) {
         case "towerFired": fired = true; break;
         case "enemyHit": hit = true; break;
         case "enemyKilled": kills += 1; break;
-        case "enemyLeaked": leak = true; break;
-        case "chagaPulse": pulse = true; break;
-        case "waveStarted": this.horn(); break;
-        case "victory": this.victory(); break;
-        case "defeat": this.defeat(); break;
+        case "towerPlaced": case "towerUpgraded": case "enemyLeaked":
+        case "areaPulse": case "waveStarted": case "victory": case "defeat":
+          once.add(ev.type); break;
         default: break;
       }
     }
-    if (fired) this.shoot();
-    if (hit && !fired) this.tick();
-    if (pulse) this.sweep();
-    for (let i = 0; i < Math.min(kills, 3); i += 1) this.pop(i * 0.04);
-    if (leak) this.thud();
+    if (fired) this.playFor("towerFired");
+    if (hit && !fired) this.playFor("enemyHit");
+    for (let i = 0; i < Math.min(kills, 3); i += 1) this.playFor("enemyKilled", i * 0.04);
+    for (const eventType of once) this.playFor(eventType);
   }
 
   // ── synth primitives ─────────────────────────────────────────────────────────
@@ -94,13 +189,13 @@ export class MyceliumAudio {
     src.start(t0); src.stop(t0 + dur + 0.02);
   }
 
-  // ── event sounds ─────────────────────────────────────────────────────────────
-  shoot() { this.tone({ freq: 720, glideTo: 360, type: "square", dur: 0.08, gain: 0.12 }); }
-  tick() { this.tone({ freq: 520, type: "triangle", dur: 0.05, gain: 0.06 }); }
+  // ── default synth sounds (delay lets coalesced bursts stagger) ───────────────
+  shoot(delay = 0) { this.tone({ freq: 720, glideTo: 360, type: "square", dur: 0.08, gain: 0.12, delay }); }
+  tick(delay = 0) { this.tone({ freq: 520, type: "triangle", dur: 0.05, gain: 0.06, delay }); }
   pop(delay = 0) { this.tone({ freq: 380, glideTo: 760, type: "triangle", dur: 0.1, gain: 0.16, delay }); this.tone({ freq: 1180, type: "sine", dur: 0.12, gain: 0.1, delay: delay + 0.03 }); }
-  thud() { this.tone({ freq: 150, glideTo: 60, type: "sine", dur: 0.28, gain: 0.32 }); this.noise({ dur: 0.18, gain: 0.12, freq: 220 }); }
-  sweep() { this.noise({ dur: 0.32, gain: 0.1, freq: 900 }); this.tone({ freq: 300, glideTo: 900, type: "sine", dur: 0.3, gain: 0.08 }); }
-  horn() { this.tone({ freq: 330, type: "sawtooth", dur: 0.22, gain: 0.16 }); this.tone({ freq: 440, type: "sawtooth", dur: 0.22, gain: 0.12, delay: 0.06 }); }
-  victory() { [523, 659, 784, 1047].forEach((f, i) => this.tone({ freq: f, type: "triangle", dur: 0.32, gain: 0.2, delay: i * 0.12 })); }
-  defeat() { [330, 247, 165].forEach((f, i) => this.tone({ freq: f, type: "sawtooth", dur: 0.45, gain: 0.22, delay: i * 0.16 })); }
+  thud(delay = 0) { this.tone({ freq: 150, glideTo: 60, type: "sine", dur: 0.28, gain: 0.32, delay }); this.noise({ dur: 0.18, gain: 0.12, freq: 220, delay }); }
+  sweep(delay = 0) { this.noise({ dur: 0.32, gain: 0.1, freq: 900, delay }); this.tone({ freq: 300, glideTo: 900, type: "sine", dur: 0.3, gain: 0.08, delay }); }
+  horn(delay = 0) { this.tone({ freq: 330, type: "sawtooth", dur: 0.22, gain: 0.16, delay }); this.tone({ freq: 440, type: "sawtooth", dur: 0.22, gain: 0.12, delay: delay + 0.06 }); }
+  victory(delay = 0) { [523, 659, 784, 1047].forEach((f, i) => this.tone({ freq: f, type: "triangle", dur: 0.32, gain: 0.2, delay: delay + i * 0.12 })); }
+  defeat(delay = 0) { [330, 247, 165].forEach((f, i) => this.tone({ freq: f, type: "sawtooth", dur: 0.45, gain: 0.22, delay: delay + i * 0.16 })); }
 }

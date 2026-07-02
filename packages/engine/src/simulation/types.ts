@@ -2,22 +2,37 @@ export type Terrain = "buildable" | "path" | "blocked" | "core" | "spawn" | "wat
 export type Outcome = "playing" | "victory" | "defeat";
 export type WaveState = "ready" | "spawning" | "between" | "complete";
 export type TowerAttackKind =
-  | "honey"
-  | "chaga"
-  | "oak_bolete"
-  | "chanterelle"
-  | "slippery_jack"
+  | "single"
+  | "pulse"
+  | "sniper"
+  | "antiair"
+  | "splash"
   | "support"
   | "support_buff";
-export type ResourceId = "coins" | "oakRoots";
+// Currencies are author-defined. "coins" is the conventional primary currency that always
+// exists, but a project may declare any number of additional currencies (see CurrencyDefinition).
+export type ResourceId = "coins" | (string & {});
 export type EnemyMovementKind = "path" | "direct_flying";
 export type EnemyTargetClass = "ground" | "flying";
 export type TowerTargetMode = "fastest_ahead" | "largest_hp";
-export type MissionAbilityId = "path_water";
+/**
+ * Author-defined (open, like `ResourceId`). Three ids are engine-implemented presets that need
+ * no `effects` declaration: `path_water` (a bespoke path-tile terrain effect, routed to its own
+ * handler), `strike` (a `damage` effect preset), and `freeze` (a `status: {stun}` effect preset).
+ * Any other id must declare `MissionAbilityDefinition.effects` — see `AbilityEffect`.
+ */
+export type MissionAbilityId = string;
 
-export type ResourceBag = Record<ResourceId, number>;
+export type ResourceBag = Record<string, number>;
 
-export type ResourceCost = Partial<ResourceBag>;
+export type ResourceCost = Record<string, number>;
+
+/** A spendable currency. `coins` is the required primary; any number of others may be added. */
+export interface CurrencyDefinition {
+  id: string;
+  label: string;
+  color?: number;
+}
 
 export interface HexCoord {
   q: number;
@@ -51,7 +66,7 @@ export interface EnemyPhaseSpawnDefinition {
 }
 
 export interface EnemyArmorDefinition {
-  kind: "oak_bolete_only";
+  kind: "pierce_only";
   chipDamageByTowerId?: Record<string, number>;
 }
 
@@ -86,46 +101,97 @@ export interface EnemyType {
   phaseSpawns?: EnemyPhaseSpawnDefinition[];
   armor?: EnemyArmorDefinition;
   healAura?: EnemyHealAuraDefinition;
+  /**
+   * Per-damage-type multipliers applied to incoming tower damage (e.g. `{ fire: 0.5, ice: 2 }` =
+   * takes half fire, double ice). Author-defined type ids; any type not listed defaults to 1.
+   */
+  resistances?: Record<string, number>;
+  /**
+   * Boss pattern: every `interval` time-units, temporarily disables (silences) towers within
+   * `radius` hexes for `duration` time-units — they cannot fire while disabled.
+   */
+  towerDisrupt?: EnemyTowerDisruptDefinition;
+  /**
+   * Boss pattern: every `interval` time-units, deals `damage` to the nearest tower within `range`
+   * hexes — a tower with `maxHp` is destroyed when its hp reaches 0 (freeing its tile).
+   */
+  towerAttack?: EnemyTowerAttackDefinition;
 }
 
-export interface HoneyAttackModel {
-  kind: "honey";
+export interface EnemyTowerAttackDefinition {
+  interval: number;
+  damage: number;
+  range: number;
+}
+
+export interface EnemyTowerDisruptDefinition {
+  interval: number;
+  radius: number;
+  duration: number;
+}
+
+/**
+ * Composable delivery modifier: after a landed hit, the shot jumps hop-by-hop to the nearest
+ * not-yet-hit ground enemy within `jumpRadius` of the last-hit enemy, up to `maxJumps` extra
+ * hits, each hop's damage multiplied by `damageFalloff^hop`. Reuses the same damage-resolution
+ * pipeline as the primary hit (resistances/armor/statusOnHit all ride along automatically).
+ * The first genuinely composable tower capability — additive; a `single` tower with no `chain`
+ * behaves exactly as before.
+ */
+export interface ChainDeliverySpec {
+  maxJumps: number;
+  jumpRadius: number;
+  damageFalloff: number;
+}
+
+export interface SingleAttackModel {
+  kind: "single";
+  damageType?: string;
   fireRate: number;
-  damagePerMushroom: number;
-  startingMushrooms: number;
-  maxMushrooms: number;
+  damagePerStack: number;
+  startingStacks: number;
+  maxStacks: number;
   upgradeCost: number;
+  statusOnHit?: StatusEffectSpec;
+  chain?: ChainDeliverySpec;
 }
 
-export interface ChagaAttackModel {
-  kind: "chaga";
+export interface PulseAttackModel {
+  kind: "pulse";
+  damageType?: string;
   pulseRate: number;
   pulseRateByLevel?: [number, number, number];
   pulseDamage: number;
-  sporeDamagePerUnit: number;
-  sporeDuration: number;
+  dotDamagePerUnit: number;
+  dotDuration: number;
   upgradeCosts?: ResourceCost[];
+  statusOnHit?: StatusEffectSpec;
 }
 
-export interface OakBoleteAttackModel {
-  kind: "oak_bolete";
+export interface SniperAttackModel {
+  kind: "sniper";
+  damageType?: string;
   interval: number;
   damage: number;
   targetPriority: TowerTargetMode;
   rangeByLevel?: [number, number, number];
   upgradeCosts?: ResourceCost[];
+  statusOnHit?: StatusEffectSpec;
 }
 
-export interface ChanterelleAttackModel {
-  kind: "chanterelle";
+export interface AntiAirAttackModel {
+  kind: "antiair";
+  damageType?: string;
   fireRate: number;
   damage: number;
   maxTargetsByLevel: [number, number, number, number];
   upgradeCosts: ResourceCost[];
+  statusOnHit?: StatusEffectSpec;
 }
 
-export interface SlipperyJackAttackModel {
-  kind: "slippery_jack";
+export interface SplashAttackModel {
+  kind: "splash";
+  damageType?: string;
   interval: number;
   damage: number;
   splashDamage: number;
@@ -135,6 +201,7 @@ export interface SlipperyJackAttackModel {
   slowDuration: number;
   intervalByLevel?: [number, number, number];
   upgradeCosts?: ResourceCost[];
+  statusOnHit?: StatusEffectSpec;
 }
 
 export interface SupportAttackModel {
@@ -159,13 +226,15 @@ export interface TowerType {
   cost: ResourceCost;
   footprintRadius: number;
   range: number;
+  /** If set, the tower has this much health and can be destroyed by enemy `towerAttack`. Omit = indestructible. */
+  maxHp?: number;
   requiresAuraFrom?: string;
   attack:
-    | HoneyAttackModel
-    | ChagaAttackModel
-    | OakBoleteAttackModel
-    | ChanterelleAttackModel
-    | SlipperyJackAttackModel
+    | SingleAttackModel
+    | PulseAttackModel
+    | SniperAttackModel
+    | AntiAirAttackModel
+    | SplashAttackModel
     | SupportAttackModel
     | SupportBuffAttackModel;
 }
@@ -202,12 +271,31 @@ export interface MissionDefinition {
   sunlight?: MissionSunlightDefinition;
 }
 
+/**
+ * A composable primitive an ability applies to each enemy within its radius. The same shape
+ * `applyStatusEffect` already resolves for a tower's `attack.statusOnHit` — abilities and tower
+ * attacks share one status-effect vocabulary. A custom (non-preset) ability author-declares
+ * `MissionAbilityDefinition.effects` from these; no engine code is needed for a new ability that
+ * only needs damage and/or status effects.
+ */
+export type AbilityEffect = { kind: "damage"; amount: number } | { kind: "status"; status: StatusEffectSpec };
+
 export interface MissionAbilityDefinition {
   id: MissionAbilityId;
   label: string;
   cooldown: number;
   duration: number;
   radius: number;
+  /** `strike` preset only: instant damage dealt to each enemy in radius (falls back for `effects`-less "strike"). */
+  damage?: number;
+  /** `freeze` preset only: seconds each enemy in radius is stunned (falls back to `duration`; used when `effects` is absent). */
+  stunDuration?: number;
+  /**
+   * A custom ability's effect composition, applied to every enemy within `radius` of the target
+   * coord. When present, this takes precedence over the `path_water`/`strike`/`freeze` presets —
+   * an author MAY override a preset id's behavior by declaring `effects` explicitly.
+   */
+  effects?: AbilityEffect[];
 }
 
 export interface MissionSunlightDefinition {
@@ -228,11 +316,11 @@ export interface EnemyState {
   hp: number;
   maxHp: number;
   pathProgress: number;
-  sporeRemaining: number;
-  /** Damage-per-time-unit of the spores currently on this enemy (set by the chaga tower that applied them). */
-  sporeDamagePerUnit?: number;
-  /** Tower type id that applied the active spores, used for armor resolution of lingering spore damage. */
-  sporeSourceTowerTypeId?: string;
+  dotRemaining: number;
+  /** Damage-per-time-unit of the dots currently on this enemy (set by the pulse tower that applied them). */
+  dotDamagePerUnit?: number;
+  /** Tower type id that applied the active dots, used for armor resolution of lingering dot damage. */
+  dotSourceTowerTypeId?: string;
   pathOffset: number;
   routeId?: string;
   phaseSpawnsTriggered?: string[];
@@ -241,7 +329,28 @@ export interface EnemyState {
       factor: number;
       remaining: number;
     };
+    stun?: {
+      remaining: number;
+    };
+    poison?: {
+      dps: number;
+      remaining: number;
+    };
   };
+  /** Time until this enemy's next tower-disrupt pulse (lazily initialized from towerDisrupt.interval). */
+  disruptCooldown?: number;
+  /** Time until this enemy's next tower-attack strike (lazily initialized from towerAttack.interval). */
+  towerAttackCooldown?: number;
+}
+
+/** Data-driven status effects a damaging attack can apply on hit (content-agnostic, composable). */
+export interface StatusEffectSpec {
+  /** Seconds the enemy is frozen in place (movement halts). */
+  stun?: number;
+  /** Multiplicative slow: speed × factor (0–1) for `duration` seconds. Ground enemies only. */
+  slow?: { factor: number; duration: number };
+  /** Damage-over-time: `dps` damage per time-unit for `duration` seconds. */
+  poison?: { dps: number; duration: number };
 }
 
 export interface TowerState {
@@ -251,14 +360,21 @@ export interface TowerState {
   footprint: HexCoord[];
   level: number;
   targetMode?: TowerTargetMode;
-  mushrooms: number;
+  stacks: number;
   cooldown: number;
+  /** Remaining time this tower is disabled (silenced) by an enemy tower-disrupt pulse; 0 = active. */
+  disabledFor?: number;
+  /** Current health if the tower type has `maxHp`; when it reaches 0 the tower is destroyed. */
+  hp?: number;
 }
 
 export type GameEvent =
   | { type: "towerPlaced"; towerId: string; towerTypeId: string }
   | { type: "towerMoved"; towerId: string; from: HexCoord; to: HexCoord; cost: ResourceBag }
-  | { type: "towerUpgraded"; towerId: string; level: number; mushrooms: number }
+  | { type: "towerUpgraded"; towerId: string; level: number; stacks: number }
+  | { type: "towerDisrupted"; enemyId: string; enemyTypeId: string; towerIds: string[]; duration: number }
+  | { type: "towerAttacked"; enemyId: string; enemyTypeId: string; towerId: string; damage: number }
+  | { type: "towerDestroyed"; towerId: string; towerTypeId: string; enemyId: string }
   | { type: "towerTargetModeChanged"; towerId: string; mode: TowerTargetMode }
   | { type: "enemyKilled"; enemyId: string; enemyTypeId: string; coins: number; resources: ResourceBag }
   | {
@@ -282,9 +398,9 @@ export type GameEvent =
       enemyIds: string[];
       hpRatio: number;
     }
-  | { type: "chagaPulse"; towerId: string; enemyIds: string[] }
+  | { type: "areaPulse"; towerId: string; enemyIds: string[] }
   | { type: "waterAbilityUsed"; abilityId: MissionAbilityId; center: HexCoord; coords: HexCoord[]; duration: number }
-  | { type: "oakRootUnlocked"; amount: number }
+  | { type: "abilityUsed"; abilityId: MissionAbilityId; center: HexCoord; enemyIds: string[]; effects: AbilityEffect[] }
   | { type: "victory" }
   | { type: "defeat" };
 

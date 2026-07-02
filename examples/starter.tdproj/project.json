@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "Starter Tower Defense",
-  "description": "A minimal example project for Mycelium Kit",
+  "description": "A minimal example project for TowerForge",
   "engineVersion": "0.1.0",
   "defaultMissionId": "tutorial_01"
 }

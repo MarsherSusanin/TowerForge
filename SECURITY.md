@@ -1,6 +1,6 @@
 # Security
 
-Mycelium Kit treats imported `.tdproj` projects as untrusted local data.
+TowerForge treats imported `.tdproj` projects as untrusted local data.
 
 ## Current Policy
 

@@ -1,7 +1,7 @@
 // tools.mjs — Constructor tool registry shared by the MCP server.
 //
 // Each tool wraps an existing CLI library function so any MCP-capable AI agent gets the same
-// capabilities as the Mycelium CLI and Studio. Kept transport-agnostic (no stdio here) so the
+// capabilities as the TowerForge CLI and Studio. Kept transport-agnostic (no stdio here) so the
 // registry and dispatcher can be unit-tested directly.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import {
+  loadEngine,
   loadProjectFiles,
   projectSummary,
   repoRoot,
@@ -16,16 +17,86 @@ import {
   runMissionSmoke,
   validateProjectDir
 } from "../cli/lib/project-loader.mjs";
-import { compileMapSources, readMapSources, writeCompiledMaps } from "../cli/lib/map-compiler.mjs";
+import { compileMapSource, compileMapSources, readMapSources, writeCompiledMaps, writeMapSource } from "../cli/lib/map-compiler.mjs";
+import { packageProject } from "../cli/lib/packaging.mjs";
+import { validateProjectSchemas } from "../cli/lib/project-schema.mjs";
+import { findEntityReferences } from "../cli/lib/references.mjs";
+import { mergeValidationResults } from "../cli/lib/trace.mjs";
 
-const BALANCE_PATCH_KEYS = ["enemies", "towers", "waveSets", "missions", "abilities", "constants", "defaultMissionId"];
+const BALANCE_PATCH_KEYS = ["enemies", "towers", "waveSets", "missions", "abilities", "constants", "currencies", "defaultMissionId"];
+
+// Maps an upsert_entity/delete_entity `collection` to (a) the balance.json key, (b) the shape
+// (a map keyed by id, or an array of {id,...} items — currencies only), and (c) the
+// findEntityReferences `kind` used for delete_entity's reference check.
+const ENTITY_COLLECTIONS = {
+  towers: { balanceKey: "towers", shape: "map", referenceKind: "tower" },
+  enemies: { balanceKey: "enemies", shape: "map", referenceKind: "enemy" },
+  missions: { balanceKey: "missions", shape: "map", referenceKind: "mission" },
+  abilities: { balanceKey: "abilities", shape: "map", referenceKind: "ability" },
+  waveSets: { balanceKey: "waveSets", shape: "map", referenceKind: "waveSet" },
+  currencies: { balanceKey: "currencies", shape: "array", referenceKind: "currency" }
+};
+
+// A small, hand-curated set of the highest-value validation codes (2.6): every issue already
+// carries an auto-derived `code` (see deriveValidationCode in validate.ts/project-schema.mjs) and,
+// where cheap, its own `hint`/`expected`/`got` — this map adds a runnable EXAMPLE snippet for the
+// codes an agent hits most often when authoring new content. explain_validation falls back to the
+// issue's own fields (or a generic message) for any code not curated here.
+// `hint` is duplicated here (not just left on the ValidationIssue) so a caller who only has a bare
+// `code` string — an explicitly supported call shape, see the explain_validation tool description
+// below — still gets the constraint explanation, not just the example.
+const EXPLAIN_CURATED = {
+  TOWER_ATTACK_KIND: {
+    hint: "attack.kind must be one of the engine-implemented kinds (single, pulse, sniper, antiair, splash, support, support_buff). Call describe_schema to see each kind's required fields.",
+    example: { attack: { kind: "single", fireRate: 1, damagePerStack: 1, startingStacks: 1, maxStacks: 3, upgradeCost: 5 } },
+    seeAlso: "describe_schema"
+  },
+  TOWER_ATTACK_SLOWFACTOR: {
+    hint: "slowFactor multiplies speed (0.5 = half speed) — it must be strictly less than 1, or the enemy wouldn't actually slow down.",
+    // Every field a "splash" attack requires (schema-descriptor.ts) — not just slowFactor/slowDuration
+    // — so this example is actually runnable, not just illustrative of the one field that failed.
+    example: { attack: { kind: "splash", interval: 1.5, damage: 4, splashDamage: 2, armoredChipDamage: 1, splashRadius: 1.5, slowFactor: 0.5, slowDuration: 2 } }
+  },
+  ABILITY_ID: {
+    hint: 'Any ability id is valid once it declares effects: [{kind:"damage", amount} | {kind:"status", status:{stun|slow|poison}}] — no engine code needed.',
+    example: { effects: [{ kind: "damage", amount: 20 }, { kind: "status", status: { slow: { factor: 0.5, duration: 3 } } }] },
+    seeAlso: "describe_schema"
+  }
+};
+
+// Shared input-schema fragment for optimistic-concurrency writes (2.8): pass the `revisions`
+// value read from get_project_summary/validate_project back here to reject the write (a structured
+// conflict result, no file touched) if the project changed underneath the agent since that read —
+// e.g. a human editing the same project live in Studio, or another agent's write.
+const IF_REVISION_PROPERTY = {
+  type: "string",
+  description: "Optional. The revision hash last read (from get_project_summary/validate_project/a prior write's response). If the file has since changed, the write is rejected with {conflict:true} instead of clobbering it."
+};
 
 /** Tool definitions advertised over `tools/list`. */
 export const TOOLS = [
   {
+    name: "describe_schema",
+    description:
+      "Return the machine-readable content schema: every tower attack kind (a closed, engine-implemented set) with required fields; the 3 preset mission abilities (path_water/strike/freeze, usable with no extra fields); and the ability EFFECT vocabulary (damage, status) a CUSTOM ability id (any string) composes via its `effects` array — no engine code needed for a new ability, just declare effects. Also returns the currency-id rule. Call this BEFORE authoring a tower/enemy/ability so the shape is right on the first attempt instead of iterating against validate_project errors.",
+    inputSchema: { type: "object", properties: {} }
+  },
+  {
+    name: "explain_validation",
+    description:
+      "Explain a validation issue: pass either the whole `issue` object from validate_project/dry_run_balance_patch, or just its `code`, and get back the constraint being enforced plus — where curated — a runnable example snippet that satisfies it. Turns a validation failure into a concrete fix instead of a guess-and-retry loop.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "A validation issue's stable `code` (e.g. \"TOWER_ATTACK_SLOWFACTOR\")." },
+        issue: { type: "object", description: "Alternative to `code`: the whole issue object, so its own message/hint/expected/got are echoed back too." }
+      }
+    }
+  },
+  {
     name: "get_project_summary",
     description:
-      "Load and summarize a .tdproj project: manifest, constants, counts of missions/enemies/towers/maps, and applied schema migrations.",
+      "Load and summarize a .tdproj project: manifest, constants, counts of missions/enemies/towers/maps, applied schema migrations, and content-hash revisions (pass one back as ifRevision on a write tool to guard against a concurrent edit).",
     inputSchema: {
       type: "object",
       properties: { projectDir: { type: "string", description: "Path to the .tdproj directory. Defaults to the server's project." } }
@@ -42,7 +113,7 @@ export const TOOLS = [
   {
     name: "validate_project",
     description:
-      "Run the full project validation (schema-level checks plus engine cross-reference and numeric guards). Returns the list of errors and warnings.",
+      "Run the full project validation (schema-level checks plus engine cross-reference and numeric guards). Returns the list of errors and warnings, plus content-hash revisions for optimistic-concurrency writes.",
     inputSchema: {
       type: "object",
       properties: { projectDir: { type: "string", description: "Path to the .tdproj directory." } }
@@ -70,6 +141,15 @@ export const TOOLS = [
     }
   },
   {
+    name: "compile_maps_dry_run",
+    description: "Compile maps/src/*.tmj in memory and return compiled map ids and issues without writing maps/compiled/maps.json.",
+    inputSchema: {
+      type: "object",
+      properties: { projectDir: { type: "string", description: "Path to the .tdproj directory." } },
+      additionalProperties: false
+    }
+  },
+  {
     name: "build_project",
     description: "Validate the project and build a deployable static web bundle. Returns the output directory and asset copy report.",
     inputSchema: {
@@ -77,6 +157,30 @@ export const TOOLS = [
       properties: {
         projectDir: { type: "string", description: "Path to the .tdproj directory." },
         targetId: { type: "string", description: "Build target id from build-targets.json. Defaults to the canonical web target." }
+      }
+    }
+  },
+  {
+    name: "package_mobile",
+    description:
+      "Wrap the built web bundle into a Capacitor mobile project (Android/iOS) under <project>/mobile — config, package.json, the built game in www/, and a README with the native build + store steps. Does not publish anything. Returns app metadata and next steps.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        targetId: { type: "string", description: "Build target id whose app metadata (appId/appName/version) to use. Defaults to the canonical web target." }
+      }
+    }
+  },
+  {
+    name: "package_desktop",
+    description:
+      "Wrap the built web bundle into a Tauri v2 desktop project (Windows/macOS/Linux) under <project>/desktop — tauri.conf.json, Cargo/Rust scaffold, the built game in dist/, and a README with the local build + distribution steps. Does not publish anything. Returns app metadata and next steps.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        targetId: { type: "string", description: "Build target id whose app metadata (appId/appName/version) to use. Defaults to the canonical web target." }
       }
     }
   },
@@ -96,7 +200,7 @@ export const TOOLS = [
   {
     name: "apply_balance_patch",
     description:
-      "Merge top-level balance sections (enemies, towers, waveSets, missions, abilities, constants, defaultMissionId) into content/balance.json. Backs up the previous file, then re-validates and returns the result.",
+      "Validate and merge top-level balance sections into content/balance.json. Writes only after a successful dry-run; if post-write validation fails, rolls back from the previous file.",
     inputSchema: {
       type: "object",
       properties: {
@@ -111,14 +215,230 @@ export const TOOLS = [
             missions: { type: "object" },
             abilities: { type: "object" },
             constants: { type: "object" },
+            currencies: { type: "array" },
             defaultMissionId: { type: "string" }
           }
-        }
+        },
+        ifRevision: IF_REVISION_PROPERTY
       },
       required: ["patch"]
     }
+  },
+  {
+    name: "dry_run_balance_patch",
+    description:
+      "Merge top-level balance sections in memory and validate the candidate project without writing files. Returns a leaf-level `diff` ({path, before, after} entries, capped and marked truncated if large) so you can review exactly what would change before committing. Use before risky balance changes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        patch: {
+          type: "object",
+          description: "Object whose recognized top-level keys replace the matching sections of balance.json.",
+          properties: {
+            enemies: { type: "object" },
+            towers: { type: "object" },
+            waveSets: { type: "object" },
+            missions: { type: "object" },
+            abilities: { type: "object" },
+            constants: { type: "object" },
+            currencies: { type: "array" },
+            defaultMissionId: { type: "string" }
+          },
+          additionalProperties: false
+        }
+      },
+      required: ["patch"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "apply_validated_patch",
+    description:
+      "Dry-run a balance patch, then write it only if validation passes. Rolls back if the post-write validation does not match the dry-run.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        patch: {
+          type: "object",
+          properties: {
+            enemies: { type: "object" },
+            towers: { type: "object" },
+            waveSets: { type: "object" },
+            missions: { type: "object" },
+            abilities: { type: "object" },
+            constants: { type: "object" },
+            currencies: { type: "array" },
+            defaultMissionId: { type: "string" }
+          },
+          additionalProperties: false
+        },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["patch"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "set_enemy_stat",
+    description: "Set one numeric enemy field and validate before writing. Prefer this over replacing the whole enemies section.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        enemyId: { type: "string" },
+        field: { type: "string", enum: ["maxHp", "speed", "coreDamage", "coinReward", "color", "hitRadius", "pathCollisionRadius"] },
+        value: { type: "number" },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["enemyId", "field", "value"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "upsert_tower",
+    description: "Insert or replace one tower definition and validate before writing. The tower id is forced to towerId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        towerId: { type: "string" },
+        tower: { type: "object" },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["towerId", "tower"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "add_wave_group",
+    description: "Append one enemy group to an existing wave and validate before writing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        waveSetId: { type: "string" },
+        waveId: { type: "string" },
+        group: { type: "object" },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["waveSetId", "waveId", "group"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "bind_sprite",
+    description: "Bind an existing sprite id to a tower, enemy, tile, or UI id in content/visuals.json and validate before writing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        kind: { type: "string", enum: ["towers", "enemies", "tiles", "ui"] },
+        entityId: { type: "string" },
+        spriteId: { type: "string", description: "Existing sprite id. Empty string removes the binding." },
+        ifRevision: { ...IF_REVISION_PROPERTY, description: "Optional. The visuals revision (not the balance one) last read, to guard against a concurrent visuals.json edit." }
+      },
+      required: ["kind", "entityId", "spriteId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "upsert_entity",
+    description:
+      "Create or replace ONE entity by id in a balance collection (towers, enemies, missions, abilities, waveSets, currencies) without resending the whole collection. For waveSets, `value` is the full array of waves for that wave-set id (creates a NEW wave set if the id doesn't exist yet — this is how an agent authors a wave set, alongside the narrower add_wave_group for appending one group). Set merge:true to shallow-merge into an existing entity instead of replacing it. Validates before writing; rolls back on failure.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        collection: { type: "string", enum: ["towers", "enemies", "missions", "abilities", "waveSets", "currencies"] },
+        id: { type: "string", description: "The entity id (for currencies, its `id` field)." },
+        value: { description: "The entity object (or, for waveSets, an array of WaveDefinition)." },
+        merge: { type: "boolean", description: "Shallow-merge into the existing entity instead of replacing it. Ignored for waveSets (always replaces the array)." },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["collection", "id", "value"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "delete_entity",
+    description:
+      "Delete ONE entity by id from a balance collection. Refuses (no write) if the id is referenced elsewhere in the project — e.g. an enemy still spawned by a wave, a tower still buildable in a mission, a currency still used in a cost bag — and returns the list of references instead. Pass force:true to delete anyway. The required primary currency \"coins\" can never be deleted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        collection: { type: "string", enum: ["towers", "enemies", "missions", "abilities", "waveSets", "currencies"] },
+        id: { type: "string" },
+        force: { type: "boolean", description: "Delete even if references were found." },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["collection", "id"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "write_map",
+    description:
+      "Author a new (or replace an existing) map from scratch: dimensions, spawn/core coords, path centerline, and optional multi-route paths / terrain overrides. Writes a maps/src/<mapId>.tmj source, then compiles it into maps/compiled/maps.json. This is the only way to author a playfield over MCP — compile_maps only recompiles EXISTING sources. Validates the map shape before writing anything.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        mapId: { type: "string", description: "Map id; also the source filename (<mapId>.tmj)." },
+        width: { type: "integer", description: "Positive integer." },
+        height: { type: "integer", description: "Positive integer." },
+        spawnCoord: { type: "object", properties: { q: { type: "number" }, r: { type: "number" } }, required: ["q", "r"] },
+        coreCoord: { type: "object", properties: { q: { type: "number" }, r: { type: "number" } }, required: ["q", "r"] },
+        pathCenterline: {
+          type: "array",
+          description: "At least 2 hex coords {q,r} from spawn to core.",
+          items: { type: "object", properties: { q: { type: "number" }, r: { type: "number" } }, required: ["q", "r"] }
+        },
+        pathRoutes: {
+          type: "array",
+          description: "Optional named alternate routes; each { id, pathCenterline }. Omit for a single default route.",
+          items: { type: "object" }
+        },
+        terrainOverrides: {
+          type: "array",
+          description: "Optional explicit per-tile terrain overrides beyond the default terrain.",
+          items: { type: "object", properties: { q: { type: "number" }, r: { type: "number" }, terrain: { type: "string" } } }
+        }
+      },
+      required: ["mapId", "width", "height", "spawnCoord", "coreCoord", "pathCenterline"],
+      additionalProperties: false
+    }
   }
 ];
+
+const TOOL_RISK = {
+  describe_schema: { riskClass: "read_only", sideEffect: "none" },
+  explain_validation: { riskClass: "read_only", sideEffect: "none" },
+  get_project_summary: { riskClass: "read_only", sideEffect: "none" },
+  list_missions: { riskClass: "read_only", sideEffect: "none" },
+  validate_project: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
+  simulate_mission: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
+  compile_maps_dry_run: { riskClass: "compute_only", sideEffect: "none" },
+  compile_maps: { riskClass: "write_local", sideEffect: "writes maps/compiled/maps.json" },
+  build_project: { riskClass: "write_local", sideEffect: "writes build output directory" },
+  package_mobile: { riskClass: "write_local", sideEffect: "writes mobile scaffold" },
+  package_desktop: { riskClass: "write_local", sideEffect: "writes desktop scaffold" },
+  balance_report: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
+  dry_run_balance_patch: { riskClass: "compute_only", sideEffect: "none" },
+  apply_balance_patch: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
+  apply_validated_patch: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
+  set_enemy_stat: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
+  upsert_tower: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
+  add_wave_group: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
+  bind_sprite: { riskClass: "write_local", sideEffect: "writes content/visuals.json with backup and rollback" },
+  upsert_entity: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
+  delete_entity: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback; refuses if referenced" },
+  write_map: { riskClass: "write_local", sideEffect: "writes maps/src/<mapId>.tmj and maps/compiled/maps.json" }
+};
+
+for (const tool of TOOLS) Object.assign(tool, TOOL_RISK[tool.name] ?? { riskClass: "unknown", sideEffect: "unspecified" });
 
 const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
 
@@ -132,6 +452,43 @@ export async function callTool(name, args = {}, ctx = {}) {
   if (!TOOL_NAMES.has(name)) {
     throw new Error(`Unknown tool: ${name}`);
   }
+
+  // Pure schema metadata — no project needed, so it runs before (and without) resolveDir.
+  if (name === "describe_schema") {
+    const engine = await loadEngine();
+    return {
+      attackKinds: engine.ATTACK_KIND_SCHEMA,
+      abilityPresets: engine.ABILITY_SCHEMA,
+      abilityEffects: engine.ABILITY_EFFECT_SCHEMA,
+      abilityNote:
+        "Mission ability ids are open (any string). abilityPresets (path_water/strike/freeze) work with no extra fields. A CUSTOM ability id needs no engine code — declare `effects: AbilityEffect[]` composed from abilityEffects (e.g. [{kind:'damage', amount}, {kind:'status', status:{slow:{factor,duration}}}]).",
+      currencyRules: engine.CURRENCY_RULES
+    };
+  }
+
+  if (name === "explain_validation") {
+    if (args.code !== undefined && typeof args.code !== "string") {
+      throw new Error("explain_validation: `code` must be a string.");
+    }
+    const code = args.code ?? args.issue?.code;
+    if (!code) throw new Error("explain_validation requires `code` or an `issue` object carrying one.");
+    // hasOwnProperty guard: EXPLAIN_CURATED is a plain object literal, so an unguarded bracket
+    // lookup would resolve an Object.prototype member name (e.g. code:"constructor") to the
+    // inherited Function instead of undefined, producing a false curated:true with no content.
+    const curated = Object.prototype.hasOwnProperty.call(EXPLAIN_CURATED, code) ? EXPLAIN_CURATED[code] : undefined;
+    return {
+      code,
+      message: args.issue?.message,
+      hint: args.issue?.hint ?? curated?.hint,
+      expected: args.issue?.expected,
+      got: args.issue?.got,
+      example: curated?.example,
+      seeAlso: curated?.seeAlso,
+      curated: Boolean(curated),
+      note: curated ? undefined : "No curated example for this code yet — see message/hint/expected/got above, or call describe_schema for the general shape."
+    };
+  }
+
   const projectDir = resolveDir(args.projectDir, ctx.defaultProjectDir);
 
   switch (name) {
@@ -153,7 +510,11 @@ export async function callTool(name, args = {}, ctx = {}) {
           mapSources: Object.keys(summary.mapSources ?? {}).length
         },
         availableMaps: summary.availableMaps,
-        mapRoutes: summary.mapRoutes
+        mapRoutes: summary.mapRoutes,
+        // Content-hash revisions for optimistic-concurrency writes (upsert_entity, apply_validated_patch,
+        // bind_sprite, ...): pass the relevant one back as `ifRevision` to reject a write if the file
+        // changed underneath the agent (e.g. a human editing the same project live in Studio).
+        revisions: { balance: computeRevision(files.balance), visuals: computeRevision(files.visuals) }
       };
     }
 
@@ -176,12 +537,14 @@ export async function callTool(name, args = {}, ctx = {}) {
 
     case "validate_project": {
       const { result } = await validateProjectDir(projectDir);
+      const files = loadProjectFiles(projectDir);
       return {
         projectDir,
         ok: result.ok,
         errorCount: result.issues.filter((issue) => issue.severity === "error").length,
         warningCount: result.issues.filter((issue) => issue.severity === "warning").length,
-        issues: result.issues
+        issues: result.issues,
+        revisions: { balance: computeRevision(files.balance), visuals: computeRevision(files.visuals) }
       };
     }
 
@@ -200,6 +563,18 @@ export async function callTool(name, args = {}, ctx = {}) {
       return { projectDir, ok: true, outFile, mapIds: Object.keys(result.maps), issues: result.issues };
     }
 
+    case "compile_maps_dry_run": {
+      const sources = readMapSources(projectDir);
+      const result = compileMapSources(sources);
+      return {
+        projectDir,
+        ok: result.ok,
+        dryRun: true,
+        mapIds: Object.keys(result.maps ?? {}),
+        issues: result.issues
+      };
+    }
+
     case "balance_report": {
       const report = await runBalanceSweepForProject(projectDir, {
         missionIds: typeof args.missionId === "string" ? [args.missionId] : [],
@@ -211,8 +586,41 @@ export async function callTool(name, args = {}, ctx = {}) {
     case "build_project":
       return runBuild(projectDir, typeof args.targetId === "string" ? args.targetId : null);
 
+    case "package_mobile":
+      return packageProject(projectDir, { kind: "mobile", targetId: typeof args.targetId === "string" ? args.targetId : null });
+
+    case "package_desktop":
+      return packageProject(projectDir, { kind: "desktop", targetId: typeof args.targetId === "string" ? args.targetId : null });
+
     case "apply_balance_patch":
-      return applyBalancePatch(projectDir, args.patch);
+      return applyValidatedBalancePatch(projectDir, args.patch, { compatibilityToolName: "apply_balance_patch", ifRevision: args.ifRevision });
+
+    case "dry_run_balance_patch":
+      return dryRunBalancePatch(projectDir, args.patch);
+
+    case "apply_validated_patch":
+      return applyValidatedBalancePatch(projectDir, args.patch, { ifRevision: args.ifRevision });
+
+    case "set_enemy_stat":
+      return setEnemyStat(projectDir, args);
+
+    case "upsert_tower":
+      return upsertTower(projectDir, args);
+
+    case "add_wave_group":
+      return addWaveGroup(projectDir, args);
+
+    case "bind_sprite":
+      return bindSprite(projectDir, args);
+
+    case "upsert_entity":
+      return upsertEntity(projectDir, args);
+
+    case "delete_entity":
+      return deleteEntity(projectDir, args);
+
+    case "write_map":
+      return writeMap(projectDir, args);
 
     default:
       throw new Error(`Unhandled tool: ${name}`);
@@ -255,38 +663,385 @@ function runBuild(projectDir, targetId) {
   });
 }
 
-async function applyBalancePatch(projectDir, patch) {
-  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
-    throw new Error("apply_balance_patch requires a `patch` object.");
+async function dryRunBalancePatch(projectDir, patch) {
+  const files = loadProjectFiles(projectDir);
+  const beforeRevision = computeRevision(files.balance);
+  const { balance, applied } = mergeBalancePatch(files.balance, patch);
+  const result = await validateCandidateFiles({ ...files, balance });
+  return {
+    projectDir,
+    ok: result.ok,
+    dryRun: true,
+    applied,
+    revision: beforeRevision,
+    balance, // the fully-merged candidate — reused by applyValidatedBalancePatch, never re-derived
+    diff: computeDiff(files.balance, balance, applied),
+    validation: validationSummary(result)
+  };
+}
+
+async function applyValidatedBalancePatch(projectDir, patch, options = {}) {
+  const dryRun = await dryRunBalancePatch(projectDir, patch);
+  if (options.ifRevision && dryRun.revision !== options.ifRevision) {
+    return {
+      projectDir,
+      ok: false,
+      written: false,
+      conflict: true,
+      expectedRevision: options.ifRevision,
+      actualRevision: dryRun.revision,
+      nextValidActions: ["get_project_summary to read the current revision, re-apply the intended change against it"]
+    };
   }
+  if (!dryRun.validation.ok) {
+    return { ...dryRun, ok: false, written: false, nextValidActions: ["inspect_validation_issues", "dry_run_balance_patch"] };
+  }
+
   const balancePath = path.join(projectDir, "content", "balance.json");
-  const balance = fs.existsSync(balancePath) ? JSON.parse(fs.readFileSync(balancePath, "utf8")) : {};
+
+  // Narrow the TOCTOU window as much as possible: re-check the on-disk revision immediately
+  // before writing, against a FRESH read — but reuse dryRun.balance (already validated) as the
+  // write payload instead of re-reading-and-re-merging, which would silently re-open this exact
+  // race by building the write on top of whatever landed on disk in between (a concurrent Studio
+  // save, or another MCP write). This check runs unconditionally, not just when the caller passed
+  // ifRevision — a mismatch here always means the write would be based on stale content.
+  const preWriteRevision = computeRevision(loadProjectFiles(projectDir).balance);
+  if (preWriteRevision !== dryRun.revision) {
+    return {
+      projectDir,
+      ok: false,
+      written: false,
+      conflict: true,
+      expectedRevision: dryRun.revision,
+      actualRevision: preWriteRevision,
+      nextValidActions: ["dry_run_balance_patch against the current state and retry"]
+    };
+  }
+
+  const originalText = fs.existsSync(balancePath) ? fs.readFileSync(balancePath, "utf8") : null;
+  const backupPath = backupFile(projectDir, balancePath);
+  writeJsonAtomic(balancePath, dryRun.balance);
+
+  const { result } = await validateProjectDir(projectDir);
+  const summary = validationSummary(result);
+  if (!result.ok) {
+    if (originalText === null) {
+      fs.rmSync(balancePath, { force: true });
+    } else {
+      writeTextAtomic(balancePath, originalText);
+    }
+    return {
+      projectDir,
+      ok: false,
+      written: false,
+      rolledBack: true,
+      applied: dryRun.applied,
+      backupPath,
+      compatibilityToolName: options.compatibilityToolName,
+      validation: summary,
+      nextValidActions: ["inspect_validation_issues", "dry_run_balance_patch"]
+    };
+  }
+
+  // Report the revision of what's truly on disk right now (a final fresh read), not the
+  // in-memory pre-write object — validateProjectDir above awaited a dynamic import, a real yield
+  // point another writer could have landed in, and a stale reported revision here would silently
+  // hide that from a caller chaining a subsequent ifRevision write.
+  const finalRevision = computeRevision(loadProjectFiles(projectDir).balance);
+
+  return {
+    projectDir,
+    ok: true,
+    written: true,
+    rolledBack: false,
+    applied: dryRun.applied,
+    backupPath,
+    compatibilityToolName: options.compatibilityToolName,
+    revision: finalRevision,
+    diff: dryRun.diff,
+    validation: summary,
+    nextValidActions: ["balance_report", "validate_project"]
+  };
+}
+
+async function setEnemyStat(projectDir, args) {
+  const { enemyId, field, value, ifRevision } = args;
+  if (typeof enemyId !== "string" || !enemyId) throw new Error("set_enemy_stat requires enemyId.");
+  if (!["maxHp", "speed", "coreDamage", "coinReward", "color", "hitRadius", "pathCollisionRadius"].includes(field)) {
+    throw new Error("set_enemy_stat field is not supported.");
+  }
+  if (!Number.isFinite(value)) throw new Error("set_enemy_stat value must be a finite number.");
+  const files = loadProjectFiles(projectDir);
+  const current = files.balance.enemies?.[enemyId];
+  if (!current) throw new Error(`Enemy "${enemyId}" not found.`);
+  const enemies = { ...files.balance.enemies, [enemyId]: { ...current, [field]: value } };
+  return applyValidatedBalancePatch(projectDir, { enemies }, { ifRevision });
+}
+
+async function upsertTower(projectDir, args) {
+  const { towerId, tower, ifRevision } = args;
+  if (typeof towerId !== "string" || !towerId) throw new Error("upsert_tower requires towerId.");
+  if (!tower || typeof tower !== "object" || Array.isArray(tower)) throw new Error("upsert_tower requires a tower object.");
+  const files = loadProjectFiles(projectDir);
+  const towers = { ...files.balance.towers, [towerId]: { ...tower, id: towerId } };
+  return applyValidatedBalancePatch(projectDir, { towers }, { ifRevision });
+}
+
+async function addWaveGroup(projectDir, args) {
+  const { waveSetId, waveId, group, ifRevision } = args;
+  if (typeof waveSetId !== "string" || !waveSetId) throw new Error("add_wave_group requires waveSetId.");
+  if (typeof waveId !== "string" || !waveId) throw new Error("add_wave_group requires waveId.");
+  if (!group || typeof group !== "object" || Array.isArray(group)) throw new Error("add_wave_group requires a group object.");
+  const files = loadProjectFiles(projectDir);
+  const waves = files.balance.waveSets?.[waveSetId];
+  if (!Array.isArray(waves)) throw new Error(`Wave set "${waveSetId}" not found.`);
+  let found = false;
+  const nextWaves = waves.map((wave) => {
+    if (wave.id !== waveId) return wave;
+    found = true;
+    return { ...wave, groups: [...(wave.groups ?? []), group] };
+  });
+  if (!found) throw new Error(`Wave "${waveId}" not found in wave set "${waveSetId}".`);
+  const waveSets = { ...files.balance.waveSets, [waveSetId]: nextWaves };
+  return applyValidatedBalancePatch(projectDir, { waveSets }, { ifRevision });
+}
+
+async function bindSprite(projectDir, args) {
+  const { kind, entityId, spriteId, ifRevision } = args;
+  if (!["towers", "enemies", "tiles", "ui"].includes(kind)) throw new Error("bind_sprite kind must be towers, enemies, tiles, or ui.");
+  if (typeof entityId !== "string" || !entityId) throw new Error("bind_sprite requires entityId.");
+  if (typeof spriteId !== "string") throw new Error("bind_sprite requires spriteId.");
+  const files = loadProjectFiles(projectDir);
+  if (kind === "towers" && !files.balance.towers?.[entityId]) throw new Error(`Tower "${entityId}" not found.`);
+  if (kind === "enemies" && !files.balance.enemies?.[entityId]) throw new Error(`Enemy "${entityId}" not found.`);
+  if (spriteId && !files.visuals?.sprites?.[spriteId]) throw new Error(`Sprite "${spriteId}" not found.`);
+
+  const beforeRevision = computeRevision(files.visuals);
+  if (ifRevision && beforeRevision !== ifRevision) {
+    return { projectDir, ok: false, written: false, conflict: true, expectedRevision: ifRevision, actualRevision: beforeRevision };
+  }
+
+  const visuals = structuredCloneCompat(files.visuals);
+  visuals.bindings ??= {};
+  visuals.bindings[kind] ??= {};
+  if (spriteId) visuals.bindings[kind][entityId] = spriteId;
+  else delete visuals.bindings[kind][entityId];
+
+  const candidate = { ...files, visuals };
+  const result = validateProjectSchemas(candidate);
+  if (!result.ok) {
+    return { projectDir, ok: false, written: false, validation: validationSummary(result), nextValidActions: ["inspect_validation_issues"] };
+  }
+
+  const visualsPath = path.join(projectDir, "content", "visuals.json");
+  const originalText = fs.existsSync(visualsPath) ? fs.readFileSync(visualsPath, "utf8") : null;
+  const backupPath = backupFile(projectDir, visualsPath);
+  writeJsonAtomic(visualsPath, visuals);
+  const post = validateProjectSchemas(loadProjectFiles(projectDir));
+  if (!post.ok) {
+    if (originalText === null) fs.rmSync(visualsPath, { force: true });
+    else writeTextAtomic(visualsPath, originalText);
+    return { projectDir, ok: false, written: false, rolledBack: true, backupPath, validation: validationSummary(post) };
+  }
+  return { projectDir, ok: true, written: true, backupPath, revision: computeRevision(visuals), binding: { kind, entityId, spriteId }, validation: validationSummary(post) };
+}
+
+async function upsertEntity(projectDir, args) {
+  const { collection, id, value, merge, ifRevision } = args;
+  const spec = ENTITY_COLLECTIONS[collection];
+  if (!spec) throw new Error(`upsert_entity: unknown collection "${collection}". Expected one of ${Object.keys(ENTITY_COLLECTIONS).join(", ")}.`);
+  if (typeof id !== "string" || !id) throw new Error("upsert_entity requires id.");
+  if (value === undefined || value === null || typeof value !== "object") throw new Error("upsert_entity requires a value object (or array, for waveSets).");
+
+  const files = loadProjectFiles(projectDir);
+  const balance = files.balance;
+
+  if (spec.shape === "map") {
+    const current = balance[spec.balanceKey]?.[id];
+    const nextEntity = collection === "waveSets"
+      ? value // an array of waves — no id field to force, always a full replace
+      : { ...(merge && current ? current : {}), ...value, id };
+    const nextCollection = { ...(balance[spec.balanceKey] ?? {}), [id]: nextEntity };
+    return applyValidatedBalancePatch(projectDir, { [spec.balanceKey]: nextCollection }, { ifRevision });
+  }
+
+  // shape === "array" (currencies)
+  const list = Array.isArray(balance[spec.balanceKey]) ? balance[spec.balanceKey] : [];
+  const index = list.findIndex((item) => item?.id === id);
+  const nextItem = { ...(merge && index !== -1 ? list[index] : {}), ...value, id };
+  const nextList = index === -1 ? [...list, nextItem] : list.map((item, i) => (i === index ? nextItem : item));
+  return applyValidatedBalancePatch(projectDir, { [spec.balanceKey]: nextList }, { ifRevision });
+}
+
+async function deleteEntity(projectDir, args) {
+  const { collection, id, force, ifRevision } = args;
+  const spec = ENTITY_COLLECTIONS[collection];
+  if (!spec) throw new Error(`delete_entity: unknown collection "${collection}". Expected one of ${Object.keys(ENTITY_COLLECTIONS).join(", ")}.`);
+  if (typeof id !== "string" || !id) throw new Error("delete_entity requires id.");
+  if (collection === "currencies" && id === "coins") {
+    throw new Error('delete_entity: "coins" is the required primary currency and cannot be deleted.');
+  }
+
+  const files = loadProjectFiles(projectDir);
+  const balance = files.balance;
+
+  if (spec.shape === "map") {
+    if (!balance[spec.balanceKey]?.[id]) throw new Error(`${collection} "${id}" not found.`);
+  } else if (!(balance[spec.balanceKey] ?? []).some((item) => item?.id === id)) {
+    throw new Error(`${collection} "${id}" not found.`);
+  }
+
+  if (!force) {
+    const references = findEntityReferences(files, spec.referenceKind, id);
+    if (references.length > 0) {
+      return { projectDir, ok: false, written: false, refused: "referenced", references, nextValidActions: ["retry with force:true, or remove the references first"] };
+    }
+  }
+
+  if (spec.shape === "map") {
+    const nextCollection = { ...balance[spec.balanceKey] };
+    delete nextCollection[id];
+    return applyValidatedBalancePatch(projectDir, { [spec.balanceKey]: nextCollection }, { ifRevision });
+  }
+  const nextList = (balance[spec.balanceKey] ?? []).filter((item) => item?.id !== id);
+  return applyValidatedBalancePatch(projectDir, { [spec.balanceKey]: nextList }, { ifRevision });
+}
+
+async function writeMap(projectDir, args) {
+  const { mapId, width, height, spawnCoord, coreCoord, pathCenterline, pathRoutes, terrainOverrides } = args;
+  if (typeof mapId !== "string" || !mapId) throw new Error("write_map requires mapId.");
+  const sourceName = `${mapId}.tmj`;
+  const source = {
+    id: mapId,
+    width,
+    height,
+    defaultTerrain: "buildable",
+    spawnCoord,
+    coreCoord,
+    pathCenterline,
+    terrainOverrides: Array.isArray(terrainOverrides) ? terrainOverrides : [],
+    pathRoutes: Array.isArray(pathRoutes) ? pathRoutes : []
+  };
+
+  // Validate the map shape BEFORE writing anything, so a malformed map never touches disk.
+  try {
+    compileMapSource(source, sourceName);
+  } catch (error) {
+    return { projectDir, ok: false, written: false, mapId, error: error.message };
+  }
+
+  writeMapSource(projectDir, sourceName, source);
+  const sources = readMapSources(projectDir);
+  const result = compileMapSources(sources);
+  if (!result.ok) {
+    return { projectDir, ok: false, written: true, mapId, issues: result.issues, nextValidActions: ["compile_maps_dry_run"] };
+  }
+  const outFile = writeCompiledMaps(projectDir, result.maps);
+  return {
+    projectDir,
+    ok: true,
+    written: true,
+    mapId,
+    sourcePath: path.join(projectDir, "maps", "src", sourceName),
+    outFile,
+    mapIds: Object.keys(result.maps),
+    issues: result.issues,
+    nextValidActions: ["upsert_entity (missions) to reference this map via mapId", "validate_project"]
+  };
+}
+
+function mergeBalancePatch(inputBalance, patch) {
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new Error("Balance patch requires a `patch` object.");
+  }
+  for (const key of Object.keys(patch)) {
+    if (!BALANCE_PATCH_KEYS.includes(key)) {
+      throw new Error(`Patch contained unrecognized balance keys: ${key}. Allowed: ${BALANCE_PATCH_KEYS.join(", ")}.`);
+    }
+  }
+  const balance = structuredCloneCompat(inputBalance);
   const applied = [];
   for (const key of BALANCE_PATCH_KEYS) {
     if (patch[key] !== undefined) {
-      balance[key] = patch[key];
+      balance[key] = structuredCloneCompat(patch[key]);
       applied.push(key);
     }
   }
   if (applied.length === 0) {
     throw new Error(`Patch contained no recognized balance keys. Allowed: ${BALANCE_PATCH_KEYS.join(", ")}.`);
   }
+  return { balance, applied };
+}
 
-  backupFile(projectDir, balancePath);
-  writeJsonAtomic(balancePath, balance);
+async function validateCandidateFiles(files) {
+  const engine = await loadEngine();
+  const content = engine.createGameContentRegistry({
+    balance: files.balance,
+    maps: files.maps,
+    worldMap: files.worldMap,
+    visuals: files.visuals,
+    storyComics: files.storyComics,
+    battleBackgrounds: files.battleBackgrounds
+  });
+  return mergeValidationResults(validateProjectSchemas(files), engine.validateGameContentRegistry(content));
+}
 
-  const { result } = await validateProjectDir(projectDir);
+function validationSummary(result) {
   return {
-    projectDir,
-    ok: true,
-    applied,
-    validation: {
-      ok: result.ok,
-      errorCount: result.issues.filter((issue) => issue.severity === "error").length,
-      warningCount: result.issues.filter((issue) => issue.severity === "warning").length,
-      issues: result.issues
-    }
+    ok: result.ok,
+    errorCount: result.issues.filter((issue) => issue.severity === "error").length,
+    warningCount: result.issues.filter((issue) => issue.severity === "warning").length,
+    issues: result.issues
   };
+}
+
+/** A stable content hash for optimistic-concurrency checks (2.8) — same value in, same value out,
+ *  independent of on-disk formatting/whitespace. */
+function computeRevision(value) {
+  return createHash("sha1").update(JSON.stringify(value)).digest("hex").slice(0, 12);
+}
+
+const DIFF_LIMIT = 200;
+
+/** Deep leaf-level diff between two JSON-compatible values, returning {path, before, after}
+ *  entries for every field that actually changed (2.4). Walks the FULL tree first (project
+ *  balance.json files are small — dozens to low hundreds of entities — so this is cheap) and only
+ *  caps the OUTPUT at DIFF_LIMIT, so `truncated` is unambiguous: true iff there really were more
+ *  than DIFF_LIMIT real changes, never a false positive from hitting the cap mid-walk while later
+ *  siblings turn out unchanged. `changeCount` is always the TRUE total, even when `changes` is capped. */
+function computeDiff(before, after, topLevelKeys) {
+  const entries = [];
+  for (const key of topLevelKeys) {
+    diffValues(before?.[key], after?.[key], key, entries);
+  }
+  return { changes: entries.slice(0, DIFF_LIMIT), changeCount: entries.length, truncated: entries.length > DIFF_LIMIT };
+}
+
+function diffValues(before, after, pathPrefix, entries) {
+  if (before === after) return;
+  const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (isPlainObject(before) && isPlainObject(after)) {
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      diffValues(before[key], after[key], `${pathPrefix}.${key}`, entries);
+    }
+    return;
+  }
+  // Arrays: index-diff so a one-element change inside a large array (e.g. adding one wave group)
+  // reports just that element's leaf fields, not the whole array twice. Elements missing on one
+  // side compare against undefined, which the primitive branch below reports as add/remove.
+  if (Array.isArray(before) && Array.isArray(after)) {
+    if (JSON.stringify(before) === JSON.stringify(after)) return; // fast path: identical
+    const maxLength = Math.max(before.length, after.length);
+    for (let i = 0; i < maxLength; i += 1) {
+      diffValues(before[i], after[i], `${pathPrefix}[${i}]`, entries);
+    }
+    return;
+  }
+  if (JSON.stringify(before) === JSON.stringify(after)) return;
+  // Leave `undefined` as-is (not coerced to null): JSON.stringify omits an undefined property
+  // entirely, so "field was absent" (no before/after key after serialization) stays
+  // distinguishable from "field was explicitly null" (before/after: null) on the wire.
+  entries.push({ path: pathPrefix, before, after });
 }
 
 function writeJsonAtomic(filePath, data) {
@@ -296,10 +1051,23 @@ function writeJsonAtomic(filePath, data) {
   fs.renameSync(tmp, filePath);
 }
 
+function writeTextAtomic(filePath, text) {
+  const tmp = `${filePath}.tmp.${process.pid}.${createHash("sha1").update(filePath).digest("hex").slice(0, 6)}`;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(tmp, text, "utf8");
+  fs.renameSync(tmp, filePath);
+}
+
 function backupFile(projectDir, filePath) {
-  if (!fs.existsSync(filePath)) return;
-  const backupDir = path.join(projectDir, ".mycelium", "mcp-backups");
+  if (!fs.existsSync(filePath)) return null;
+  const backupDir = path.join(projectDir, ".towerforge", "mcp-backups");
   fs.mkdirSync(backupDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  fs.copyFileSync(filePath, path.join(backupDir, `${path.basename(filePath)}.${stamp}.bak`));
+  const backupPath = path.join(backupDir, `${path.basename(filePath)}.${stamp}.bak`);
+  fs.copyFileSync(filePath, backupPath);
+  return backupPath;
+}
+
+function structuredCloneCompat(value) {
+  return JSON.parse(JSON.stringify(value ?? {}));
 }

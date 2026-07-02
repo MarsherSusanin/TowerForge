@@ -3,6 +3,6 @@ dist/
 test-results/
 playwright-report/
 *.js.map
-.mycelium/
-examples/starter.tdproj/.mycelium/
+.towerforge/
+examples/starter.tdproj/.towerforge/
 maps/compiled/

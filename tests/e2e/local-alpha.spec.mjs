@@ -19,11 +19,11 @@ let studioProcess;
 let playerServer;
 
 test.beforeAll(async () => {
-  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mycelium-e2e-"));
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-e2e-"));
   projectDir = path.join(tmpRoot, "starter.tdproj");
   fs.cpSync(path.join(repoRoot, "examples", "starter.tdproj"), projectDir, { recursive: true });
   fs.mkdirSync(path.join(projectDir, "imports"), { recursive: true });
-  fs.writeFileSync(path.join(projectDir, "imports", "spore.png"), Buffer.from(
+  fs.writeFileSync(path.join(projectDir, "imports", "tower.png"), Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
     "base64"
   ));
@@ -51,9 +51,10 @@ test("local alpha constructor flow", async ({ page, request, browser }) => {
     if (["error", "warning"].includes(message.type())) consoleMessages.push(`${message.type()}: ${message.text()}`);
   });
 
+  await page.addInitScript(() => localStorage.setItem("towerforge:welcomed", "1"));
   await page.goto(studioUrl);
-  await expect(page).toHaveTitle(/Mycelium Studio/);
-  await expect(page.getByText("Mycelium Studio")).toBeVisible();
+  await expect(page).toHaveTitle(/TowerForge Editor/);
+  await expect(page.getByText("TowerForge Editor", { exact: true })).toBeVisible();
 
   await page.getByRole("tab", { name: /Maps/ }).click();
   await expect(page.getByText("Map Authoring")).toBeVisible();
@@ -61,11 +62,11 @@ test("local alpha constructor flow", async ({ page, request, browser }) => {
   await expect(page.getByText("Maps compiled.")).toBeVisible();
 
   await page.getByRole("tab", { name: /Assets/ }).click();
-  await page.locator("#asset-source-path").fill("imports/spore.png");
-  await page.locator("#asset-target-path").fill("sprites/spore.png");
-  await page.locator("#asset-id").fill("spore");
+  await page.locator("#asset-source-path").fill("imports/tower.png");
+  await page.locator("#asset-target-path").fill("sprites/tower.png");
+  await page.locator("#asset-id").fill("tower");
   await page.getByRole("button", { name: "Import" }).click();
-  await expect(page.getByText("Imported spore.")).toBeVisible();
+  await expect(page.getByText("Imported tower.")).toBeVisible();
 
   const validateResponse = await request.get(`${studioUrl}/api/validate`);
   expect(validateResponse.ok()).toBe(true);
@@ -75,7 +76,7 @@ test("local alpha constructor flow", async ({ page, request, browser }) => {
   await page.getByRole("tab", { name: /Build Targets/ }).click();
   await page.locator(".btn-target-build").first().click();
   await expect(page.getByText("Build completed.")).toBeVisible({ timeout: 30_000 });
-  expect(fs.existsSync(path.join(projectDir, "dist", "assets", "sprites", "spore.png"))).toBe(true);
+  expect(fs.existsSync(path.join(projectDir, "dist", "assets", "sprites", "tower.png"))).toBe(true);
 
   playerServer = await startStaticServer(path.join(projectDir, "dist"), playerPort);
   const playerPage = await browser.newPage();
@@ -84,7 +85,7 @@ test("local alpha constructor flow", async ({ page, request, browser }) => {
     if (["error", "warning"].includes(message.type())) playerConsole.push(`${message.type()}: ${message.text()}`);
   });
   await playerPage.goto(playerUrl);
-  await expect(playerPage.getByRole("heading", { name: /Starter Tower Defense|Mycelium/i })).toBeVisible();
+  await expect(playerPage.getByRole("heading", { name: /Starter Tower Defense|TowerForge/i })).toBeVisible();
   await expect(playerPage.locator("#playfield")).toBeVisible();
   await playerPage.locator("#start-wave").click();
   await playerPage.locator("#playfield").click({ position: { x: 180, y: 180 } });
