@@ -36,7 +36,13 @@ jobs:
       - run: npm run build:engine
       - run: npm run validate
       - run: npm run test
-      - run: npm run desktop:build
+      - name: Build desktop bundles
+        if: runner.os != 'Linux'
+        run: npm run desktop:build
+
+      - name: Build Linux desktop bundles
+        if: runner.os == 'Linux'
+        run: npm run desktop:build -- --verbose
 
       - uses: actions/upload-artifact@v4
         with:
