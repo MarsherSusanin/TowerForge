@@ -42,7 +42,8 @@ jobs:
 
       - name: Build Linux desktop bundles
         if: runner.os == 'Linux'
-        run: npm run desktop:build -- --verbose
+        working-directory: packages/desktop
+        run: npm exec -- tauri build --verbose --bundles appimage,deb,rpm
 
       - uses: actions/upload-artifact@v4
         with:
