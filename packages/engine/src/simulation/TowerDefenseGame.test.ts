@@ -491,3 +491,50 @@ describe("TowerDefenseGame", () => {
     expect(maxFollowerOffset).toBeGreaterThan(0);
   });
 });
+
+describe("deferred death near the core (regression)", () => {
+  function strikeContent(): ReturnType<typeof createGameContentRegistry> {
+    return createGameContentRegistry({
+      balance: {
+        defaultMissionId: "basic",
+        constants: {
+          timeUnitSeconds: 1, startingCoreHp: 20, startingCoins: 100, startingResources: { coins: 100 },
+          prepTimeUnits: 5, moveTowerCost: { coins: 1 }, waterGroundSpeedFactor: 0.5,
+          pathWaterCooldownUnits: 10, pathWaterDurationUnits: 5, pathWaterRadius: 1, pathWaterGroundSpeedFactor: 0.3
+        },
+        abilities: { strike: { id: "strike", label: "Strike", cooldown: 1, duration: 0, radius: 10, damage: 100 } },
+        enemies: { grunt: { id: "grunt", label: "Grunt", maxHp: 6, speed: 1, reward: { coins: 2 }, coinReward: 2, coreDamage: 5, color: 0x88aa66 } },
+        towers: { pelter: { id: "pelter", label: "Pelter", cost: { coins: 1 }, footprintRadius: 0, range: 8, attack: { kind: "single", fireRate: 5, damagePerStack: 5, startingStacks: 3, maxStacks: 8, upgradeCost: 5 } } },
+        waveSets: { oneGrunt: [{ id: "w1", label: "W1", groups: [{ enemyId: "grunt", count: 1, spawnInterval: 1, startDelay: 0 }] }] },
+        missions: { basic: { id: "basic", label: "basic", description: "", startingCoreHp: 20, startingResources: { coins: 100 }, prepTimeUnits: 5, mapId: "lane", waveSetId: "oneGrunt", buildTowerIds: ["pelter"], abilityIds: ["strike"] } }
+      },
+      maps: { lane: { id: "lane", width: 9, height: 3, defaultTerrain: "buildable", spawnCoord: { q: 0, r: 1 }, coreCoord: { q: 8, r: 1 }, pathCenterline: Array.from({ length: 9 }, (_, q) => ({ q, r: 1 })), pathRoutes: [], terrainOverrides: [] } },
+      worldMap: { width: 100, height: 100, regions: [{ id: "reg", label: "Reg", description: "", bounds: { x: 0, y: 0, width: 100, height: 100 }, accent: "#88aa66", biome: "t", connections: [] }], missionNodes: [{ missionId: "basic", regionId: "reg", x: 50, y: 50, difficulty: 1 as const, unlockRequiresMissionIds: [] }] }
+    });
+  }
+
+  // An enemy killed by an ability the tick before it would reach the core used to keep moving,
+  // "leak" into the core (dealing core damage), and forfeit its kill reward — because moveEnemies()
+  // advanced already-dead enemies before removeDeadEnemies() could reap them.
+  it("rewards (and does not leak) an enemy killed by an ability just before the core", () => {
+    const game = new TowerDefenseGame({ missionId: "basic", content: strikeContent() });
+    game.startNextWave();
+    game.tick(0.1); // spawn the grunt
+    const enemy = game.getSnapshot().enemies[0]!;
+    game.enemies[0]!.pathProgress = 7.95; // one hex short of the core (track end index 8)
+
+    const coreBefore = game.coreHp;
+    const coinsBefore = game.coins;
+    expect(game.useAbility("strike", { q: 8, r: 1 }).ok).toBe(true);
+    expect(game.enemies[0]!.hp).toBeLessThanOrEqual(0); // killed, removal deferred to next tick
+
+    game.tick(0.1);
+    const events = game.lastEvents;
+    expect(events.some((e) => e.type === "enemyLeaked")).toBe(false); // did NOT leak
+    expect(game.coreHp).toBe(coreBefore); // no core damage from the dead enemy
+    const killed = events.find((e): e is Extract<typeof events[number], { type: "enemyKilled" }> => e.type === "enemyKilled" && e.enemyId === enemy.id);
+    expect(killed).toBeTruthy(); // counted as a kill...
+    expect(game.coins).toBe(coinsBefore + 2); // ...and rewarded
+    expect(game.enemies).toHaveLength(0);
+  });
+});

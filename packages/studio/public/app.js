@@ -31,6 +31,22 @@ const S = {
   mapPaintMode:          "inspect",
 };
 
+const STUDIO_TABS = [
+  ["waves", "Waves"], ["enemies", "Enemies"], ["towers", "Towers"],
+  ["missions", "Missions"], ["worldmap", "World Map"], ["maps", "Maps"],
+  ["playtest", "Playtest"], ["balance", "Balance"], ["ai", "AI Designer"],
+  ["assets", "Assets"], ["settings", "Settings"], ["buildtargets", "Build Targets"]
+];
+
+const APP_INFO = {
+  name: "TowerForge Studio",
+  version: "0.1.0",
+  studioName: "Lindforge Studios",
+  sourceUrl: "https://github.com/MarsherSusanin/TowerForge",
+  siteUrl: "https://lindforge.com",
+  telegramUrl: "https://t.me/lindforge"
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 function esc(s) {
@@ -69,6 +85,7 @@ function markDirty(isDirty, skipHistory) {
     scheduleAutosave();
     PT.dirty = true; // unsaved edits should rebuild the live playtest on next open
   }
+  scheduleDesktopUiSync(skipHistory ? 0 : 500);
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -82,6 +99,28 @@ async function apiPost(path, body) {
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error ?? `${r.status}`);
   return d;
+}
+
+function updateAppInfoUi() {
+  if ($("sidebar-version")) $("sidebar-version").textContent = `v${APP_INFO.version}`;
+  const sidebarCopyright = document.querySelector(".sidebar-copyright");
+  if (sidebarCopyright) sidebarCopyright.textContent = `© ${APP_INFO.studioName}`;
+  if ($("about-version")) $("about-version").textContent = `Version ${APP_INFO.version}`;
+  if ($("about-copyright-year")) $("about-copyright-year").textContent = String(new Date().getFullYear());
+  if ($("about-studio-link")) $("about-studio-link").textContent = APP_INFO.studioName;
+  const links = [
+    ["about-source-link", APP_INFO.sourceUrl],
+    ["about-site-link", APP_INFO.siteUrl],
+    ["about-studio-link", APP_INFO.siteUrl],
+    ["about-telegram-link", APP_INFO.telegramUrl]
+  ];
+  for (const [id, url] of links) if ($(id)) $(id).href = url;
+}
+
+async function loadAppInfo() {
+  try { Object.assign(APP_INFO, await apiGet("/api/app-info")); }
+  catch (error) { console.warn("App metadata unavailable:", error); }
+  updateAppInfoUi();
 }
 
 // ── Load / Save ───────────────────────────────────────────────────────────────
@@ -100,6 +139,7 @@ async function load() {
     if (nameEl) nameEl.textContent = data.manifest?.name ?? "Untitled";
     setStatus("Loaded");
     renderActiveTab();
+    scheduleDesktopUiSync();
     await maybeRecoverDraft();
   } catch (e) {
     setStatus("Load error");
@@ -108,7 +148,7 @@ async function load() {
 }
 
 async function save() {
-  if (!S.dirty) return;
+  if (!S.dirty) return true;
   const btn = $("btn-save");
   if (btn) btn.disabled = true;
   setStatus("Saving…");
@@ -136,6 +176,7 @@ async function save() {
     markDirty(false);
     setStatus("Saved");
     toast("Project saved.", "ok");
+    return true;
   } catch (e) {
     if (e.message?.includes("changed on disk")) {
       toast("Conflict — file changed externally. Reload to re-sync.", "warn");
@@ -145,6 +186,7 @@ async function save() {
       setStatus("Save error");
     }
     if (btn) btn.disabled = false;
+    return false;
   }
 }
 
@@ -153,9 +195,12 @@ function switchTab(tab) {
   S.activeTab = tab;
   document.querySelectorAll(".nav-tab").forEach(t =>
     t.classList.toggle("active", t.dataset.tab === tab));
+  document.querySelectorAll(".nav-tab").forEach(t =>
+    t.setAttribute("aria-selected", t.dataset.tab === tab ? "true" : "false"));
   document.querySelectorAll(".tab-panel").forEach(p =>
     p.classList.toggle("active", p.id === `tab-${tab}`));
   renderActiveTab();
+  scheduleDesktopUiSync();
 }
 
 function renderActiveTab() {
@@ -179,10 +224,314 @@ function renderActiveTab() {
 // ═════════════════════════════════════════════════════════════════════════════
 // AI CO-DESIGNER — chat panel driving the MCP tool surface (author→simulate→diagnose→patch)
 // ═════════════════════════════════════════════════════════════════════════════
-const AI = { messages: [], busy: false, controller: null, wired: false };
-const AI_KEY_LS = "towerforge:anthropic-key";
-const AI_MODEL_LS = "towerforge:ai-model";
-const aiHasKey = () => !!localStorage.getItem(AI_KEY_LS);
+const AI = {
+  messages: [],
+  busy: false,
+  controller: null,
+  wired: false,
+  provider: null,
+  openRouterModels: null,
+  openRouterLoading: false,
+  keyPromptedFor: null,
+  runtimeStatus: {},
+  runtimeStatusLoading: null,
+  runtimePollTimer: null
+};
+const AI_LEGACY_KEY_LS = "towerforge:anthropic-key";
+const AI_LEGACY_MODEL_LS = "towerforge:ai-model";
+const AI_KEYS_LS = "towerforge:ai-keys";
+const AI_MODELS_LS = "towerforge:ai-models";
+const AI_CUSTOM_MODELS_LS = "towerforge:ai-custom-models";
+const AI_PROVIDER_LS = "towerforge:ai-provider";
+const AI_MODEL_ID_RE = /^[A-Za-z0-9~][A-Za-z0-9._:/~+@-]{0,199}$/;
+const AI_PROVIDERS = {
+  codex: {
+    label: "Codex (ChatGPT)",
+    auth: "runtime",
+    defaultModel: "default",
+    models: [
+      { id: "default", label: "Account default" },
+      { id: "gpt-5.6", label: "GPT-5.6" },
+      { id: "gpt-5.6-terra", label: "GPT-5.6 Terra (fast)" }
+    ]
+  },
+  "claude-code": {
+    label: "Claude Code",
+    auth: "runtime",
+    defaultModel: "sonnet",
+    models: [
+      { id: "sonnet", label: "Sonnet (balanced)" },
+      { id: "opus", label: "Opus (deep)" },
+      { id: "haiku", label: "Haiku (fast)" }
+    ]
+  },
+  anthropic: {
+    label: "Anthropic",
+    auth: "apiKey",
+    keyLabel: "Anthropic API key",
+    keyPlaceholder: "sk-ant-...",
+    defaultModel: "claude-sonnet-5",
+    models: [
+      { id: "claude-sonnet-5", label: "Sonnet 5 (balanced)" },
+      { id: "claude-opus-4-8", label: "Opus 4.8 (deep)" },
+      { id: "claude-fable-5", label: "Fable 5 (maximum)" },
+      { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5 (cheap)" }
+    ]
+  },
+  openai: {
+    label: "OpenAI",
+    auth: "apiKey",
+    keyLabel: "OpenAI API key",
+    keyPlaceholder: "sk-...",
+    defaultModel: "gpt-5.6-terra",
+    models: [
+      { id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)" },
+      { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (deep)" },
+      { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (cheap)" }
+    ]
+  },
+  openrouter: {
+    label: "OpenRouter",
+    auth: "apiKey",
+    keyLabel: "OpenRouter token",
+    keyPlaceholder: "sk-or-v1-...",
+    defaultModel: "openrouter/auto",
+    models: [
+      { id: "openrouter/auto", label: "Auto Router" },
+      { id: "~openai/gpt-latest", label: "OpenAI GPT Latest" }
+    ]
+  }
+};
+
+function aiReadStorage(key, fallback = {}) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "null");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function aiInitStorage() {
+  const legacyKey = localStorage.getItem(AI_LEGACY_KEY_LS);
+  if (legacyKey) {
+    const keys = aiReadStorage(AI_KEYS_LS);
+    if (!keys.anthropic) keys.anthropic = legacyKey;
+    localStorage.setItem(AI_KEYS_LS, JSON.stringify(keys));
+    localStorage.removeItem(AI_LEGACY_KEY_LS);
+  }
+  const legacyModel = localStorage.getItem(AI_LEGACY_MODEL_LS);
+  if (legacyModel) {
+    const models = aiReadStorage(AI_MODELS_LS);
+    if (!models.anthropic) models.anthropic = legacyModel;
+    localStorage.setItem(AI_MODELS_LS, JSON.stringify(models));
+    localStorage.removeItem(AI_LEGACY_MODEL_LS);
+  }
+}
+
+function aiProvider() {
+  const value = $("ai-provider")?.value || AI.provider || localStorage.getItem(AI_PROVIDER_LS) || "codex";
+  return AI_PROVIDERS[value] ? value : "codex";
+}
+
+function aiProviderInfo(provider = aiProvider()) {
+  return AI_PROVIDERS[provider] || AI_PROVIDERS.anthropic;
+}
+
+function aiIsRuntime(provider = aiProvider()) {
+  return aiProviderInfo(provider).auth === "runtime";
+}
+
+function aiRuntimeStatus(provider = aiProvider()) {
+  return AI.runtimeStatus[provider] || null;
+}
+
+function aiKeys() {
+  return aiReadStorage(AI_KEYS_LS);
+}
+
+function aiKey(provider = aiProvider()) {
+  const value = aiKeys()[provider];
+  return typeof value === "string" ? value : "";
+}
+
+function aiHasKey(provider = aiProvider()) {
+  return Boolean(aiKey(provider));
+}
+
+function aiIsReady(provider = aiProvider()) {
+  return aiIsRuntime(provider) ? Boolean(aiRuntimeStatus(provider)?.connected) : aiHasKey(provider);
+}
+
+function aiSetKey(provider, value) {
+  const keys = aiKeys();
+  if (value) keys[provider] = value;
+  else delete keys[provider];
+  localStorage.setItem(AI_KEYS_LS, JSON.stringify(keys));
+}
+
+function aiStoredModel(provider = aiProvider()) {
+  const value = aiReadStorage(AI_MODELS_LS)[provider];
+  return typeof value === "string" && AI_MODEL_ID_RE.test(value) ? value : aiProviderInfo(provider).defaultModel;
+}
+
+function aiSetStoredModel(provider, model) {
+  const models = aiReadStorage(AI_MODELS_LS);
+  models[provider] = model;
+  localStorage.setItem(AI_MODELS_LS, JSON.stringify(models));
+}
+
+function aiCustomModels(provider = aiProvider()) {
+  const values = aiReadStorage(AI_CUSTOM_MODELS_LS)[provider];
+  return Array.isArray(values) ? values.filter((value) => typeof value === "string" && AI_MODEL_ID_RE.test(value)) : [];
+}
+
+function aiAddCustomModel(provider, model) {
+  const all = aiReadStorage(AI_CUSTOM_MODELS_LS);
+  const values = Array.isArray(all[provider]) ? all[provider] : [];
+  all[provider] = [...new Set([...values, model])].slice(-50);
+  localStorage.setItem(AI_CUSTOM_MODELS_LS, JSON.stringify(all));
+}
+
+function aiAvailableModels(provider = aiProvider()) {
+  const byId = new Map();
+  for (const model of aiProviderInfo(provider).models) byId.set(model.id, model);
+  if (provider === "openrouter" && Array.isArray(AI.openRouterModels)) {
+    for (const model of AI.openRouterModels) {
+      if (!byId.has(model.id)) byId.set(model.id, { id: model.id, label: model.name || model.id });
+    }
+  }
+  for (const id of aiCustomModels(provider)) {
+    if (!byId.has(id)) byId.set(id, { id, label: `${id} (custom)` });
+  }
+  return [...byId.values()];
+}
+
+function renderAiModelOptions(provider = aiProvider()) {
+  const select = $("ai-model");
+  if (!select) return;
+  const selected = aiStoredModel(provider);
+  const models = aiAvailableModels(provider);
+  if (!models.some((model) => model.id === selected)) models.unshift({ id: selected, label: `${selected} (custom)` });
+  select.innerHTML = models.map((model) => `<option value="${esc(model.id)}">${esc(model.label)}</option>`).join("");
+  if (provider === "openrouter" && AI.openRouterLoading) {
+    select.insertAdjacentHTML("beforeend", '<option disabled value="">Loading OpenRouter models...</option>');
+  }
+  select.value = selected;
+}
+
+async function loadOpenRouterModels() {
+  if (AI.openRouterLoading || AI.openRouterModels !== null) return;
+  AI.openRouterLoading = true;
+  renderAiModelOptions("openrouter");
+  try {
+    const response = await fetch("/api/ai/models?provider=openrouter");
+    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+    const payload = await response.json();
+    AI.openRouterModels = Array.isArray(payload.models) ? payload.models : [];
+  } catch (error) {
+    AI.openRouterModels = [];
+    toast(`OpenRouter catalog unavailable: ${error.message}`, "warn");
+  } finally {
+    AI.openRouterLoading = false;
+    if (aiProvider() === "openrouter") renderAiModelOptions("openrouter");
+  }
+}
+
+function scheduleAiRuntimePolling(provider) {
+  clearInterval(AI.runtimePollTimer);
+  let attempts = 0;
+  AI.runtimePollTimer = setInterval(async () => {
+    attempts += 1;
+    const status = await loadAiRuntimeStatus(provider, true);
+    if (status?.connected || attempts >= 80 || aiProvider() !== provider) {
+      clearInterval(AI.runtimePollTimer);
+      AI.runtimePollTimer = null;
+    }
+  }, 1_500);
+}
+
+async function loadAiRuntimeStatus(provider = aiProvider(), force = false) {
+  if (!aiIsRuntime(provider)) return null;
+  if (AI.runtimeStatusLoading === provider) return aiRuntimeStatus(provider);
+  if (!force && aiRuntimeStatus(provider)) return aiRuntimeStatus(provider);
+  AI.runtimeStatusLoading = provider;
+  updateAiKeyUi();
+  try {
+    const response = await fetch(`/api/ai/runtime/status?provider=${encodeURIComponent(provider)}`);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `Server returned ${response.status}`);
+    AI.runtimeStatus[provider] = payload;
+    return payload;
+  } catch (error) {
+    AI.runtimeStatus[provider] = { provider, available: false, connected: false, error: error.message };
+    return AI.runtimeStatus[provider];
+  } finally {
+    if (AI.runtimeStatusLoading === provider) AI.runtimeStatusLoading = null;
+    if (aiProvider() === provider) {
+      updateAiKeyUi();
+      if (!AI.messages.length) renderAiEmpty();
+    }
+  }
+}
+
+async function postAiRuntime(pathname, provider) {
+  const response = await fetch(pathname, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `Server returned ${response.status}`);
+  return payload;
+}
+
+async function openAiAuthUrl(url) {
+  if (!url) return;
+  if (isDesktopShell()) await desktopInvoke("desktop_open_external", { url });
+  else window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function aiRuntimeConnect() {
+  const provider = aiProvider();
+  if (!aiIsRuntime(provider)) return;
+  const button = $("ai-runtime-connect");
+  if (button) button.disabled = true;
+  try {
+    const payload = await postAiRuntime("/api/ai/runtime/connect", provider);
+    if (payload.authUrl) await openAiAuthUrl(payload.authUrl);
+    AI.runtimeStatus[provider] = { provider, available: true, connected: false, authenticating: true };
+    updateAiKeyUi();
+    renderAiEmpty();
+    scheduleAiRuntimePolling(provider);
+  } catch (error) {
+    toast(`Could not start ${aiProviderInfo(provider).label} sign-in: ${error.message}`, "err");
+    await loadAiRuntimeStatus(provider, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function aiRuntimeDisconnect() {
+  const provider = aiProvider();
+  if (!aiIsRuntime(provider)) return;
+  if (!await confirmDialog({
+    title: `Disconnect ${aiProviderInfo(provider).label}?`,
+    message: "This removes TowerForge's account session from the official runtime. Other apps and API keys are not touched.",
+    confirmLabel: "Disconnect",
+    danger: true
+  })) return;
+  try {
+    await postAiRuntime("/api/ai/runtime/disconnect", provider);
+    AI.runtimeStatus[provider] = { provider, available: true, connected: false };
+    AI.messages = [];
+    if ($("ai-transcript")) $("ai-transcript").innerHTML = "";
+    updateAiKeyUi();
+    renderAiEmpty();
+  } catch (error) {
+    toast(`Could not disconnect: ${error.message}`, "err");
+  }
+}
 
 /** Tiny safe markdown: escape, then **bold**, `code`, and newlines. */
 function aiMarkdown(text) {
@@ -193,37 +542,182 @@ function aiMarkdown(text) {
 }
 
 function renderAiTab() {
-  const model = $("ai-model");
-  if (model && !model.dataset.init) {
-    model.value = localStorage.getItem(AI_MODEL_LS) || model.value;
-    model.dataset.init = "1";
-    model.addEventListener("change", () => localStorage.setItem(AI_MODEL_LS, model.value));
-  }
   if (!AI.wired) wireAi();
-  const t = $("ai-transcript");
-  if (t && !AI.messages.length) {
-    t.innerHTML = `<div class="ai-empty">${aiHasKey() ? "" : "<b>Set your Anthropic API key</b> to begin — stored only in this browser, never committed.<br><br>"}Ask the co-designer to balance a mission, add a tower, or diagnose difficulty. It runs the deterministic <b>simulate → diagnose → patch</b> loop and edits the <b>saved</b> project.</div>`;
+  if (!AI.provider) {
+    aiInitStorage();
+    const stored = localStorage.getItem(AI_PROVIDER_LS) || "codex";
+    AI.provider = AI_PROVIDERS[stored] ? stored : "codex";
+    if ($("ai-provider")) $("ai-provider").value = AI.provider;
+    renderAiModelOptions(AI.provider);
+    if (AI.provider === "openrouter") loadOpenRouterModels();
   }
-  if (!aiHasKey()) toggleAiKeyRow(true);
+  updateAiKeyUi();
+  const t = $("ai-transcript");
+  if (t && !AI.messages.length) renderAiEmpty();
+  if (aiIsRuntime()) {
+    loadAiRuntimeStatus(aiProvider());
+  } else if (!aiHasKey() && AI.keyPromptedFor !== aiProvider()) {
+    AI.keyPromptedFor = aiProvider();
+    toggleAiKeyRow(true);
+  }
 }
 
 function wireAi() {
   AI.wired = true;
-  $("ai-key-btn")?.addEventListener("click", () => toggleAiKeyRow());
+  $("ai-provider")?.addEventListener("change", () => {
+    const provider = aiProvider();
+    const changed = AI.provider !== provider;
+    AI.provider = provider;
+    localStorage.setItem(AI_PROVIDER_LS, provider);
+    renderAiModelOptions(provider);
+    updateAiKeyUi();
+    toggleAiKeyRow(false);
+    toggleAiModelRow(false);
+    AI.keyPromptedFor = null;
+    if (changed) {
+      AI.messages = [];
+      if ($("ai-transcript")) $("ai-transcript").innerHTML = "";
+      renderAiEmpty();
+      toast(`AI provider: ${aiProviderInfo(provider).label}. New chat started.`, "ok");
+    }
+    if (provider === "openrouter") loadOpenRouterModels();
+    if (aiIsRuntime(provider)) {
+      loadAiRuntimeStatus(provider, true);
+    } else if (!aiHasKey(provider)) {
+      AI.keyPromptedFor = provider;
+      toggleAiKeyRow(true);
+    }
+  });
+  $("ai-model")?.addEventListener("change", () => {
+    const model = $("ai-model")?.value;
+    if (model) aiSetStoredModel(aiProvider(), model);
+  });
+  $("ai-model-add")?.addEventListener("click", () => toggleAiModelRow());
+  $("ai-model-save")?.addEventListener("click", saveAiCustomModel);
+  $("ai-model-close")?.addEventListener("click", () => toggleAiModelRow(false));
+  $("ai-model-input")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); saveAiCustomModel(); }
+    if (event.key === "Escape") toggleAiModelRow(false);
+  });
+  $("ai-key-btn")?.addEventListener("click", () => {
+    if (aiIsRuntime()) aiRuntimeConnect();
+    else toggleAiKeyRow();
+  });
   $("ai-key-save")?.addEventListener("click", () => {
     const v = $("ai-key-input")?.value.trim();
-    if (v) { localStorage.setItem(AI_KEY_LS, v); $("ai-key-input").value = ""; toggleAiKeyRow(false); toast("API key saved (this browser only).", "ok"); renderAiTab(); }
+    if (!v) return;
+    aiSetKey(aiProvider(), v);
+    $("ai-key-input").value = "";
+    toggleAiKeyRow(false);
+    updateAiKeyUi();
+    renderAiEmpty();
+    toast(`${aiProviderInfo().keyLabel} saved on this device.`, "ok");
   });
+  $("ai-key-remove")?.addEventListener("click", () => {
+    aiSetKey(aiProvider(), "");
+    updateAiKeyUi();
+    renderAiEmpty();
+    toggleAiKeyRow(true);
+    toast(`${aiProviderInfo().keyLabel} removed.`, "ok");
+  });
+  $("ai-key-close")?.addEventListener("click", () => toggleAiKeyRow(false));
+  $("ai-key-input")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); $("ai-key-save")?.click(); }
+    if (event.key === "Escape") toggleAiKeyRow(false);
+  });
+  $("ai-runtime-connect")?.addEventListener("click", aiRuntimeConnect);
+  $("ai-runtime-disconnect")?.addEventListener("click", aiRuntimeDisconnect);
   $("ai-form")?.addEventListener("submit", (e) => { e.preventDefault(); aiSend(); });
   $("ai-stop")?.addEventListener("click", () => AI.controller?.abort());
   $("ai-input")?.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); aiSend(); } });
 }
 
+function renderAiEmpty() {
+  const transcript = $("ai-transcript");
+  if (!transcript || AI.messages.length) return;
+  let authPrompt = "";
+  if (aiIsRuntime()) {
+    const status = aiRuntimeStatus();
+    if (!status) authPrompt = `<b>Checking ${esc(aiProviderInfo().label)}...</b><br><br>`;
+    else if (status.authenticating) authPrompt = `<b>Complete sign-in in your browser.</b><br><br>`;
+    else if (!status.available) authPrompt = `<b>${esc(status.error || "Official runtime is unavailable.")}</b><br><br>`;
+    else if (!status.connected) authPrompt = `<b>Connect your ${esc(aiProviderInfo().label)} account to begin.</b><br><br>`;
+    authPrompt += `Your prompt and the TowerForge tool results needed for the task are sent to the selected provider. OAuth credentials stay inside its official runtime, and local agent transcripts are not persisted by TowerForge.<br><br>`;
+  } else if (!aiHasKey()) {
+    authPrompt = `<b>Set your ${esc(aiProviderInfo().keyLabel)}</b> to begin. It stays on this device and is never committed.<br><br>`;
+  }
+  transcript.innerHTML = `<div class="ai-empty">${authPrompt}Ask the co-designer to balance a mission, add a tower, or diagnose difficulty. It runs the deterministic <b>simulate → diagnose → patch</b> loop and edits the <b>saved</b> project.</div>`;
+}
+
+function updateAiKeyUi() {
+  const info = aiProviderInfo();
+  const runtime = aiIsRuntime();
+  const status = runtime ? aiRuntimeStatus() : null;
+  const saved = aiHasKey();
+  if ($("ai-runtime-row")) $("ai-runtime-row").hidden = !runtime;
+  if ($("ai-key-row") && runtime) $("ai-key-row").hidden = true;
+  if ($("ai-key-btn")) $("ai-key-btn").hidden = runtime;
+  if ($("ai-runtime-status") && runtime) {
+    const checking = AI.runtimeStatusLoading === aiProvider();
+    $("ai-runtime-status").textContent = checking
+      ? "Checking account..."
+      : status?.connected
+        ? `${status.method || info.label}${status.subscription ? ` · ${status.subscription}` : ""}`
+        : status?.authenticating
+          ? "Waiting for browser sign-in..."
+          : status?.available === false
+            ? status.error || "Runtime unavailable"
+            : "Not connected";
+  }
+  if ($("ai-runtime-indicator")) {
+    $("ai-runtime-indicator").dataset.state = status?.connected ? "connected" : status?.authenticating ? "pending" : "disconnected";
+  }
+  if ($("ai-runtime-connect")) {
+    $("ai-runtime-connect").hidden = Boolean(status?.connected);
+    $("ai-runtime-connect").textContent = status?.authenticating ? "Open sign-in again" : "Connect";
+  }
+  if ($("ai-runtime-disconnect")) $("ai-runtime-disconnect").hidden = !status?.connected;
+  if (!runtime) {
+    if ($("ai-key-label")) $("ai-key-label").textContent = info.keyLabel;
+    if ($("ai-key-input")) $("ai-key-input").placeholder = saved ? `${info.keyLabel} saved; paste to replace` : `${info.keyPlaceholder} (stored on this device only)`;
+    if ($("ai-key-remove")) $("ai-key-remove").hidden = !saved;
+    if ($("ai-key-btn")) {
+      $("ai-key-btn").textContent = saved ? "Key saved" : "API key";
+      $("ai-key-btn").title = `Set ${info.keyLabel}`;
+    }
+  }
+  if ($("ai-model-label")) $("ai-model-label").textContent = `${info.label} model ID`;
+}
+
+function saveAiCustomModel() {
+  const input = $("ai-model-input");
+  const model = input?.value.trim() || "";
+  if (!AI_MODEL_ID_RE.test(model)) {
+    toast("Enter a valid model ID (letters, numbers, ., -, _, /, :, ~, + or @).", "warn");
+    return;
+  }
+  const provider = aiProvider();
+  aiAddCustomModel(provider, model);
+  aiSetStoredModel(provider, model);
+  if (input) input.value = "";
+  renderAiModelOptions(provider);
+  toggleAiModelRow(false);
+  toast(`Model added: ${model}`, "ok");
+}
+
 function toggleAiKeyRow(show) {
+  if (aiIsRuntime()) return;
   const row = $("ai-key-row");
   if (!row) return;
   row.hidden = show === undefined ? !row.hidden : !show;
   if (!row.hidden) $("ai-key-input")?.focus();
+}
+
+function toggleAiModelRow(show) {
+  const row = $("ai-model-row");
+  if (!row) return;
+  row.hidden = show === undefined ? !row.hidden : !show;
+  if (!row.hidden) $("ai-model-input")?.focus();
 }
 
 function aiBubble(role, html) {
@@ -241,6 +735,12 @@ function aiSetBusy(b) {
   if ($("ai-send")) $("ai-send").hidden = b;
   if ($("ai-stop")) $("ai-stop").hidden = !b;
   if ($("ai-input")) $("ai-input").disabled = b;
+  if ($("ai-provider")) $("ai-provider").disabled = b;
+  if ($("ai-model")) $("ai-model").disabled = b;
+  if ($("ai-model-add")) $("ai-model-add").disabled = b;
+  if ($("ai-key-btn")) $("ai-key-btn").disabled = b;
+  if ($("ai-runtime-connect")) $("ai-runtime-connect").disabled = b;
+  if ($("ai-runtime-disconnect")) $("ai-runtime-disconnect").disabled = b;
 }
 
 async function aiSend() {
@@ -248,8 +748,18 @@ async function aiSend() {
   const input = $("ai-input");
   const text = input?.value.trim();
   if (!text) return;
-  const apiKey = localStorage.getItem(AI_KEY_LS);
-  if (!apiKey) { toggleAiKeyRow(true); toast("Set your Anthropic API key first.", "warn"); return; }
+  const provider = aiProvider();
+  const apiKey = aiKey(provider);
+  if (!aiIsReady(provider)) {
+    if (aiIsRuntime(provider)) {
+      toast(`Connect ${aiProviderInfo(provider).label} first.`, "warn");
+      aiRuntimeConnect();
+    } else {
+      toggleAiKeyRow(true);
+      toast(`Set your ${aiProviderInfo(provider).keyLabel} first.`, "warn");
+    }
+    return;
+  }
   if (S.dirty) {
     const ok = await confirmDialog({ title: "Save before AI edits?", message: "The AI co-designer edits the saved project on disk. Save your local changes first so they aren't overwritten when the editor reloads.", confirmLabel: "Save & continue", danger: false });
     if (!ok) return;
@@ -272,7 +782,7 @@ async function aiSend() {
   try {
     const res = await fetch("/api/ai/chat", {
       method: "POST", headers: { "Content-Type": "application/json" }, signal: AI.controller.signal,
-      body: JSON.stringify({ apiKey, model: $("ai-model")?.value, messages: AI.messages })
+      body: JSON.stringify({ provider, ...(aiIsRuntime(provider) ? {} : { apiKey }), model: $("ai-model")?.value, messages: AI.messages })
     });
     if (!res.ok || !res.body) throw new Error(`Server returned ${res.status}`);
     const reader = res.body.getReader();
@@ -288,18 +798,18 @@ async function aiSend() {
         if (!line) continue;
         let ev; try { ev = JSON.parse(line); } catch { continue; }
         if (ev.type === "text") steps.insertAdjacentHTML("beforeend", `<div class="ai-text">${aiMarkdown(ev.text)}</div>`);
-        else if (ev.type === "tool_call") steps.insertAdjacentHTML("beforeend", `<div class="ai-tool" data-id="${esc(ev.id)}"><span class="ai-tool-name">⚙ ${esc(ev.name)}</span> <code>${esc(JSON.stringify(ev.input).slice(0, 160))}</code> <span class="ai-tool-status">running…</span></div>`);
+        else if (ev.type === "tool_call") steps.insertAdjacentHTML("beforeend", `<div class="ai-tool" data-id="${esc(ev.id)}"><span class="ai-tool-name">${esc(ev.name)}</span> <code>${esc(JSON.stringify(ev.input).slice(0, 160))}</code> <span class="ai-tool-status">running</span></div>`);
         else if (ev.type === "tool_result") {
           const el = steps.querySelector(`.ai-tool[data-id="${CSS.escape(ev.id)}"] .ai-tool-status`);
-          if (el) { el.textContent = ev.ok ? "✓ done" : "✗ error"; el.className = `ai-tool-status ${ev.ok ? "ok" : "err"}`; el.title = JSON.stringify(ev.summary ?? {}).slice(0, 500); }
+          if (el) { el.textContent = ev.ok ? "done" : "error"; el.className = `ai-tool-status ${ev.ok ? "ok" : "err"}`; el.title = JSON.stringify(ev.summary ?? {}).slice(0, 500); }
         }
-        else if (ev.type === "error") steps.insertAdjacentHTML("beforeend", `<div class="ai-error">⚠ ${esc(ev.error)}</div>`);
+        else if (ev.type === "error") steps.insertAdjacentHTML("beforeend", `<div class="ai-error">${esc(ev.error)}</div>`);
         else if (ev.type === "done") { gotDone = true; if (Array.isArray(ev.messages)) AI.messages = ev.messages; appliedPatch = !!ev.appliedPatch; }
         $("ai-transcript").scrollTop = $("ai-transcript").scrollHeight;
       }
     }
   } catch (e) {
-    steps.insertAdjacentHTML("beforeend", `<div class="ai-error">${e.name === "AbortError" ? "Stopped." : "⚠ " + esc(e.message)}</div>`);
+    steps.insertAdjacentHTML("beforeend", `<div class="ai-error">${e.name === "AbortError" ? "Stopped." : esc(e.message)}</div>`);
   } finally {
     if (!gotDone) AI.messages = snapshot; // turn didn't complete — keep history consistent with the server
     aiSetBusy(false);
@@ -1883,6 +2393,7 @@ function addNode() {
 // ─────────────────────────────────────────────────────────────────────────────
 let mapRenderer = null;
 let mapPainting = false;
+let mapPaintStroke = null;
 const GID_BY_TERRAIN_C = { buildable: 1, path: 2, blocked: 3, water: 4, spawn: 5, core: 6 };
 const TERRAIN_BY_GID_C = { 1: "buildable", 2: "path", 3: "blocked", 4: "water", 5: "spawn", 6: "core" };
 
@@ -1921,6 +2432,52 @@ function paintTerrainTile(source, coord, terrain) {
   layer.data[i] = GID_BY_TERRAIN_C[terrain] ?? 1;
   // Tile layer is authoritative: drop any conflicting legacy explicit override.
   if (Array.isArray(source.terrainOverrides)) source.terrainOverrides = source.terrainOverrides.filter(o => !(o.q === coord.q && o.r === coord.r));
+}
+
+function coordKey(coord) { return `${coord.q},${coord.r}`; }
+
+/** Keep the authored centerline, its default runtime route, and path terrain in lockstep. */
+function replacePrimaryPath(source, nextPath) {
+  const path = nextPath.map(coord => ({ q: coord.q, r: coord.r }));
+  const pathKeys = new Set(path.map(coordKey));
+  const layer = ensureTerrainLayer(source);
+  const defaultTerrain = mapDefaultTerrain(source);
+
+  // Path painting owns path terrain. Removing/replacing a route must not leave road cells from the
+  // previous centerline behind, because those cells make the map preview disagree with runtime.
+  for (let i = 0; i < layer.data.length; i += 1) {
+    if (TERRAIN_BY_GID_C[layer.data[i]] !== "path") continue;
+    const key = `${i % layer.width},${Math.floor(i / layer.width)}`;
+    if (!pathKeys.has(key)) layer.data[i] = GID_BY_TERRAIN_C[defaultTerrain] ?? GID_BY_TERRAIN_C.buildable;
+  }
+  if (Array.isArray(source.terrainOverrides)) {
+    source.terrainOverrides = source.terrainOverrides.filter(item => item.terrain !== "path" || pathKeys.has(coordKey(item)));
+  }
+  for (const coord of path) paintTerrainTile(source, coord, "path");
+
+  setMapProperty(source, "pathCenterline", JSON.stringify(path));
+
+  // HexMap uses the first named route as the default route. Keep it synchronized when the source
+  // explicitly declares routes; with no named routes the compiler derives "main" from centerline.
+  const routeProp = (source.properties ?? []).find(prop => prop.name === "pathRoutes");
+  const routes = Array.isArray(source.pathRoutes)
+    ? source.pathRoutes
+    : parseJsonInput(routeProp?.value, []);
+  if (Array.isArray(routes) && routes.length) {
+    const updated = routes.map((route, index) => index === 0 ? { ...route, pathCenterline: path.map(coord => ({ ...coord })) } : route);
+    if (Array.isArray(source.pathRoutes)) source.pathRoutes = updated;
+    else setMapProperty(source, "pathRoutes", JSON.stringify(updated));
+  }
+}
+
+function updateMapPathField(source, value) {
+  let parsed;
+  try { parsed = JSON.parse(value); }
+  catch { toast("pathCenterline must be valid JSON.", "warn"); return; }
+  if (!Array.isArray(parsed)) { toast("pathCenterline must be a JSON array.", "warn"); return; }
+  replacePrimaryPath(source, parsed);
+  markDirty(true);
+  drawSelectedMapSource();
 }
 /** Build a render definition honoring layer-visibility toggles. */
 function mapEditorDefinition(source) {
@@ -2050,7 +2607,7 @@ function renderMapSourceDetail() {
   $("map-height-field").onchange = (e) => { source.height = Math.max(1, Number(e.target.value) || 1); markDirty(true); drawSelectedMapSource(); };
   $("map-spawn-field").onchange = (e) => updateMapJsonField(source, "spawnCoord", e.target.value, false);
   $("map-core-field").onchange = (e) => updateMapJsonField(source, "coreCoord", e.target.value, false);
-  $("map-path-field").onchange = (e) => updateMapJsonField(source, "pathCenterline", e.target.value, true);
+  $("map-path-field").onchange = (e) => updateMapPathField(source, e.target.value);
   $("map-routes-field").onchange = (e) => { source.pathRoutes = parseJsonInput(e.target.value, []); markDirty(true); drawSelectedMapSource(); };
   $("map-terrain-field").onchange = (e) => { source.terrainOverrides = parseJsonInput(e.target.value, []); markDirty(true); drawSelectedMapSource(); };
   $("map-paint-mode").onchange = (e) => { S.mapPaintMode = e.target.value; };
@@ -2064,9 +2621,19 @@ function drawSelectedMapSource() {
   if (!mapRenderer) {
     mapRenderer = createCanvasRenderer({ canvas, content: { towers: {}, enemies: {} } });
     window.addEventListener("resize", () => { if (S.activeTab === "maps") drawSelectedMapSource(); });
-    canvas.addEventListener("mousedown", e => { mapPainting = true; paintMapAt(e); });
+    canvas.addEventListener("mousedown", e => {
+      if (e.button !== 0 || S.mapPaintMode === "inspect") return;
+      mapPainting = true;
+      mapPaintStroke = { visited: new Set(), pathAction: null };
+      paintMapAt(e);
+    });
     canvas.addEventListener("mousemove", e => { if (mapPainting) paintMapAt(e); });
-    window.addEventListener("mouseup", () => { if (mapPainting) { mapPainting = false; if (S.activeTab === "maps") renderMapSourceDetail(); } });
+    window.addEventListener("mouseup", () => {
+      if (!mapPainting) return;
+      mapPainting = false;
+      mapPaintStroke = null;
+      if (S.activeTab === "maps") renderMapSourceDetail();
+    });
   }
   mapRenderer.resize();
   mapRenderer.drawMapDefinition(mapEditorDefinition(source));
@@ -2081,27 +2648,54 @@ function paintMapAt(event) {
     for (let q = 0; q < def.width; q += 1) tiles.push({ q, r });
   const coord = mapRenderer.pickTile(event, tiles);
   if (!coord) return;
+  const key = coordKey(coord);
+  if (mapPaintStroke?.visited.has(key)) return;
+  mapPaintStroke?.visited.add(key);
   const mode = S.mapPaintMode;
   if (mode === "spawn") setMapProperty(source, "spawnCoord", JSON.stringify(coord));
   else if (mode === "core") setMapProperty(source, "coreCoord", JSON.stringify(coord));
   else if (mode === "path") {
     const path = def.pathCenterline ?? [];
-    if (!path.some(p => p.q === coord.q && p.r === coord.r)) {
-      path.push(coord);
-      setMapProperty(source, "pathCenterline", JSON.stringify(path));
-    }
-    paintTerrainTile(source, coord, "path");
+    const exists = path.some(point => coordKey(point) === key);
+    if (mapPaintStroke && mapPaintStroke.pathAction === null) mapPaintStroke.pathAction = exists ? "remove" : "add";
+    const action = mapPaintStroke?.pathAction ?? (exists ? "remove" : "add");
+    const nextPath = action === "remove"
+      ? path.filter(point => coordKey(point) !== key)
+      : exists ? path : [...path, coord];
+    replacePrimaryPath(source, nextPath);
   } else {
     paintTerrainTile(source, coord, mode); // buildable / blocked / water
+    const path = def.pathCenterline ?? [];
+    if (path.some(point => coordKey(point) === key)) {
+      replacePrimaryPath(source, path.filter(point => coordKey(point) !== key));
+      paintTerrainTile(source, coord, mode);
+    }
   }
   markDirty(true);
   drawSelectedMapSource();
 }
 
-$("btn-map-compile")?.addEventListener("click", async () => {
+$("btn-map-clear-path")?.addEventListener("click", async () => {
+  const source = S.project?.mapSources?.[S.selectedMapSourceName];
+  if (!source) return;
+  const ok = await confirmDialog({
+    title: "Clear route?",
+    message: "This removes the centerline and its path terrain. You can undo the change before saving.",
+    confirmLabel: "Clear route",
+    danger: true
+  });
+  if (!ok) return;
+  replacePrimaryPath(source, []);
+  S.mapPaintMode = "path";
+  markDirty(true);
+  renderMapSourceDetail();
+  drawSelectedMapSource();
+});
+
+async function compileMaps() {
   if (S.dirty) {
-    toast("Save map source changes before compiling.", "warn");
-    return;
+    const saved = await save();
+    if (!saved) return;
   }
   setStatus("Compiling maps…");
   try {
@@ -2114,7 +2708,8 @@ $("btn-map-compile")?.addEventListener("click", async () => {
     setStatus("Map compile failed");
     toast("Map compile failed: " + e.message, "err");
   }
-});
+}
+$("btn-map-compile")?.addEventListener("click", () => runStudioCommand("project.compile_maps"));
 
 function mapSourceToDefinition(source, sourceName) {
   const props = mapProperties(source);
@@ -2434,12 +3029,40 @@ async function setupMcpSettings() {
   const cfgBox = $("mcp-config");
   const pathEl = $("mcp-path");
   const copyBtn = $("btn-copy-mcp");
+  const clientSel = $("mcp-client");
+  const clientHow = $("mcp-client-how");
+  const connectBtn = $("btn-connect-mcp");
   if (!cb) return;
+
+  let clients = [];
+  const currentClient = () => clients.find((c) => c.id === clientSel?.value) ?? clients[0];
+
+  // Show the selected client's ready-made snippet (Claude Code / Codex / Claude Desktop / Cursor /
+  // VS Code), its target file, and — for project-scoped clients — a one-click write button.
+  const renderClient = () => {
+    const client = currentClient();
+    if (!client) return;
+    if (cfgBox) cfgBox.value = client.snippet;
+    if (pathEl) pathEl.textContent = client.file;
+    if (clientHow) clientHow.textContent = client.how;
+    if (connectBtn) {
+      connectBtn.hidden = !client.writable;
+      connectBtn.textContent = `Write ${client.file} into project`;
+    }
+  };
 
   const apply = (state) => {
     cb.checked = !!state.enabled;
-    if (cfgBox) cfgBox.value = JSON.stringify(state.config ?? {}, null, 2);
-    if (pathEl) pathEl.textContent = state.mcpJsonPath ?? ".mcp.json";
+    if (Array.isArray(state.clients) && state.clients.length) {
+      clients = state.clients;
+      if (clientSel && clientSel.options.length !== clients.length) {
+        clientSel.innerHTML = clients.map((c) => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join("");
+      }
+      renderClient();
+    } else if (cfgBox) {
+      cfgBox.value = JSON.stringify(state.config ?? {}, null, 2);
+      if (pathEl) pathEl.textContent = state.mcpJsonPath ?? ".mcp.json";
+    }
     if (hint) {
       hint.textContent = state.parseError
         ? `⚠ ${state.mcpJsonPath} exists but is not valid JSON. Fix or remove it before toggling MCP.`
@@ -2449,6 +3072,24 @@ async function setupMcpSettings() {
     }
     if (cb) cb.disabled = !!state.parseError;
   };
+
+  if (clientSel) clientSel.onchange = renderClient;
+  if (connectBtn) {
+    connectBtn.onclick = async () => {
+      const client = currentClient();
+      if (!client) return;
+      connectBtn.disabled = true;
+      try {
+        const result = await apiPost("/api/mcp/connect-client", { clientId: client.id });
+        toast(`Wrote ${result.filePath} — ${client.label} will pick it up on next launch.`, "ok");
+        if (result.state) apply(result.state); // .mcp.json write flips the enable toggle too
+      } catch (e) {
+        toast("Connect failed: " + e.message, "err");
+      } finally {
+        connectBtn.disabled = false;
+      }
+    };
+  }
 
   try {
     apply(await apiGet("/api/mcp"));
@@ -2629,7 +3270,7 @@ function showBuildResult(targetId, output) {
 // ─────────────────────────────────────────────────────────────────────────────
 // VALIDATE / SIM
 // ─────────────────────────────────────────────────────────────────────────────
-$("btn-validate")?.addEventListener("click", async () => {
+async function validateProject() {
   setStatus("Validating…");
   showOverlayLoading("validation-overlay", "validation-results", "Running full validation…", "val-title", "Validating");
   try {
@@ -2641,7 +3282,8 @@ $("btn-validate")?.addEventListener("click", async () => {
     toast("Validation error: " + e.message, "err");
     setStatus("Validation error");
   }
-});
+}
+$("btn-validate")?.addEventListener("click", () => runStudioCommand("project.validate"));
 
 function showValidation(result) {
   const errors   = result.issues.filter(i => i.severity === "error");
@@ -2674,7 +3316,7 @@ function showValidation(result) {
 $("btn-close-validation")?.addEventListener("click", () => $("validation-overlay").classList.add("hidden"));
 $("validation-overlay")?.addEventListener("click", e => { if (e.target === $("validation-overlay")) $("validation-overlay").classList.add("hidden"); });
 
-$("btn-sim")?.addEventListener("click", async () => {
+async function simulateSelectedMission() {
   const missionId = S.waveMissionId ?? S.selectedMissionEdId;
   if (!missionId) { toast("Select a mission first.", "warn"); return; }
   showOverlayLoading("sim-overlay", "sim-results", "Running headless simulation…", "sim-title", "Simulating");
@@ -2682,7 +3324,8 @@ $("btn-sim")?.addEventListener("click", async () => {
     const result = await apiGet(`/api/sim/${encodeURIComponent(missionId)}`);
     showSimResult(result);
   } catch (e) { toast("Sim error: " + e.message, "err"); $("sim-overlay")?.classList.add("hidden"); }
-});
+}
+$("btn-sim")?.addEventListener("click", () => runStudioCommand("project.simulate"));
 
 function showSimResult(result) {
   const overlay = $("sim-overlay");
@@ -2746,8 +3389,8 @@ $("sim-overlay")?.addEventListener("click", e => { if (e.target === $("sim-overl
 // ─────────────────────────────────────────────────────────────────────────────
 document.addEventListener("keydown", e => {
   const ctrl = e.ctrlKey || e.metaKey;
-  if (ctrl && (e.key === "s" || e.key === "S")) { e.preventDefault(); save(); }
-  if (ctrl && e.shiftKey && e.key === "V")       { e.preventDefault(); $("btn-validate")?.click(); }
+  if (ctrl && (e.key === "s" || e.key === "S")) { e.preventDefault(); runStudioCommand("file.save"); }
+  if (ctrl && e.shiftKey && e.key === "V")       { e.preventDefault(); runStudioCommand("project.validate"); }
   if (e.key === "Escape") {
     $("validation-overlay")?.classList.add("hidden");
     $("sim-overlay")?.classList.add("hidden");
@@ -2761,9 +3404,9 @@ document.addEventListener("keydown", e => {
 // ─────────────────────────────────────────────────────────────────────────────
 // NAVIGATION WIRING
 // ─────────────────────────────────────────────────────────────────────────────
-$("btn-save")?.addEventListener("click", save);
+$("btn-save")?.addEventListener("click", () => runStudioCommand("file.save"));
 document.querySelectorAll(".nav-tab").forEach(btn => {
-  btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  btn.addEventListener("click", () => runStudioCommand(`navigate.${btn.dataset.tab}`));
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -3032,6 +3675,12 @@ function buildPlaytestContent() {
     return true;
   } catch (e) { PT.error = "Cannot build game from project: " + e.message; PT.content = null; return false; }
 }
+async function refreshPlaytestMaps() {
+  const mapSources = S.project.mapSources ?? {};
+  if (!Object.keys(mapSources).length) return;
+  const result = await apiPost("/api/maps/preview", { mapSources });
+  S.project.maps = result.maps;
+}
 function newPlaytestGame() {
   if (!PT.content) return null;
   const ids = Object.keys(PT.content.missions ?? {});
@@ -3049,7 +3698,13 @@ async function renderPlaytestTab() {
   const empty = $("playtest-empty"), stage = $("playtest-stage"), side = $("playtest-side");
   const fail = msg => { empty.style.display = "flex"; empty.querySelector("p").textContent = msg; stage.style.display = "none"; side.style.display = "none"; stopPlaytestLoop(); };
   if (!(await ensurePlaytestEngine())) return fail(PT.error);
-  if (PT.dirty || !PT.game) { if (buildPlaytestContent()) newPlaytestGame(); PT.dirty = false; }
+  if (PT.dirty || !PT.game) {
+    PT.error = null;
+    try { await refreshPlaytestMaps(); }
+    catch (e) { PT.error = "Cannot preview current map sources: " + e.message; }
+    if (!PT.error && buildPlaytestContent()) newPlaytestGame();
+    PT.dirty = false;
+  }
   if (PT.error || !PT.game) return fail(PT.error ?? "No playable mission.");
   empty.style.display = "none"; stage.style.display = "flex"; side.style.display = "flex";
   const canvas = $("playtest-canvas");
@@ -3109,23 +3764,28 @@ function startPlaytestLoop() {
     const dt = Math.min(0.05, (now - PT.lastFrame) / 1000);
     PT.lastFrame = now;
     const speed = Number($("pt-speed")?.value) || 0;
-    const ticked = speed > 0 && PT.game.getSnapshot().outcome === "playing";
+    // Capture player-action events before tick() clears them, so their sounds/effects fire.
+    let rsnap = PT.game.getRenderSnapshot();
+    const pending = rsnap.lastEvents;
+    const ticked = speed > 0 && rsnap.outcome === "playing";
     if (ticked) {
       const tu = PT.content.constants.timeUnitSeconds || 1;
       PT.game.tick((dt / tu) * speed);
+      rsnap = PT.game.getRenderSnapshot();
     }
-    const rsnap = PT.game.getRenderSnapshot();
-    if (!ticked) rsnap.lastEvents = []; // don't replay last tick's sounds/effects on idle frames
+    const events = ticked ? pending.concat(rsnap.lastEvents) : pending;
+    PT.game.lastEvents = []; // consumed this frame — clear so nothing replays next frame
+    rsnap.lastEvents = events;
     PT.renderer.drawSnapshot(rsnap);
-    if (PT.audio && $("pt-sound")?.checked) PT.audio.handleEvents(rsnap.lastEvents);
-    updatePlaytestHud();
+    if (PT.audio && $("pt-sound")?.checked) PT.audio.handleEvents(events);
+    updatePlaytestHud(rsnap);
     PT.raf = requestAnimationFrame(loop);
   };
   PT.raf = requestAnimationFrame(loop);
 }
 function stopPlaytestLoop() { if (PT.raf) { cancelAnimationFrame(PT.raf); PT.raf = null; } }
-function updatePlaytestHud() {
-  const s = PT.game.getSnapshot(), set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+function updatePlaytestHud(s = PT.game.getSnapshot()) {
+  const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
   const out = $("pt-outcome");
   if (out) { out.textContent = s.outcome; out.className = "v " + (s.outcome === "victory" ? "text-ok" : s.outcome === "defeat" ? "text-err" : ""); }
   set("pt-core", `${Math.ceil(s.coreHp)}/${s.maxCoreHp}`);
@@ -3172,6 +3832,7 @@ function historyCommit() {
   if (H.committed) { H.undo.push(H.committed); if (H.undo.length > H.MAX) H.undo.shift(); }
   H.redo = [];
   H.committed = JSON.parse(snap);
+  scheduleDesktopUiSync();
 }
 function historyUndo() {
   historyCommit();
@@ -3197,8 +3858,8 @@ function afterHistoryRestore(label) {
 document.addEventListener("keydown", e => {
   const ctrl = e.ctrlKey || e.metaKey;
   const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
-  if (ctrl && !e.shiftKey && (e.key === "z" || e.key === "Z")) { if (inField) return; e.preventDefault(); historyUndo(); }
-  else if (ctrl && ((e.shiftKey && (e.key === "z" || e.key === "Z")) || e.key === "y" || e.key === "Y")) { if (inField) return; e.preventDefault(); historyRedo(); }
+  if (ctrl && !e.shiftKey && (e.key === "z" || e.key === "Z")) { if (inField) return; e.preventDefault(); runStudioCommand("edit.undo"); }
+  else if (ctrl && ((e.shiftKey && (e.key === "z" || e.key === "Z")) || e.key === "y" || e.key === "Y")) { if (inField) return; e.preventDefault(); runStudioCommand("edit.redo"); }
   if (e.key === "Escape" && !$("confirm-overlay")?.classList.contains("hidden")) closeConfirm(false);
 });
 
@@ -3277,17 +3938,16 @@ document.addEventListener("click", e => {
 let cmdkActive = 0;
 function buildCmdkItems() {
   const items = [];
-  const tabs = [["waves", "Waves"], ["enemies", "Enemies"], ["towers", "Towers"], ["missions", "Missions"], ["worldmap", "World Map"], ["maps", "Maps"], ["playtest", "Playtest"], ["balance", "Balance"], ["assets", "Assets"], ["settings", "Settings"], ["buildtargets", "Build Targets"]];
-  for (const [t, label] of tabs) items.push({ kind: "Go", label: "Go to " + label, run: () => switchTab(t) });
-  items.push({ kind: "Run", label: "Run balance analysis", run: () => { switchTab("balance"); runBalance(); } });
+  for (const [t, label] of STUDIO_TABS) items.push({ kind: "Go", label: "Go to " + label, run: () => runStudioCommand(`navigate.${t}`) });
+  items.push({ kind: "Run", label: "Run balance analysis", run: () => runStudioCommand("project.balance") });
   items.push({ kind: "New", label: "Add enemy", run: () => { switchTab("enemies"); $("btn-add-enemy")?.click(); } });
   items.push({ kind: "New", label: "Add tower", run: () => { switchTab("towers"); $("btn-add-tower")?.click(); } });
   items.push({ kind: "New", label: "Add mission", run: () => { switchTab("missions"); $("btn-add-mission")?.click(); } });
-  items.push({ kind: "Run", label: "Validate project", hint: "⌘⇧V", run: () => $("btn-validate")?.click() });
-  items.push({ kind: "Run", label: "Run simulation", run: () => $("btn-sim")?.click() });
-  items.push({ kind: "Run", label: "Save project", hint: "⌘S", run: () => save() });
-  items.push({ kind: "Run", label: "Undo", hint: "⌘Z", run: () => historyUndo() });
-  items.push({ kind: "Run", label: "Redo", hint: "⌘⇧Z", run: () => historyRedo() });
+  items.push({ kind: "Run", label: "Validate project", hint: "⌘⇧V", run: () => runStudioCommand("project.validate") });
+  items.push({ kind: "Run", label: "Run simulation", run: () => runStudioCommand("project.simulate") });
+  items.push({ kind: "Run", label: "Save project", hint: "⌘S", run: () => runStudioCommand("file.save") });
+  items.push({ kind: "Run", label: "Undo", hint: "⌘Z", run: () => runStudioCommand("edit.undo") });
+  items.push({ kind: "Run", label: "Redo", hint: "⌘⇧Z", run: () => runStudioCommand("edit.redo") });
   for (const [id, e] of Object.entries(S.project?.enemies ?? {})) items.push({ kind: "Enemy", label: e.label || id, sub: id, color: enemyColorHex(e), run: () => jumpToEntity("enemy", id) });
   for (const [id, t] of Object.entries(S.project?.towers ?? {})) items.push({ kind: "Tower", label: t.label || id, sub: id, color: towerColorHex(t), run: () => jumpToEntity("tower", id) });
   for (const [id, m] of Object.entries(S.project?.missions ?? {})) items.push({ kind: "Mission", label: m.label || id, sub: id, run: () => jumpToEntity("mission", id) });
@@ -3328,7 +3988,7 @@ function runCmdk(i) {
   const it = ($("cmdk-results")._list || [])[i];
   if (!it) return;
   closeCmdk();
-  try { it.run(); } catch (e) { toast("Command failed: " + e.message, "err"); }
+  Promise.resolve().then(() => it.run()).catch(e => toast("Command failed: " + e.message, "err"));
 }
 $("cmdk-input")?.addEventListener("input", () => { cmdkActive = 0; renderCmdk($("cmdk-input").value); });
 $("cmdk-input")?.addEventListener("keydown", e => {
@@ -3342,7 +4002,7 @@ $("cmdk-overlay")?.addEventListener("click", e => { if (e.target === $("cmdk-ove
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
     e.preventDefault();
-    $("cmdk-overlay")?.classList.contains("hidden") ? openCmdk() : closeCmdk();
+    runStudioCommand("view.command_palette");
   }
 });
 
@@ -3406,7 +4066,7 @@ $("dirty-badge")?.addEventListener("click", () => { if (S.dirty) showChangeRevie
 // ═════════════════════════════════════════════════════════════════════════════
 function renderBalanceTab() {
   const btn = $("btn-run-balance");
-  if (btn && !btn.dataset.wired) { btn.dataset.wired = "1"; btn.addEventListener("click", runBalance); }
+  if (btn && !btn.dataset.wired) { btn.dataset.wired = "1"; btn.addEventListener("click", () => runStudioCommand("project.balance")); }
   const box = $("balance-results");
   if (!box) return;
   if (S.balanceReport) renderBalanceReport(S.balanceReport);
@@ -3488,26 +4148,260 @@ function applyDensity(d) {
   try { localStorage.setItem("towerforge:density", d); } catch { /* ignore */ }
   document.documentElement.setAttribute("data-density", d);
 }
-$("btn-theme")?.addEventListener("click", () => {
+function toggleTheme() {
   applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
   if (S.project && S.activeTab === "settings") renderSettingsTab();
-});
+}
+$("btn-theme")?.addEventListener("click", () => runStudioCommand("view.toggle_theme"));
 applyTheme(currentTheme());
 matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { if (currentTheme() === "system") applyTheme("system"); });
+
+// ── Sidebar ────────────────────────────────────────────────────────────────────────────────
+function applySidebarCollapsed(collapsed, persist = true) {
+  document.documentElement.setAttribute("data-sidebar", collapsed ? "collapsed" : "expanded");
+  const toggle = $("sidebar-toggle");
+  const action = collapsed ? "Expand navigation" : "Collapse navigation";
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", action);
+    toggle.title = action;
+  }
+  for (const tab of document.querySelectorAll(".nav-tab")) {
+    const label = tab.querySelector("span")?.textContent?.trim() || tab.dataset.tab || "Section";
+    tab.setAttribute("aria-label", label);
+    if (collapsed) tab.title = label;
+    else tab.removeAttribute("title");
+  }
+  if (persist) {
+    try { localStorage.setItem("towerforge:sidebar-collapsed", collapsed ? "1" : "0"); }
+    catch { /* ignore */ }
+  }
+}
+
+function setupSidebar() {
+  const collapsed = document.documentElement.getAttribute("data-sidebar") === "collapsed";
+  applySidebarCollapsed(collapsed, false);
+  $("sidebar-toggle")?.addEventListener("click", () => {
+    applySidebarCollapsed(document.documentElement.getAttribute("data-sidebar") !== "collapsed");
+  });
+  $("sidebar-about")?.addEventListener("click", () => runStudioCommand("help.about"));
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // ONBOARDING — first-run welcome + help
 // ═════════════════════════════════════════════════════════════════════════════
 function showWelcome() { $("welcome-overlay")?.classList.remove("hidden"); $("btn-welcome-start")?.focus(); }
 function closeWelcome() { $("welcome-overlay")?.classList.add("hidden"); try { localStorage.setItem("towerforge:welcomed", "1"); } catch { /* ignore */ } }
-$("btn-help")?.addEventListener("click", showWelcome);
+$("btn-help")?.addEventListener("click", () => runStudioCommand("help.getting_started"));
 $("btn-close-welcome")?.addEventListener("click", closeWelcome);
 $("btn-welcome-start")?.addEventListener("click", closeWelcome);
 $("welcome-overlay")?.addEventListener("click", e => { if (e.target === $("welcome-overlay")) closeWelcome(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("welcome-overlay")?.classList.contains("hidden")) closeWelcome(); });
 try { if (!localStorage.getItem("towerforge:welcomed")) setTimeout(showWelcome, 400); } catch { /* ignore */ }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// DESKTOP COMMAND BRIDGE + GUARDED PROJECT LIFECYCLE
+// ═════════════════════════════════════════════════════════════════════════════
+const DESKTOP_COMMAND_EVENT = "towerforge:desktop-command";
+let desktopUiSyncTimer = null;
+let unsavedResolver = null;
+let newProjectParentSelected = false;
+
+function desktopApi() { return window.__TAURI__ ?? null; }
+function isDesktopShell() { return Boolean(desktopApi()?.core?.invoke); }
+function desktopInvoke(command, args = {}) {
+  const invoke = desktopApi()?.core?.invoke;
+  if (!invoke) return Promise.reject(new Error("This command is available in the desktop app."));
+  return invoke(command, args);
+}
+
+for (const link of document.querySelectorAll("[data-external-link]")) {
+  link.addEventListener("click", event => {
+    if (!isDesktopShell()) return;
+    event.preventDefault();
+    desktopInvoke("desktop_open_external", { url: link.href })
+      .catch(error => toast("Could not open link: " + String(error), "err"));
+  });
+}
+
+function scheduleDesktopUiSync(delay = 80) {
+  if (!isDesktopShell()) return;
+  clearTimeout(desktopUiSyncTimer);
+  desktopUiSyncTimer = setTimeout(() => {
+    desktopInvoke("desktop_sync_ui_state", {
+      payload: {
+        projectName: S.project?.manifest?.name || "Untitled",
+        dirty: Boolean(S.dirty),
+        canUndo: Boolean(H.undo.length),
+        canRedo: Boolean(H.redo.length),
+        activeTab: S.activeTab
+      }
+    }).catch(error => console.warn("Desktop state sync failed:", error));
+  }, delay);
+}
+
+function unsavedChangesDialog() {
+  const overlay = $("unsaved-overlay");
+  if (!overlay) return Promise.resolve(window.confirm("Discard unsaved changes?") ? "discard" : "cancel");
+  overlay.classList.remove("hidden");
+  $("unsaved-save")?.focus();
+  return new Promise(resolve => { unsavedResolver = resolve; });
+}
+
+function closeUnsavedDialog(result) {
+  $("unsaved-overlay")?.classList.add("hidden");
+  const resolve = unsavedResolver;
+  unsavedResolver = null;
+  resolve?.(result);
+}
+
+async function guardUnsavedChanges() {
+  if (!S.dirty) return true;
+  const result = await unsavedChangesDialog();
+  if (result === "save") return save();
+  return result === "discard";
+}
+
+$("unsaved-save")?.addEventListener("click", () => closeUnsavedDialog("save"));
+$("unsaved-discard")?.addEventListener("click", () => closeUnsavedDialog("discard"));
+$("unsaved-cancel")?.addEventListener("click", () => closeUnsavedDialog("cancel"));
+$("unsaved-overlay")?.addEventListener("click", event => { if (event.target === $("unsaved-overlay")) closeUnsavedDialog("cancel"); });
+
+function showNewProjectDialog() {
+  if (!isDesktopShell()) { toast("New Project is available in the desktop app.", "warn"); return; }
+  newProjectParentSelected = false;
+  $("new-project-form")?.reset();
+  $("new-project-parent").value = "";
+  $("new-project-error").textContent = "";
+  $("new-project-overlay")?.classList.remove("hidden");
+  $("new-project-name")?.focus();
+}
+
+function closeNewProjectDialog() {
+  $("new-project-overlay")?.classList.add("hidden");
+  newProjectParentSelected = false;
+}
+
+async function chooseNewProjectParent() {
+  try {
+    const selected = await desktopInvoke("desktop_choose_project_parent");
+    if (selected) {
+      newProjectParentSelected = true;
+      $("new-project-parent").value = selected;
+      $("new-project-error").textContent = "";
+    }
+  } catch (error) {
+    $("new-project-error").textContent = String(error);
+  }
+}
+
+$("new-project-browse")?.addEventListener("click", chooseNewProjectParent);
+$("new-project-close")?.addEventListener("click", closeNewProjectDialog);
+$("new-project-cancel")?.addEventListener("click", closeNewProjectDialog);
+$("new-project-overlay")?.addEventListener("click", event => { if (event.target === $("new-project-overlay")) closeNewProjectDialog(); });
+$("new-project-form")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const name = $("new-project-name").value.trim();
+  const errorBox = $("new-project-error");
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(name)) {
+    errorBox.textContent = "Use letters, digits, hyphens, or underscores.";
+    return;
+  }
+  if (!newProjectParentSelected) {
+    errorBox.textContent = "Choose a project location.";
+    return;
+  }
+  const button = $("new-project-create");
+  button.disabled = true;
+  errorBox.textContent = "";
+  try {
+    await desktopInvoke("desktop_create_project", {
+      name,
+      templateName: $("new-project-template").value
+    });
+    closeNewProjectDialog();
+  } catch (error) {
+    errorBox.textContent = String(error);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+function showAbout() { $("about-overlay")?.classList.remove("hidden"); $("about-close")?.focus(); }
+function closeAbout() { $("about-overlay")?.classList.add("hidden"); }
+$("about-close")?.addEventListener("click", closeAbout);
+$("about-overlay")?.addEventListener("click", event => { if (event.target === $("about-overlay")) closeAbout(); });
+
+async function runDesktopLeaveAction(action) {
+  if (!(await guardUnsavedChanges())) return;
+  try {
+    if (action.id === "file.new") showNewProjectDialog();
+    else if (action.id === "file.open") await desktopInvoke("desktop_open_project");
+    else if (action.id === "file.open_recent") await desktopInvoke("desktop_open_recent", { recentIndex: action.recentIndex });
+    else if (action.id === "lifecycle.close") await desktopInvoke("desktop_finish_lifecycle", { action: "close" });
+    else if (action.id === "lifecycle.quit") await desktopInvoke("desktop_finish_lifecycle", { action: "quit" });
+  } catch (error) {
+    toast("Desktop command failed: " + String(error), "err");
+  }
+}
+
+const STUDIO_COMMANDS = new Map([
+  ["file.save", () => save()],
+  ["app.settings", () => switchTab("settings")],
+  ["edit.undo", () => historyUndo()],
+  ["edit.redo", () => historyRedo()],
+  ["view.command_palette", () => $("cmdk-overlay")?.classList.contains("hidden") ? openCmdk() : closeCmdk()],
+  ["view.toggle_theme", () => toggleTheme()],
+  ["project.validate", () => validateProject()],
+  ["project.simulate", () => simulateSelectedMission()],
+  ["project.compile_maps", () => compileMaps()],
+  ["project.balance", async () => { switchTab("balance"); await runBalance(); }],
+  ["project.playtest", () => switchTab("playtest")],
+  ["project.build_targets", () => switchTab("buildtargets")],
+  ["project.ai_designer", () => switchTab("ai")],
+  ["help.getting_started", () => showWelcome()],
+  ["help.keyboard_shortcuts", () => showWelcome()],
+  ["help.about", () => showAbout()],
+]);
+
+async function runStudioCommand(id, payload = {}) {
+  if (id.startsWith("navigate.")) {
+    const tab = id.slice("navigate.".length);
+    if (STUDIO_TABS.some(([candidate]) => candidate === tab)) switchTab(tab);
+    return;
+  }
+  if (["file.new", "file.open", "file.open_recent", "lifecycle.close", "lifecycle.quit"].includes(id)) {
+    await runDesktopLeaveAction({ id, ...payload });
+    return;
+  }
+  const command = STUDIO_COMMANDS.get(id);
+  if (command) return command(payload);
+}
+
+async function setupDesktopBridge() {
+  window.addEventListener(DESKTOP_COMMAND_EVENT, event => {
+    const payload = event.detail ?? {};
+    runStudioCommand(payload.id, payload).catch(error => toast("Command failed: " + error.message, "err"));
+  });
+  const listen = desktopApi()?.event?.listen;
+  if (!listen) return;
+  await listen(DESKTOP_COMMAND_EVENT, event => {
+    const payload = event.payload ?? {};
+    runStudioCommand(payload.id, payload).catch(error => toast("Command failed: " + error.message, "err"));
+  });
+}
+
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (!$("unsaved-overlay")?.classList.contains("hidden")) closeUnsavedDialog("cancel");
+  if (!$("new-project-overlay")?.classList.contains("hidden")) closeNewProjectDialog();
+  if (!$("about-overlay")?.classList.contains("hidden")) closeAbout();
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BOOT
 // ─────────────────────────────────────────────────────────────────────────────
+setupDesktopBridge().catch(error => console.warn("Desktop bridge setup failed:", error));
+setupSidebar();
+loadAppInfo();
 load();

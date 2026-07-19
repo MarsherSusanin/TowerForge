@@ -2,7 +2,16 @@ node_modules/
 dist/
 test-results/
 playwright-report/
+.DS_Store
+.playwright-cli/
+output/
 *.js.map
 .towerforge/
 examples/starter.tdproj/.towerforge/
+examples/starter.tdproj/mobile/
+examples/starter.tdproj/desktop/
 maps/compiled/
+packages/desktop/src-tauri/runtime/
+packages/desktop/src-tauri/binaries/
+packages/desktop/src-tauri/gen/
+packages/desktop/src-tauri/target/

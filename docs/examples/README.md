@@ -18,6 +18,7 @@ Reference examples show expected project and code patterns.
 | Canvas renderer | `packages/renderer/src/index.mjs` | Shared browser renderer for Studio map/playtest preview and generated canvas player, including sprite and atlas-frame drawing. |
 | Phaser player target | `packages/cli/build.mjs` | Canonical optional vendored Phaser build target; stays outside the engine boundary. |
 | Studio editor shell | `packages/studio/public/app.js` | Browser UI pattern for data editors, validation, sim, balance, AI Designer, save, and build actions. |
+| Unsigned release notes | `docs/examples/unsigned-release-notes.md` | Canonical warning, checksum, tag/source links, and supported Gatekeeper guidance for pre-signing desktop releases. |
 
 ## Add Examples For
 

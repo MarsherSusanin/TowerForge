@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -9,7 +10,8 @@ import { defaultVisuals, normalizeManifest, normalizeVisuals, validateProjectSch
 import { mergeValidationResults } from "./trace.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const repoRoot = path.resolve(__dirname, "../../..");
+export const repoRoot = path.resolve(process.env["TOWERFORGE_RUNTIME_ROOT"] || path.resolve(__dirname, "../../.."));
+const BUNDLED_RUNTIME = process.env["TOWERFORGE_DESKTOP"] === "1" || process.env["TOWERFORGE_BUNDLED_RUNTIME"] === "1";
 
 export function resolveProjectDir(explicitDir, args = process.argv.slice(2)) {
   if (explicitDir) return path.resolve(explicitDir);
@@ -27,7 +29,11 @@ export function readJsonOr(filePath, fallback) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
-export function loadProjectFiles(projectDir) {
+/** Reads the on-disk project files verbatim (only JSON parsing + missing-file fallbacks) — NO
+ *  runtime normalization. Use this when you need the authored source shape, e.g. `migrate --write`
+ *  which must persist only migration deltas, not the constants-inherited/hex-decoded defaults that
+ *  normalizeBalance() injects for the simulator. loadProjectFiles() layers normalization on top. */
+export function readRawProjectFiles(projectDir) {
   const projectFile = path.join(projectDir, "project.json");
   if (!fs.existsSync(projectFile)) {
     throw new Error(`No project.json found at: ${projectDir}`);
@@ -35,7 +41,7 @@ export function loadProjectFiles(projectDir) {
 
   const contentDir = path.join(projectDir, "content");
   const mapsDir = path.join(projectDir, "maps", "compiled");
-  const rawFiles = {
+  return {
     projectDir,
     manifest: readJsonOr(projectFile, {}),
     balance: readJsonOr(path.join(contentDir, "balance.json"), {}),
@@ -60,10 +66,17 @@ export function loadProjectFiles(projectDir) {
       targets: {}
     })
   };
+}
+
+/** Migrate + normalize an in-memory raw-files object (the shape readRawProjectFiles returns) into
+ *  the runtime shape loadProjectFiles returns — without touching disk. Callers that need BOTH the
+ *  authored source and the effective runtime view (e.g. MCP writes, which must persist only the
+ *  author's delta while validating the effective result) read raw once and derive this from it. */
+export function normalizeProjectFiles(rawFiles) {
   const migrated = migrateProjectFiles(rawFiles);
 
   return {
-    projectDir,
+    projectDir: rawFiles.projectDir,
     manifest: normalizeManifest(migrated.files.manifest),
     balance: normalizeBalance(migrated.files.balance),
     worldMap: normalizeWorldMap(migrated.files.worldMap),
@@ -75,6 +88,10 @@ export function loadProjectFiles(projectDir) {
     buildTargets: normalizeBuildTargets(migrated.files.buildTargets),
     appliedMigrations: migrated.migrations
   };
+}
+
+export function loadProjectFiles(projectDir) {
+  return normalizeProjectFiles(readRawProjectFiles(projectDir));
 }
 
 export function projectSummary(files) {
@@ -243,13 +260,25 @@ export function selectBuildTarget(buildTargets, explicitTargetId) {
 
 function ensureEngineBuilt() {
   const srcDir = path.join(repoRoot, "packages", "engine", "src");
-  const distIndex = path.join(repoRoot, "packages", "engine", "dist", "index.js");
+  const distDir = path.join(repoRoot, "packages", "engine", "dist");
+  const distIndex = path.join(distDir, "index.js");
+  const stampFile = path.join(distDir, ".build-stamp");
   const tsconfig = path.join(repoRoot, "packages", "engine", "tsconfig.build.json");
   const tsc = path.join(repoRoot, "node_modules", "typescript", "bin", "tsc");
+  if (BUNDLED_RUNTIME) {
+    if (fs.existsSync(distIndex)) return distIndex;
+    throw new Error(`Bundled @towerforge/engine runtime is missing at ${distIndex}. Rebuild the desktop runtime.`);
+  }
   if (!fs.existsSync(tsc)) {
     throw new Error("TypeScript compiler is missing. Run `npm install` before using CLI, Studio, or build commands.");
   }
-  if (fs.existsSync(distIndex) && newestMtime(srcDir) <= fs.statSync(distIndex).mtimeMs && fs.statSync(tsconfig).mtimeMs <= fs.statSync(distIndex).mtimeMs) {
+  // Freshness is decided by a build STAMP written only after a clean compile — not by dist/index.js's
+  // mtime. tsc emits partial output on error and in source order, so an interrupted or type-erroring
+  // build used to leave a fresh index.js that every later run trusted (masking the failure, or
+  // crashing on ERR_MODULE_NOT_FOUND with no self-healing). The stamp also hashes the whole tsconfig
+  // extends chain, so editing tsconfig.json / tsconfig.base.json (target, lib, …) rebuilds too.
+  const expectedStamp = engineBuildStamp(srcDir);
+  if (fs.existsSync(distIndex) && fs.existsSync(stampFile) && fs.readFileSync(stampFile, "utf8") === expectedStamp) {
     return distIndex;
   }
   const result = spawnSync(process.execPath, [tsc, "-p", tsconfig], {
@@ -259,7 +288,23 @@ function ensureEngineBuilt() {
   if (result.status !== 0) {
     throw new Error(`Failed to build @towerforge/engine.\n${result.stdout ?? ""}${result.stderr ?? ""}`.trim());
   }
+  fs.writeFileSync(stampFile, engineBuildStamp(srcDir), "utf8");
   return distIndex;
+}
+
+/** Content stamp for the engine build: newest source mtime + a hash of every tsconfig in the
+ *  extends chain. Recomputed after a successful build and compared on the next run. */
+function engineBuildStamp(srcDir) {
+  const configs = [
+    path.join(repoRoot, "packages", "engine", "tsconfig.build.json"),
+    path.join(repoRoot, "packages", "engine", "tsconfig.json"),
+    path.join(repoRoot, "tsconfig.base.json")
+  ];
+  const hash = createHash("sha1").update(`src:${newestMtime(srcDir)}`);
+  for (const cfg of configs) {
+    if (fs.existsSync(cfg)) hash.update(`\n${cfg}\n`).update(fs.readFileSync(cfg));
+  }
+  return hash.digest("hex");
 }
 
 function newestMtime(dir) {
@@ -561,10 +606,12 @@ function summarizeSnapshot(snapshot, elapsed, label) {
   };
 }
 
+// Only REAL registered tool names here (optionally with a free-text qualifier) — a phantom name
+// like "inspect_wave_pressure" sends agents into Unknown-tool retry loops.
 function nextValidActionsForSmoke(snapshot) {
   if (snapshot.outcome === "victory") return ["balance_report", "build_project"];
-  if (snapshot.outcome === "defeat") return ["balance_report", "inspect_wave_pressure", "apply_validated_patch"];
-  return ["simulate_mission_longer", "balance_report", "validate_project"];
+  if (snapshot.outcome === "defeat") return ["balance_report to see per-wave pressure", "apply_validated_patch"];
+  return ["simulate_mission with a longer duration", "balance_report", "validate_project"];
 }
 
 function structuredCloneCompat(value) {

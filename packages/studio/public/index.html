@@ -4,15 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TowerForge Editor</title>
-  <script>
-    // Apply theme/density before first paint to avoid a flash.
-    try {
-      var t = localStorage.getItem("towerforge:theme") || "dark";
-      var dark = t === "dark" || (t === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
-      document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
-      document.documentElement.setAttribute("data-density", localStorage.getItem("towerforge:density") || "comfortable");
-    } catch (e) { document.documentElement.setAttribute("data-theme", "dark"); }
-  </script>
+  <script src="/bootstrap.js"></script>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -54,6 +46,7 @@
 <div id="layout">
   <!-- ── Sidebar navigation ─────────────────────────────────────────────────── -->
   <nav id="sidebar" role="navigation">
+    <div class="sidebar-scroll">
     <div class="nav-group">
       <div class="nav-group-label">Content</div>
       <button class="nav-tab active" data-tab="waves" role="tab" aria-selected="true">
@@ -106,6 +99,17 @@
       <button class="nav-tab" data-tab="buildtargets" role="tab">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
         <span>Build Targets</span>
+      </button>
+    </div>
+    </div>
+    <div class="sidebar-footer">
+      <button id="sidebar-about" class="sidebar-about" type="button" aria-label="About TowerForge">
+        <span class="sidebar-version">TowerForge <span id="sidebar-version">v0.1.0</span></span>
+        <span class="sidebar-copyright">&copy; Lindforge Studios</span>
+      </button>
+      <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="true" title="Collapse navigation" aria-label="Collapse navigation">
+        <svg class="sidebar-toggle-collapse" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        <svg class="sidebar-toggle-expand" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
       </button>
     </div>
   </nav>
@@ -309,6 +313,9 @@
                   <option value="core">core (marker)</option>
                 </select>
               </label>
+              <button id="btn-map-clear-path" class="btn-icon danger" type="button" title="Clear route" aria-label="Clear route">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>
+              </button>
             </div>
             <canvas id="map-editor-canvas"></canvas>
           </div>
@@ -416,10 +423,18 @@
             </label>
             <p class="text-muted" id="mcp-hint" style="font-size:12px;margin:0 0 10px"></p>
             <div class="field">
-              <label>Agent config — written to <span class="mono" id="mcp-path">.mcp.json</span></label>
+              <label for="mcp-client">Connect a client</label>
+              <select id="mcp-client" style="max-width:340px"></select>
+            </div>
+            <p class="text-muted" id="mcp-client-how" style="font-size:12px;margin:6px 0 8px"></p>
+            <div class="field">
+              <label>Config — <span class="mono" id="mcp-path">.mcp.json</span></label>
               <textarea id="mcp-config" class="mono" rows="9" readonly spellcheck="false" style="width:100%"></textarea>
             </div>
-            <button class="btn btn-outline" id="btn-copy-mcp" type="button" style="margin-top:8px">Copy config</button>
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button class="btn btn-outline" id="btn-copy-mcp" type="button">Copy config</button>
+              <button class="btn" id="btn-connect-mcp" type="button" hidden>Write into project</button>
+            </div>
           </div>
         </div>
       </div>
@@ -493,18 +508,50 @@
         <h2>AI Designer</h2>
         <span class="text-muted" style="font-size:11.5px">Chat with a co-designer that inspects, simulates, diagnoses, and patches your project to hit a target balance.</span>
         <span style="flex:1"></span>
-        <select id="ai-model" class="btn btn-outline" title="Model" style="max-width:190px">
-          <option value="claude-sonnet-4-6">Sonnet 4.6 (fast)</option>
-          <option value="claude-opus-4-8">Opus 4.8 (deep)</option>
-          <option value="claude-haiku-4-5-20251001">Haiku 4.5 (cheap)</option>
-        </select>
-        <button id="ai-key-btn" class="btn btn-outline" title="Set Anthropic API key">API key</button>
+        <div class="ai-provider-controls">
+          <select id="ai-provider" class="btn btn-outline" title="AI provider" aria-label="AI provider">
+            <optgroup label="Account runtimes">
+              <option value="codex">Codex (ChatGPT)</option>
+              <option value="claude-code">Claude Code</option>
+            </optgroup>
+            <optgroup label="API keys">
+              <option value="anthropic">Anthropic API</option>
+              <option value="openai">OpenAI API</option>
+              <option value="openrouter">OpenRouter</option>
+            </optgroup>
+          </select>
+          <select id="ai-model" class="btn btn-outline" title="Model" aria-label="AI model"></select>
+          <button id="ai-model-add" class="btn-icon" type="button" title="Add custom model" aria-label="Add custom model">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button id="ai-key-btn" class="btn btn-outline" title="Set provider API key">API key</button>
+        </div>
       </div>
       <div class="ai-shell">
         <div id="ai-transcript" class="ai-transcript"></div>
         <div id="ai-key-row" class="ai-key-row" hidden>
-          <input id="ai-key-input" type="password" class="mono" placeholder="sk-ant-… (stored in this browser only, never committed)" autocomplete="off">
+          <span id="ai-key-label" class="ai-row-label">API key</span>
+          <input id="ai-key-input" type="password" class="mono" placeholder="API key" autocomplete="new-password">
           <button id="ai-key-save" class="btn btn-primary">Save key</button>
+          <button id="ai-key-remove" class="btn btn-danger" type="button" hidden>Remove</button>
+          <button id="ai-key-close" class="btn-icon" type="button" title="Close" aria-label="Close API key editor">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div id="ai-runtime-row" class="ai-runtime-row" hidden>
+          <span id="ai-runtime-indicator" class="ai-runtime-indicator" aria-hidden="true"></span>
+          <span id="ai-runtime-status" class="ai-runtime-status">Checking account...</span>
+          <button id="ai-runtime-connect" class="btn btn-primary" type="button">Connect</button>
+          <button id="ai-runtime-disconnect" class="btn btn-outline" type="button" hidden>Disconnect</button>
+          <span class="ai-runtime-privacy">OAuth stays inside the official runtime. TowerForge never receives or stores the token.</span>
+        </div>
+        <div id="ai-model-row" class="ai-model-row" hidden>
+          <span id="ai-model-label" class="ai-row-label">Model ID</span>
+          <input id="ai-model-input" type="text" class="mono" placeholder="provider/model-id" autocomplete="off" spellcheck="false">
+          <button id="ai-model-save" class="btn btn-primary" type="button">Add model</button>
+          <button id="ai-model-close" class="btn-icon" type="button" title="Close" aria-label="Close model editor">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
         </div>
         <form id="ai-form" class="ai-input-row">
           <textarea id="ai-input" rows="2" placeholder="e.g. Make tutorial_01 winnable but not trivial — target 60–80% win-rate."></textarea>
@@ -568,6 +615,93 @@
     <div class="confirm-actions">
       <button class="btn btn-outline" id="confirm-cancel">Cancel</button>
       <button class="btn btn-danger" id="confirm-ok">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Unsaved changes guard ────────────────────────────────────────────────── -->
+<div id="unsaved-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="unsaved-title">
+  <div class="overlay-panel confirm-panel">
+    <div class="confirm-body">
+      <div class="c-title" id="unsaved-title">Save changes before continuing?</div>
+      <div>Your project has edits that have not been saved.</div>
+    </div>
+    <div class="confirm-actions">
+      <button class="btn btn-outline" id="unsaved-cancel">Cancel</button>
+      <button class="btn btn-outline" id="unsaved-discard">Discard</button>
+      <button class="btn btn-primary" id="unsaved-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── New desktop project ──────────────────────────────────────────────────── -->
+<div id="new-project-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="new-project-title">
+  <div class="overlay-panel desktop-project-panel">
+    <div class="overlay-header">
+      <h3 id="new-project-title">New Project</h3>
+      <button id="new-project-close" class="btn-icon" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <form id="new-project-form" class="desktop-project-form">
+      <label class="field">
+        <span>Project name</span>
+        <input id="new-project-name" type="text" maxlength="80" pattern="[A-Za-z0-9_-]+" placeholder="my_tower_defense" autocomplete="off" required>
+      </label>
+      <label class="field">
+        <span>Template</span>
+        <select id="new-project-template">
+          <option value="classic">Classic</option>
+          <option value="maze">Maze</option>
+          <option value="idle">Idle</option>
+          <option value="roguelike">Roguelike</option>
+        </select>
+      </label>
+      <div class="field">
+        <span>Location</span>
+        <div class="desktop-location-row">
+          <input id="new-project-parent" type="text" placeholder="Choose a folder" readonly>
+          <button class="btn btn-outline" id="new-project-browse" type="button">Choose...</button>
+        </div>
+      </div>
+      <div id="new-project-error" class="desktop-project-error" role="alert"></div>
+      <div class="confirm-actions desktop-project-actions">
+        <button class="btn btn-outline" id="new-project-cancel" type="button">Cancel</button>
+        <button class="btn btn-primary" id="new-project-create" type="submit">Create Project</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ── About (Windows/Linux) ────────────────────────────────────────────────── -->
+<div id="about-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="about-title">
+  <div class="overlay-panel about-panel">
+    <div class="overlay-header">
+      <h3 id="about-title">About TowerForge</h3>
+      <button id="about-close" class="btn-icon" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="overlay-body about-body">
+      <div class="about-product">
+        <div class="about-mark" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+        </div>
+        <div>
+          <strong>TowerForge Studio</strong>
+          <span id="about-version">Version 0.1.0</span>
+        </div>
+      </div>
+      <p>Local-first constructor for 2D hex tower-defense games.</p>
+      <div class="about-links" aria-label="TowerForge links">
+        <a id="about-source-link" href="https://github.com/MarsherSusanin/TowerForge" target="_blank" rel="noopener noreferrer" data-external-link>Editor source on GitHub</a>
+        <a id="about-site-link" href="https://lindforge.com" target="_blank" rel="noopener noreferrer" data-external-link>Lindforge website</a>
+        <a id="about-telegram-link" href="https://t.me/lindforge" target="_blank" rel="noopener noreferrer" data-external-link>Telegram</a>
+      </div>
+      <div class="about-copyright">
+        <span>&copy; <span id="about-copyright-year">2026</span></span>
+        <a id="about-studio-link" href="https://lindforge.com" target="_blank" rel="noopener noreferrer" data-external-link>Lindforge Studios</a>
+      </div>
     </div>
   </div>
 </div>

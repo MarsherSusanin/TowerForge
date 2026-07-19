@@ -31,6 +31,12 @@ describe("mobile packaging (Capacitor)", () => {
     expect(cap.appId).toBeTruthy();
     expect(cap.appName).toBeTruthy();
 
+    // Native-game hardening ported from a shipped Capacitor game.
+    expect(cap.zoomEnabled).toBe(false);
+    expect(cap.initialFocus).toBe(false);
+    expect(cap.loggingBehavior).toBe("production");
+    expect(cap.plugins.StatusBar.overlaysWebView).toBe(false);
+
     const pkg = JSON.parse(fs.readFileSync(path.join(mobile, "package.json"), "utf8"));
     expect(pkg.dependencies["@capacitor/core"]).toBeTruthy();
     expect(pkg.dependencies["@capacitor/android"]).toBeTruthy();
@@ -46,6 +52,28 @@ describe("mobile packaging (Capacitor)", () => {
     const result = await packageMobile(projectDir);
     expect(/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$/.test(result.app.appId)).toBe(true);
     await expect(packageMobile(projectDir, { outDir: "../escape" })).rejects.toThrow(/outside the project/);
+  });
+
+  it("preserves the user's native android/ project (and node_modules) across a re-package", async () => {
+    await packageMobile(projectDir);
+    const mobile = path.join(projectDir, "mobile");
+    // Simulate what `npx cap add android` + `npm install` leave behind: a native project with
+    // signing config, plus a stale file in the web bundle that a rebuild should drop.
+    const keystoreRef = path.join(mobile, "android", "app", "build.gradle");
+    fs.mkdirSync(path.dirname(keystoreRef), { recursive: true });
+    fs.writeFileSync(keystoreRef, "signingConfigs { release { storeFile file('release.keystore') } }", "utf8");
+    fs.mkdirSync(path.join(mobile, "node_modules", "@capacitor"), { recursive: true });
+    fs.writeFileSync(path.join(mobile, "node_modules", "@capacitor", "marker"), "x", "utf8");
+    fs.writeFileSync(path.join(mobile, "www", "stale-old-bundle.js"), "old", "utf8");
+
+    const rerun = await packageMobile(projectDir);
+    expect(rerun.ok, rerun.error).toBe(true);
+    // Native project + deps survive the re-package...
+    expect(fs.readFileSync(keystoreRef, "utf8")).toContain("release.keystore");
+    expect(fs.existsSync(path.join(mobile, "node_modules", "@capacitor", "marker"))).toBe(true);
+    // ...while the web bundle is freshly rebuilt (stale file gone, new files present).
+    expect(fs.existsSync(path.join(mobile, "www", "stale-old-bundle.js"))).toBe(false);
+    expect(fs.existsSync(path.join(mobile, "www", "index.html"))).toBe(true);
   });
 
   it("wraps the web build into a valid Tauri v2 desktop project", async () => {

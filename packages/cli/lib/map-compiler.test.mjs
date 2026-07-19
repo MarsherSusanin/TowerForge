@@ -47,6 +47,51 @@ describe("map compiler", () => {
     expect(byKey["0,0"]).toBeUndefined(); // gid 1 == defaultTerrain, skipped
   });
 
+  it("strips Tiled flip/rotate flag bits before the terrain lookup (flipped path stays path)", () => {
+    const H = 0x80000000; // horizontal-flip flag
+    const D = 0x20000000; // anti-diagonal flag
+    const map = compileMapSource({
+      id: "flipped",
+      width: 3,
+      height: 2,
+      properties: [
+        { name: "defaultTerrain", value: "buildable" },
+        { name: "spawnCoord", value: JSON.stringify({ q: 0, r: 0 }) },
+        { name: "coreCoord", value: JSON.stringify({ q: 2, r: 1 }) },
+        { name: "pathCenterline", value: JSON.stringify([{ q: 0, r: 0 }, { q: 2, r: 1 }]) }
+      ],
+      // (1,0) is a horizontally-flipped "path" (2); (0,1) is a flip+rotated "water" (4).
+      layers: [
+        { name: "terrain", type: "tilelayer", width: 3, height: 2, data: [1, (2 | H) >>> 0, 1, (4 | H | D) >>> 0, 1, 1] }
+      ]
+    }, "flipped.tmj");
+
+    const byKey = Object.fromEntries(map.terrainOverrides.map((o) => [`${o.q},${o.r}`, o.terrain]));
+    expect(byKey["1,0"]).toBe("path");  // NOT silently dropped to buildable
+    expect(byKey["0,1"]).toBe("water");
+  });
+
+  it("honors a tileset firstgid != 1 when decoding terrain GIDs", () => {
+    const map = compileMapSource({
+      id: "offset",
+      width: 2,
+      height: 1,
+      tilesets: [{ firstgid: 101, name: "terrain" }],
+      properties: [
+        { name: "defaultTerrain", value: "buildable" },
+        { name: "spawnCoord", value: JSON.stringify({ q: 0, r: 0 }) },
+        { name: "coreCoord", value: JSON.stringify({ q: 1, r: 0 }) },
+        { name: "pathCenterline", value: JSON.stringify([{ q: 0, r: 0 }, { q: 1, r: 0 }]) }
+      ],
+      // firstgid 101 => local id 1 = buildable (skipped), 102 => local id 2 = path.
+      layers: [{ name: "terrain", type: "tilelayer", width: 2, height: 1, data: [101, 102] }]
+    }, "offset.tmj");
+
+    const byKey = Object.fromEntries(map.terrainOverrides.map((o) => [`${o.q},${o.r}`, o.terrain]));
+    expect(byKey["1,0"]).toBe("path");
+    expect(byKey["0,0"]).toBeUndefined(); // buildable == default, skipped
+  });
+
   it("returns structured compile issues for malformed sources", () => {
     const result = compileMapSources({ "bad.tmj": { width: 0, height: 5 } });
 

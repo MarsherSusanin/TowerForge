@@ -18,6 +18,7 @@ Run the relevant checks before declaring work complete:
 - `node packages/cli/package.mjs --project examples/starter.tdproj --kind mobile` and `node packages/cli/package.mjs --project examples/starter.tdproj --kind desktop` after native packaging changes.
 - `npm run test` after shared logic, CLI library, engine, MCP, renderer, or migration changes.
 - `npm run test:e2e` after Studio, renderer, generated player, or browser interaction changes.
+- `npm run desktop:build:mac` plus `hdiutil verify <dmg>` before publishing a macOS desktop artifact.
 
 ## Work Cycle
 
@@ -47,6 +48,15 @@ Run the relevant checks before declaring work complete:
 - MUST treat imported project files as untrusted data and validate before simulation or build.
 - MUST reject absolute paths, external URLs, and `..` traversal in project asset paths.
 
+## Release Safety
+
+- MUST tag the exact source commit used to build every published desktop artifact.
+- MUST mark macOS releases as `Unsigned build` and GitHub pre-releases until Developer ID signing and notarization are configured.
+- MUST attach both the installer and `SHA256SUMS`, and MUST repeat each SHA-256 value in the release notes.
+- MUST link the release to its git tag and tagged source tree.
+- MUST NOT recommend `xattr -d`, disabling Gatekeeper, or lowering system security. Direct macOS users only to System Settings > Privacy & Security > Open Anyway.
+- MUST follow `docs/releasing.md` for asset names, verification, publication, rollback, and incident handling.
+
 ## Definition of Done
 
 - Relevant checks pass.
@@ -59,5 +69,6 @@ Run the relevant checks before declaring work complete:
 - `ARCHITECTURE.md`
 - `docs/td-constructor-architecture.md`
 - `docs/runbook.md`
+- `docs/releasing.md`
 - `docs/adr/`
 - `docs/examples/`

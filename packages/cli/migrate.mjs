@@ -1,7 +1,7 @@
 // migrate.mjs — Inspect or write .tdproj schema migrations.
 import process from "node:process";
-import { loadProjectFiles, resolveProjectDir } from "./lib/project-loader.mjs";
-import { writeMigratedProjectFiles } from "./lib/project-migrations.mjs";
+import { readRawProjectFiles, resolveProjectDir } from "./lib/project-loader.mjs";
+import { migrateProjectFiles, writeMigratedProjectFiles } from "./lib/project-migrations.mjs";
 import { parseJsonFlag, printJson } from "./lib/trace.mjs";
 
 function parseArgs() {
@@ -13,6 +13,8 @@ function parseArgs() {
       i += 1;
     } else if (raw[i] === "--write") {
       result.write = true;
+    } else if (!result.projectDir && !raw[i].startsWith("--")) {
+      result.projectDir = raw[i]; // bare positional project path (was silently dropped)
     }
   }
   return result;
@@ -22,23 +24,27 @@ const args = parseArgs();
 const PROJECT_DIR = resolveProjectDir(args.projectDir, []);
 
 try {
-  const files = loadProjectFiles(PROJECT_DIR);
-  if (args.write && files.appliedMigrations.length > 0) {
-    writeMigratedProjectFiles(PROJECT_DIR, files);
+  // Migrate the RAW files (migration deltas only), never the normalized loadProjectFiles() output —
+  // persisting normalized data would freeze constants-inherited mission defaults and hex→decimal
+  // colors into the source, silently breaking the constants→mission inheritance the author relies on.
+  const raw = readRawProjectFiles(PROJECT_DIR);
+  const { files: migratedFiles, migrations } = migrateProjectFiles(raw);
+  if (args.write && migrations.length > 0) {
+    writeMigratedProjectFiles(PROJECT_DIR, migratedFiles);
   }
   const result = {
     ok: true,
     projectDir: PROJECT_DIR,
     write: args.write,
-    migrationCount: files.appliedMigrations.length,
-    migrations: files.appliedMigrations
+    migrationCount: migrations.length,
+    migrations: migrations
   };
   if (args.json) printJson(result);
-  else if (files.appliedMigrations.length === 0) {
+  else if (migrations.length === 0) {
     console.log("  ✓ Project schema is current.");
   } else {
-    console.log(`  ${args.write ? "✓ Applied" : "!"} ${files.appliedMigrations.length} migration(s).`);
-    for (const migration of files.appliedMigrations) {
+    console.log(`  ${args.write ? "✓ Applied" : "!"} ${migrations.length} migration(s).`);
+    for (const migration of migrations) {
       console.log(`    ${migration.id}: ${migration.description}`);
     }
     if (!args.write) console.log("  Run again with --write to persist migrated files.");

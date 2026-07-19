@@ -1,0 +1,16 @@
+{
+  "name": "@towerforge/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare-runtime": "node scripts/prepare-runtime.mjs",
+    "tauri": "tauri",
+    "dev": "npm run prepare-runtime && tauri dev",
+    "build": "node scripts/build.mjs",
+    "bundle": "npm run build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

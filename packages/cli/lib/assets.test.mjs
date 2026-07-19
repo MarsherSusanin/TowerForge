@@ -10,6 +10,8 @@ beforeEach(() => {
   projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-assets-"));
   fs.mkdirSync(path.join(projectDir, "imports"), { recursive: true });
   fs.writeFileSync(path.join(projectDir, "imports", "tower.png"), "png", "utf8");
+  fs.writeFileSync(path.join(projectDir, "imports", "герой.png"), "hero", "utf8");
+  fs.writeFileSync(path.join(projectDir, "imports", "враг.png"), "enemy", "utf8");
 });
 
 afterEach(() => {
@@ -28,6 +30,30 @@ describe("asset catalog helpers", () => {
     expect(result.asset).toEqual({ id: "tower", kind: "sprite", path: "assets/sprites/tower.png" });
     expect(result.visuals.sprites.tower.src).toBe("assets/sprites/tower.png");
     expect(fs.existsSync(path.join(projectDir, "assets", "sprites", "tower.png"))).toBe(true);
+  });
+
+  it("uniquifies auto-derived ids so two non-ASCII filenames don't overwrite each other", () => {
+    let visuals = { assetsRoot: "assets", atlases: {}, sprites: {}, bindings: {} };
+    // No explicit id: both Cyrillic basenames used to sanitize to "_" and collide.
+    const first = importProjectAsset(projectDir, visuals, { sourcePath: "imports/герой.png", targetPath: "герой.png", kind: "sprite" });
+    visuals = first.visuals;
+    const second = importProjectAsset(projectDir, visuals, { sourcePath: "imports/враг.png", targetPath: "враг.png", kind: "sprite" });
+    visuals = second.visuals;
+
+    expect(first.asset.id).not.toBe(second.asset.id); // distinct ids, no clobber
+    expect(Object.keys(visuals.sprites)).toHaveLength(2);
+    // Both source files preserved as separate registry entries.
+    const srcs = Object.values(visuals.sprites).map((s) => s.src).sort();
+    expect(srcs).toEqual(["assets/враг.png", "assets/герой.png"].sort());
+  });
+
+  it("re-importing the same file updates in place instead of creating a duplicate id", () => {
+    let visuals = { assetsRoot: "assets", atlases: {}, sprites: {}, bindings: {} };
+    const a = importProjectAsset(projectDir, visuals, { sourcePath: "imports/tower.png", targetPath: "tower.png", kind: "sprite" });
+    visuals = a.visuals;
+    const b = importProjectAsset(projectDir, visuals, { sourcePath: "imports/tower.png", targetPath: "tower.png", kind: "sprite" });
+    expect(b.asset.id).toBe(a.asset.id); // same src -> same id, no "tower-2"
+    expect(Object.keys(b.visuals.sprites)).toHaveLength(1);
   });
 
   it("copies referenced visual assets into build output and reports missing assets", () => {

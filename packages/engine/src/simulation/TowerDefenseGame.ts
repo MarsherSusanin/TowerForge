@@ -792,6 +792,12 @@ export class TowerDefenseGame {
 
   private moveEnemies(delta: number): void {
     for (const enemy of this.enemies) {
+      // An enemy killed between ticks (by an ability) or earlier this tick is pending removal by
+      // removeDeadEnemies() — it must not keep advancing, or it can reach the core and "leak"
+      // (deal core damage + forfeit its kill reward) despite already being dead.
+      if (enemy.hp <= 0) {
+        continue;
+      }
       const type = this.enemyTypes[enemy.typeId];
       if (!type) {
         continue;

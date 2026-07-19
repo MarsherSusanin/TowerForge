@@ -73,7 +73,11 @@ export function runBalanceSweep(content: GameContentRegistry, options: BalanceSw
   // Clamp at the source so every call site (CLI/MCP/Studio) is bounded: a non-positive or absurd
   // value can otherwise hang the loop (tickStep <= 0) or run effectively forever (huge simSeconds).
   const simSeconds = options.simSeconds && options.simSeconds > 0 ? Math.min(options.simSeconds, 3600) : 600;
-  const tickStep = options.tickStep && options.tickStep > 0 ? Math.max(0.05, Math.min(options.tickStep, 1)) : 0.25;
+  // Cap at 0.2 — TowerDefenseGame.tick() clamps any delta above 0.2 (a real-time spiral-of-death
+  // guard). A larger sweep step made the engine advance only 0.2 while the loop counted the full
+  // step as elapsed, so the sim silently covered ~20% less game-time than requested and skewed
+  // clear-time / winnability verdicts. Keeping step <= 0.2 makes tick() and `elapsed` agree.
+  const tickStep = options.tickStep && options.tickStep > 0 ? Math.max(0.05, Math.min(options.tickStep, 0.2)) : 0.2;
   const missionIds = options.missionIds?.length ? options.missionIds : Object.keys(content.missions);
 
   const missions: MissionBalance[] = [];

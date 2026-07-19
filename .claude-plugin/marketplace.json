@@ -1,0 +1,11 @@
+{
+  "name": "towerforge",
+  "owner": { "name": "TowerForge" },
+  "plugins": [
+    {
+      "name": "towerforge",
+      "source": "./",
+      "description": "Author, validate, simulate, balance, build, and package tower-defense games (.tdproj) through validated MCP tools with dry-run diffs, revision tokens, and rollback. Includes the /towerforge authoring-loop command. Requires `npm install` in the plugin checkout once (the engine builds itself on first tool call)."
+    }
+  ]
+}

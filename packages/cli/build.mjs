@@ -32,6 +32,10 @@ function parseArgs() {
     } else if (raw[i] === "--json") {
       i += 1;
     } else {
+      // A bare positional (not a flag or a flag's value) is the project path, matching
+      // `towerforge validate <path>`. Without this it was silently dropped -> the command
+      // operated on the default starter project instead of the one the user named.
+      if (!result.projectDir && !raw[i].startsWith("--")) result.projectDir = raw[i];
       i += 1;
     }
   }
@@ -97,12 +101,29 @@ try {
   // Service worker is written last: precache every emitted asset and version the cache by content
   // hash so a rebuild invalidates stale clients.
   const precacheAssets = collectPrecacheAssets(outDir);
-  const cacheVersion = createHash("sha256")
-    .update(precacheAssets.join("|"))
-    .update(JSON.stringify({ manifest: files.manifest, balance: files.balance, target }))
-    .digest("hex")
-    .slice(0, 16);
+  // Version the cache by CONTENT, not just file names: hash every precached file's bytes so any
+  // change to maps/worldMap/visuals (embedded in project-data.js), engine/renderer JS, or a
+  // replaced binary asset yields a new offline-sw.js and evicts the stale cache on returning
+  // clients. Hashing names alone left redeploys byte-identical, pinning players to the old build.
+  const versionHash = createHash("sha256").update(JSON.stringify({ target }));
+  for (const rel of precacheAssets) {
+    versionHash.update(rel).update("\0");
+    versionHash.update(fs.readFileSync(path.join(outDir, rel.replace(/^\.\//, ""))));
+  }
+  const cacheVersion = versionHash.digest("hex").slice(0, 16);
   fs.writeFileSync(path.join(outDir, "offline-sw.js"), serviceWorkerTemplate(precacheAssets, cacheVersion), "utf8");
+
+  // The phaser player renders flat shapes only — it does not consume visuals.bindings/sprites yet.
+  // Warn honestly at build time (instead of silently dropping the art) so an author using custom
+  // sprites knows to build with the canvas renderer or expect placeholder shapes.
+  const warnings = [];
+  if (renderer === "phaser") {
+    const bindings = files.visuals?.bindings ?? {};
+    const boundCount = Object.values(bindings).reduce((n, group) => n + Object.keys(group ?? {}).length, 0);
+    if (boundCount > 0) {
+      warnings.push(`Phaser renderer does not render sprite bindings yet — ${boundCount} bound sprite(s) will show as flat shapes. Use the canvas renderer for custom art.`);
+    }
+  }
 
   const summary = {
     ok: true,
@@ -111,7 +132,8 @@ try {
     outDir,
     copiedAssets: assetCopy.copied,
     missingAssets: assetCopy.missing,
-    invalidAssets: assetCopy.invalid
+    invalidAssets: assetCopy.invalid,
+    warnings
   };
   if (args.json) {
     printJson(summary);
@@ -120,6 +142,7 @@ try {
     if (assetCopy.missing.length > 0) {
       console.warn(`  ! ${assetCopy.missing.length} visual asset(s) were referenced but not found.`);
     }
+    for (const warning of warnings) console.warn(`  ! ${warning}`);
     console.log(`  Serve ${outDir} with any static server, then open index.html.`);
   }
 } catch (error) {
@@ -143,8 +166,10 @@ function emptyDir(dir) {
 function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    // Skip test/spec files and any TypeScript declaration / source files — the player only needs runtime JS.
-    if (/\.(test|spec)\.(mjs|js|ts)$/.test(entry.name) || /\.d\.ts(\.map)?$/.test(entry.name) || /\.ts$/.test(entry.name)) continue;
+    // Skip test/spec files and any TypeScript declaration / source files — the player only needs
+    // runtime JS. Also skip dotfiles (e.g. dist/.build-stamp, an internal engine-freshness marker)
+    // so build-internal artifacts never ship in the bundle or get precached by the service worker.
+    if (entry.name.startsWith(".") || /\.(test|spec)\.(mjs|js|ts)$/.test(entry.name) || /\.d\.ts(\.map)?$/.test(entry.name) || /\.ts$/.test(entry.name)) continue;
     const from = path.join(src, entry.name);
     const to = path.join(dest, entry.name);
     if (entry.isDirectory()) copyDir(from, to);
@@ -160,7 +185,8 @@ function collectPrecacheAssets(outDir) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         walk(full);
-      } else if (entry.name !== "offline-sw.js") {
+      } else if (entry.name !== "offline-sw.js" && !entry.name.startsWith(".")) {
+        // Never precache the SW itself or dotfiles (build-internal markers, DS_Store, etc.).
         const rel = path.relative(outDir, full).split(path.sep).join("/");
         assets.push("./" + rel);
       }
@@ -194,7 +220,11 @@ function htmlTemplate(manifest, target, renderer = "canvas") {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="${esc(target.backgroundColor ?? manifest.backgroundColor ?? "#111111")}">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>${title}</title>
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="stylesheet" href="./styles.css">
@@ -239,7 +269,13 @@ function htmlTemplate(manifest, target, renderer = "canvas") {
 function cssTemplate(target) {
   const bg = target.backgroundColor ?? "#111111";
   return `:root{--bg:${bg};--surface:#191b19;--panel:#222620;--border:#364036;--text:#eff3ea;--muted:#9ca895;--accent:#8ac783;--path:#6b5540;--danger:#df6a59;--water:#427b88;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
-*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--font)}body{overflow:hidden}button,select,input{font:inherit}button,select{border:1px solid var(--border);border-radius:6px;background:#111611;color:var(--text);padding:8px 10px}button{cursor:pointer}button:hover{border-color:var(--accent)}#app{height:100%;display:flex;flex-direction:column}.hud{display:flex;gap:18px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface)}h1{font-size:18px;line-height:1.1;margin:0;color:var(--accent);letter-spacing:0}p{margin:4px 0 0;color:var(--muted)}.controls{margin-left:auto;display:flex;gap:10px;align-items:end;flex-wrap:wrap}.controls label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}.play-shell{min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,1fr) 260px}#playfield{width:100%;height:100%;display:block;background:#101410;overflow:hidden}#playfield canvas{display:block}.panel{border-left:1px solid var(--border);background:var(--panel);padding:14px;display:flex;flex-direction:column;gap:10px}.stat{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}.stat span{color:var(--muted)}.stat strong{font-variant-numeric:tabular-nums}.speed{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;color:var(--muted);margin-top:8px}#message{min-height:42px;padding:10px;border:1px solid var(--border);border-radius:6px;background:#161a16;color:var(--text)}.ability-bar{display:flex;flex-wrap:wrap;gap:6px}.ability-bar:empty{display:none}.ability-bar button{padding:6px 9px;font-size:12px}.ability-bar button.armed{border-color:var(--accent);color:var(--accent)}.ability-bar button:disabled{opacity:.45;cursor:default}@media(max-width:820px){body{overflow:auto}.hud{align-items:flex-start;flex-direction:column}.controls{margin-left:0}.play-shell{grid-template-columns:1fr;grid-template-rows:65vh auto}.panel{border-left:0;border-top:1px solid var(--border)}}`;
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:var(--font)}
+/* Native-app touch hardening (ported from a shipped Capacitor game): no pinch-zoom/pull-to-refresh,
+   no long-press text selection or blue tap-highlight, and respect the notch via safe-area insets. */
+body{overflow:hidden;overscroll-behavior:none;touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+.hud{padding-top:calc(12px + env(safe-area-inset-top))}
+.panel{padding-bottom:calc(14px + env(safe-area-inset-bottom))}
+button,select,input{font:inherit}button,select{border:1px solid var(--border);border-radius:6px;background:#111611;color:var(--text);padding:8px 10px}button{cursor:pointer}button:hover{border-color:var(--accent)}#app{height:100%;display:flex;flex-direction:column}.hud{display:flex;gap:18px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface)}h1{font-size:18px;line-height:1.1;margin:0;color:var(--accent);letter-spacing:0}p{margin:4px 0 0;color:var(--muted)}.controls{margin-left:auto;display:flex;gap:10px;align-items:end;flex-wrap:wrap}.controls label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}.play-shell{min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,1fr) 260px}#playfield{width:100%;height:100%;display:block;background:#101410;overflow:hidden}#playfield canvas{display:block}.panel{border-left:1px solid var(--border);background:var(--panel);padding:14px;display:flex;flex-direction:column;gap:10px}.stat{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}.stat span{color:var(--muted)}.stat strong{font-variant-numeric:tabular-nums}.speed{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;color:var(--muted);margin-top:8px}#message{min-height:42px;padding:10px;border:1px solid var(--border);border-radius:6px;background:#161a16;color:var(--text)}.ability-bar{display:flex;flex-wrap:wrap;gap:6px}.ability-bar:empty{display:none}.ability-bar button{padding:6px 9px;font-size:12px}.ability-bar button.armed{border-color:var(--accent);color:var(--accent)}.ability-bar button:disabled{opacity:.45;cursor:default}@media(max-width:820px){body{overflow:auto}.hud{align-items:flex-start;flex-direction:column}.controls{margin-left:0}.play-shell{grid-template-columns:1fr;grid-template-rows:65vh auto}.panel{border-left:0;border-top:1px solid var(--border)}}`;
 }
 
 function playerTemplate() {
@@ -273,6 +309,13 @@ initAbilityBar();
 resize();
 requestAnimationFrame(loop);
 window.addEventListener("resize", resize);
+// Pause the loop and free the audio hardware while the app is backgrounded (home button / app
+// switch on Android) — saves battery and avoids a huge post-resume time step. RAF is already
+// throttled while hidden; this also suspends the AudioContext.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { audio.suspend(); }
+  else { lastFrame = performance.now(); if ($("snd")?.checked) audio.resume(); }
+});
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("./offline-sw.js").catch(() => {}));
 }
@@ -372,13 +415,22 @@ function loop(now) {
   const dtSeconds = Math.min(0.05, (now - lastFrame) / 1000);
   lastFrame = now;
   const speed = Number($("speed").value) || 0;
-  const ticked = speed > 0 && game.getSnapshot().outcome === "playing";
+  // Capture events from player actions (place/upgrade/ability/first wave) BEFORE tick() clears
+  // them — tick() resets lastEvents at its start, so reading only after ticking drops them and
+  // their sounds/effects never fire. One render snapshot per frame drives draw + HUD (no extra
+  // deep-copy getSnapshot() calls).
+  let snap = game.getRenderSnapshot();
+  const pending = snap.lastEvents;
+  const ticked = speed > 0 && snap.outcome === "playing";
   if (ticked) {
     const timeUnitSeconds = content.constants.timeUnitSeconds || 1;
     game.tick((dtSeconds / timeUnitSeconds) * speed);
+    snap = game.getRenderSnapshot();
   }
-  draw(ticked);
-  updateHud();
+  const events = ticked ? pending.concat(snap.lastEvents) : pending;
+  game.lastEvents = []; // consumed this frame — clear so nothing replays on the next frame
+  draw(snap, events);
+  updateHud(snap);
   requestAnimationFrame(loop);
 }
 
@@ -386,15 +438,13 @@ function resize() {
   renderer.resize();
 }
 
-function draw(ticked) {
-  const snap = game.getRenderSnapshot();
-  if (!ticked) snap.lastEvents = []; // don't replay last tick's sounds/effects on idle frames
+function draw(snap, events) {
+  snap.lastEvents = events;
   renderer.drawSnapshot(snap);
-  if ($("snd")?.checked) audio.handleEvents(snap.lastEvents);
+  if ($("snd")?.checked) audio.handleEvents(events);
 }
 
-function updateHud() {
-  const snap = game.getSnapshot();
+function updateHud(snap) {
   updateAbilityBar(snap);
   if (snap.outcome === "victory" && markCleared(missionId)) {
     const unlocked = newlyUnlockedBy(missionId);
@@ -511,15 +561,20 @@ class PlayScene extends Phaser.Scene {
     gr.lineStyle(1, 0xffffff, 0.08); gr.strokePath();
   }
   update(time, delta) {
+    if (document.hidden) return; // paused while backgrounded (see the visibilitychange listener)
     const speed = Number($("speed").value) || 0;
-    const ticked = speed > 0 && game.getSnapshot().outcome === "playing";
+    // Capture player-action events before tick() clears them (see canvas loop note).
+    let snap = game.getRenderSnapshot();
+    const pending = snap.lastEvents;
+    const ticked = speed > 0 && snap.outcome === "playing";
     if (ticked) {
       const tu = content.constants.timeUnitSeconds || 1;
       game.tick((Math.min(50, delta) / 1000 / tu) * speed);
+      snap = game.getRenderSnapshot();
     }
-    const snap = game.getRenderSnapshot();
-    if (!ticked) snap.lastEvents = []; // don't replay last tick's sounds/tracers on idle frames
-    if ($("snd")?.checked) audio.handleEvents(snap.lastEvents);
+    const events = ticked ? pending.concat(snap.lastEvents) : pending;
+    game.lastEvents = []; // consumed this frame — clear so nothing replays next frame
+    if ($("snd")?.checked) audio.handleEvents(events);
     const g = this.geometry(snap.tiles);
 
     this.tileG.clear();
@@ -527,7 +582,7 @@ class PlayScene extends Phaser.Scene {
     for (const w of snap.temporaryWaterTiles) { const p = this.center(w, g); this.hex(this.tileG, p.x, p.y, g.r * 0.74, 0x427b88, 0.55); }
 
     this.fxG.clear();
-    for (const ev of snap.lastEvents) {
+    for (const ev of events) {
       if (ev.type !== "towerFired") continue;
       const tw = snap.towers.find((t) => t.id === ev.towerId);
       const en = snap.enemies.find((e) => e.id === ev.enemyId);
@@ -538,12 +593,21 @@ class PlayScene extends Phaser.Scene {
     const seen = new Set();
     for (const tw of snap.towers) {
       const p = this.center(tw.coord, g); seen.add(tw.id);
-      this.entG.fillStyle(0x8ac783, 1); this.entG.fillCircle(p.x, p.y, g.r * 0.5);
-      this.entG.lineStyle(2, 0xe8f4db, 1); this.entG.strokeCircle(p.x, p.y, g.r * 0.5);
+      const disabled = (tw.disabledFor ?? 0) > 0; // silenced by an enemy tower-disrupt pulse
+      const alpha = disabled ? 0.4 : 1;
+      this.entG.fillStyle(0x8ac783, alpha); this.entG.fillCircle(p.x, p.y, g.r * 0.5);
+      this.entG.lineStyle(2, disabled ? 0xdf6a59 : 0xe8f4db, alpha); this.entG.strokeCircle(p.x, p.y, g.r * 0.5);
+      // Health bar for damaged destructible towers (hp defined and below the type's maxHp).
+      const tMax = content.towers[tw.typeId]?.maxHp;
+      if (typeof tw.hp === "number" && typeof tMax === "number" && tMax > 0 && tw.hp < tMax) {
+        const frac = Math.max(0, Math.min(1, tw.hp / tMax));
+        this.entG.fillStyle(0x1b1d18, 1); this.entG.fillRect(p.x - g.r * 0.45, p.y + g.r * 0.5, g.r * 0.9, 4);
+        this.entG.fillStyle(frac > 0.35 ? 0x8ac783 : 0xdf6a59, 1); this.entG.fillRect(p.x - g.r * 0.45, p.y + g.r * 0.5, g.r * 0.9 * frac, 4);
+      }
       let label = this.towerLabels.get(tw.id);
       const text = (content.towers[tw.typeId]?.label || tw.typeId).slice(0, 2);
       if (!label) { label = this.add.text(0, 0, text, { fontFamily: "sans-serif", color: "#101410" }).setOrigin(0.5).setDepth(10); this.towerLabels.set(tw.id, label); }
-      label.setText(text).setFontSize(Math.max(10, Math.round(g.r * 0.42))).setPosition(p.x, p.y);
+      label.setText(text).setFontSize(Math.max(10, Math.round(g.r * 0.42))).setPosition(p.x, p.y).setAlpha(alpha);
     }
     for (const [id, lbl] of this.towerLabels) { if (!seen.has(id)) { lbl.destroy(); this.towerLabels.delete(id); } }
 
@@ -557,6 +621,24 @@ class PlayScene extends Phaser.Scene {
       this.entG.fillStyle(ratio > 0.35 ? 0x8ac783 : 0xdf6a59, 1); this.entG.fillRect(p.x - g.r * 0.45, p.y - g.r * 0.62, g.r * 0.9 * ratio, 4);
     }
 
+    // Outcome banner (VICTORY/DEFEAT), matching the canvas renderer so the phaser build doesn't
+    // hide the end-of-mission state.
+    const ended = snap.outcome === "victory" || snap.outcome === "defeat";
+    if (ended && !this.outcomeText) {
+      this.outcomeText = this.add.text(0, 0, "", { fontFamily: "sans-serif", fontStyle: "bold" }).setOrigin(0.5).setDepth(20);
+    }
+    if (this.outcomeText) {
+      if (ended) {
+        this.outcomeText.setText(snap.outcome === "victory" ? "VICTORY" : "DEFEAT")
+          .setColor(snap.outcome === "victory" ? "#8ac783" : "#df6a59")
+          .setFontSize(Math.max(28, Math.round(this.scale.height * 0.12)))
+          .setPosition(this.scale.width / 2, this.scale.height / 2)
+          .setVisible(true);
+      } else {
+        this.outcomeText.setVisible(false);
+      }
+    }
+
     updateHud(snap);
   }
 }
@@ -565,9 +647,27 @@ new Phaser.Game({
   type: Phaser.AUTO,
   parent: "playfield",
   backgroundColor: "#101410",
+  // Low-end-Android render hardening (ported from a shipped Capacitor game): no MSAA (fill-rate is
+  // the #1 killer on cheap GPUs), request the high-performance GPU, and a low-latency canvas.
+  // panicMax bounds delta catch-up so a background stall can't trigger a spiral-of-death on resume.
+  render: { antialias: false, powerPreference: "high-performance", desynchronized: true, roundPixels: true },
+  fps: { target: 60, limit: 60, panicMax: 120 },
   scale: { mode: Phaser.Scale.RESIZE, width: "100%", height: "100%" },
   scene: PlayScene
 });
+
+// Free the audio hardware while the app is backgrounded (the scene's update() already bails on
+// document.hidden). Saves battery in a wrapped APK; no-op on desktop.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { audio.suspend(); }
+  else if ($("snd")?.checked) { audio.resume(); }
+});
+
+// Register the offline service worker (the canvas player does the same) so the phaser build is
+// actually an installable, offline-capable PWA — Phaser is vendored locally precisely for this.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("./offline-sw.js").catch(() => {}));
+}
 
 function initSelectors() {
   const missionSelect = $("mission-select");
@@ -679,7 +779,9 @@ function serviceWorkerTemplate(precacheAssets = [], cacheVersion = "dev") {
 const ASSETS = ${JSON.stringify(assets)};
 self.addEventListener("install", (event) => {
   self.skipWaiting();
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
+  // Resilient precache: cache each URL independently (Promise.allSettled), so one missing/renamed
+  // asset can't abort the whole install and leave the game uncached — unlike all-or-nothing addAll.
+  event.waitUntil(caches.open(CACHE).then((cache) => Promise.allSettled(ASSETS.map((url) => cache.add(url)))));
 });
 self.addEventListener("activate", (event) => {
   event.waitUntil(
@@ -689,8 +791,28 @@ self.addEventListener("activate", (event) => {
   );
 });
 self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET") return;
-  event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request)));
+  const request = event.request;
+  if (request.method !== "GET") return;
+  let url;
+  try { url = new URL(request.url); } catch { return; }
+  if (url.origin !== self.location.origin) return; // leave cross-origin requests to the network
+  // Navigations: network-first (a fresh index.html when online, so a returning player is never
+  // pinned to a stale shell), falling back to the cached shell when offline.
+  if (request.mode === "navigate") {
+    event.respondWith(
+      fetch(request)
+        .then((res) => { const copy = res.clone(); caches.open(CACHE).then((cache) => cache.put("./", copy)); return res; })
+        .catch(() => caches.match(request).then((cached) => cached || caches.match("./")))
+    );
+    return;
+  }
+  // Assets: cache-first for instant loads, populating the cache with same-origin responses.
+  event.respondWith(
+    caches.match(request).then((cached) => cached || fetch(request).then((res) => {
+      if (res && res.ok && res.type === "basic") { const copy = res.clone(); caches.open(CACHE).then((cache) => cache.put(request, copy)); }
+      return res;
+    }))
+  );
 });
 `;
 }

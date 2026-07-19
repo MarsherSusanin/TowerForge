@@ -1,5 +1,64 @@
 import { describe, expect, it } from "vitest";
-import { createCanvasRenderer } from "./index.mjs";
+import { createCanvasRenderer, MAX_BACKBUFFER_PX } from "./index.mjs";
+
+describe("canvas renderer backbuffer cap (mobile hardening)", () => {
+  function sizedCanvas(cssW, cssH) {
+    return { width: 0, height: 0, getBoundingClientRect: () => ({ width: cssW, height: cssH, left: 0, top: 0 }), getContext: () => ({}) };
+  }
+
+  it("caps the backbuffer on a high-DPR phone so cheap GPUs don't OOM", () => {
+    const prev = globalThis.devicePixelRatio;
+    globalThis.devicePixelRatio = 3; // e.g. a 412x915 CSS viewport at dpr 3 = ~3.4M px uncapped
+    try {
+      const canvas = sizedCanvas(412, 915);
+      createCanvasRenderer({ canvas, content: { towers: {}, enemies: {} } }).resize();
+      expect(canvas.width * canvas.height).toBeLessThanOrEqual(MAX_BACKBUFFER_PX + 4000);
+      // ...but never below the CSS resolution (scale >= 1), so it's never blurrier than 1:1.
+      expect(canvas.width).toBeGreaterThanOrEqual(412);
+      expect(canvas.height).toBeGreaterThanOrEqual(915);
+    } finally {
+      globalThis.devicePixelRatio = prev;
+    }
+  });
+
+  it("keeps full device-pixel-ratio when the backbuffer already fits under the cap", () => {
+    const prev = globalThis.devicePixelRatio;
+    globalThis.devicePixelRatio = 2; // 600x400 CSS * dpr 2 = 960k px < cap
+    try {
+      const canvas = sizedCanvas(600, 400);
+      createCanvasRenderer({ canvas, content: { towers: {}, enemies: {} } }).resize();
+      expect(canvas.width).toBe(1200);
+      expect(canvas.height).toBe(800);
+    } finally {
+      globalThis.devicePixelRatio = prev;
+    }
+  });
+
+  it("picks the tile under the CSS pointer when the effective DPR is capped", () => {
+    const prev = globalThis.devicePixelRatio;
+    globalThis.devicePixelRatio = 3;
+    try {
+      const cssW = 1000;
+      const cssH = 800;
+      const canvas = sizedCanvas(cssW, cssH);
+      const renderer = createCanvasRenderer({ canvas, content: { towers: {}, enemies: {} } });
+      renderer.resize();
+
+      const tiles = Array.from({ length: 6 }, (_, q) => ({ q, r: 0 }));
+      const target = tiles[4];
+      const center = renderer.center(target, renderer.geometry(tiles));
+      const event = {
+        clientX: center.x / (canvas.width / cssW),
+        clientY: center.y / (canvas.height / cssH)
+      };
+
+      expect(canvas.width / cssW).toBeLessThan(globalThis.devicePixelRatio);
+      expect(renderer.pickTile(event, tiles)).toEqual({ q: 4, r: 0 });
+    } finally {
+      globalThis.devicePixelRatio = prev;
+    }
+  });
+});
 
 describe("canvas renderer contract", () => {
   it("draws a render snapshot without owning simulation state", () => {

@@ -13,6 +13,7 @@ function parseArgs() {
     else if (raw[i] === "--kind" && raw[i + 1]) result.kind = raw[++i];
     else if (raw[i] === "--target" && raw[i + 1]) result.targetId = raw[++i];
     else if (raw[i] === "--out" && raw[i + 1]) result.outDir = raw[++i];
+    else if (!result.projectDir && !raw[i].startsWith("--")) result.projectDir = raw[i]; // bare positional project path
   }
   return result;
 }

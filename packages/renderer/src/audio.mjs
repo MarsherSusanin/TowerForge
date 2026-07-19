@@ -54,6 +54,12 @@ export class TowerForgeAudio {
     this.preload();
   }
 
+  /** Suspend the AudioContext when the app is backgrounded (mobile). Frees the audio hardware and
+   *  stops synthesis while hidden — real battery savings in a wrapped APK; safe no-op on desktop. */
+  suspend() {
+    if (this.ctx && this.ctx.state === "running") this.ctx.suspend().catch(() => {});
+  }
+
   // ── custom sounds ──────────────────────────────────────────────────────────
   eventSrc(eventType) {
     const soundId = this.audio && this.audio.events ? this.audio.events[eventType] : null;

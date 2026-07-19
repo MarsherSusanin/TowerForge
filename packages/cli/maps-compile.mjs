@@ -11,6 +11,8 @@ function parseArgs() {
     if (raw[i] === "--project" && raw[i + 1]) {
       result.projectDir = raw[i + 1];
       i += 1;
+    } else if (!result.projectDir && !raw[i].startsWith("--")) {
+      result.projectDir = raw[i]; // bare positional project path (was silently dropped)
     }
   }
   return result;

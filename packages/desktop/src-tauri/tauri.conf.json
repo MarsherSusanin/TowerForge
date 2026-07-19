@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TowerForge",
+  "version": "0.1.0",
+  "identifier": "com.lindforge.towerforge",
+  "build": {
+    "frontendDist": "../public",
+    "beforeDevCommand": "npm run prepare-runtime",
+    "beforeBuildCommand": "npm run prepare-runtime"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "TowerForge",
+        "url": "loading.html",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi", "dmg", "appimage", "deb", "rpm"],
+    "externalBin": ["binaries/node"],
+    "resources": ["runtime"],
+    "shortDescription": "TowerForge Studio",
+    "longDescription": "Local-first constructor for 2D hex tower-defense games.",
+    "category": "DeveloperTool",
+    "windows": {},
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "10.13"
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
+  }
+}

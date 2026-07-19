@@ -4,11 +4,16 @@
 
 TowerForge is an open-source, content-agnostic constructor for 2D hex tower-defense games. It provides a deterministic TypeScript simulation engine, a local browser editor for `.tdproj` projects, a CLI for validation, headless simulation, and balance analysis, and a static web build target that produces a playable browser bundle (canvas or Phaser). Any creator can build their own game — no engine code required.
 
+## Downloads
+
+Desktop builds are published on [GitHub Releases](https://github.com/MarsherSusanin/TowerForge/releases). Current alpha builds are explicitly marked **Unsigned build**. Verify the downloaded installer against the attached `SHA256SUMS` file before opening it. macOS installation notes and the unsigned-distribution policy live in [docs/releasing.md](docs/releasing.md).
+
 ## Product surface
 
 | Product | What it is | Where |
 | --- | --- | --- |
 | **TowerForge Editor** | Map, content & balance editor (the Studio) | `packages/studio` |
+| **TowerForge Desktop** | Installable Studio shell for Windows, macOS, and Linux | `packages/desktop` |
 | **TowerForge AI** | AI assistant / MCP agent — drives the author → simulate → balance → patch loop | `packages/mcp` |
 | **TowerForge Runtime** | Deterministic engine + renderers that run the built game | `packages/engine`, `packages/renderer` |
 | **TowerForge Market** | Templates, assets, maps (planned — see `docs/ROADMAP.md`) | — |
@@ -30,6 +35,7 @@ Studio opens at `http://localhost:5174` and edits `examples/starter.tdproj` by d
 | Install | `npm install` |
 | Run Studio | `npm run studio` |
 | Run MCP server | `npm run mcp -- --project examples/starter.tdproj` |
+| Connect an AI client (Claude Code / Codex / Claude Desktop / Cursor / VS Code) | `npx towerforge mcp:connect <project> [--client <id> --write]` — or the client picker in Studio → Settings → AI Agent Integration |
 | Validate project | `npm run validate` |
 | Validate as JSON | `npm run validate -- --json` |
 | Simulate starter mission | `npm run sim tutorial_01 60` |
@@ -42,6 +48,8 @@ Studio opens at `http://localhost:5174` and edits `examples/starter.tdproj` by d
 | Build playable web bundle | `npm run build` |
 | Package mobile scaffold | `node packages/cli/package.mjs --project examples/starter.tdproj --kind mobile` |
 | Package desktop scaffold | `node packages/cli/package.mjs --project examples/starter.tdproj --kind desktop` |
+| Run desktop Studio shell | `npm run desktop:dev` |
+| Build desktop Studio installers | `npm run desktop:build` |
 | Unit and integration tests | `npm run test` |
 | Browser smoke test | `npm run test:e2e` |
 
@@ -76,9 +84,9 @@ Canonical module boundaries and invariants live in [ARCHITECTURE.md](ARCHITECTUR
 
 ## Agent Harness
 
-Agent policy lives in [AGENTS.md](AGENTS.md). Operations are in [docs/runbook.md](docs/runbook.md), architecture decisions are in [docs/adr/](docs/adr/), and reference examples are in [docs/examples/](docs/examples/).
+Agent policy lives in [AGENTS.md](AGENTS.md). Operations are in [docs/runbook.md](docs/runbook.md), release policy is in [docs/releasing.md](docs/releasing.md), architecture decisions are in [docs/adr/](docs/adr/), and reference examples are in [docs/examples/](docs/examples/).
 
-The Studio **AI Designer** and external MCP clients share the same `packages/mcp/tools.mjs` tool registry. Tools advertise `riskClass` and `sideEffect`, return structured results, and prefer dry-run/validated writes (`dry_run_balance_patch`, `apply_validated_patch`, `set_enemy_stat`, `upsert_tower`, `add_wave_group`, `bind_sprite`) over broad section replacement. The Studio AI key is stored only in the browser's `localStorage` and is sent to the local Studio server per request.
+The Studio **AI Designer** and external MCP clients share the same `packages/mcp/tools.mjs` tool registry. Tools advertise `riskClass` and `sideEffect`, return structured results, and prefer dry-run/validated writes (`dry_run_balance_patch`, `apply_validated_patch`, `set_enemy_stat`, `upsert_tower`, `add_wave_group`, `bind_sprite`) over broad section replacement. AI Designer supports Anthropic, OpenAI, and OpenRouter, including custom model IDs and OpenRouter's live tool-capable model catalog. Provider keys are stored separately in browser `localStorage` and sent to the loopback Studio server only for the active request.
 
 ## License
 

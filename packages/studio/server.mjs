@@ -25,11 +25,15 @@ import {
 import { importProjectAsset } from "../cli/lib/assets.mjs";
 import { compileMapSources, writeCompiledMaps, writeMapSource } from "../cli/lib/map-compiler.mjs";
 import { normalizeVisuals } from "../cli/lib/project-schema.mjs";
+import { agentClientConfigs, writeProjectClientConfig } from "../cli/lib/agent-connect.mjs";
 import { writeRunTrace } from "../cli/lib/trace.mjs";
 import { TOOLS, callTool } from "../mcp/tools.mjs";
+import { createAgentRuntimeBridge } from "./lib/agent-runtime.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "../..");
+const repoRoot = path.resolve(process.env["TOWERFORGE_RUNTIME_ROOT"] || path.resolve(__dirname, "../.."));
+const DESKTOP_MODE = process.env["TOWERFORGE_DESKTOP"] === "1";
+const DESKTOP_SESSION_TOKEN = process.env["TOWERFORGE_SESSION_TOKEN"] || "";
 
 // ── Project resolution ────────────────────────────────────────────────────────
 // Shares the canonical resolver with the CLI loader so behavior stays in sync.
@@ -43,7 +47,32 @@ const MCP_JSON_PATH = path.join(PROJECT_DIR, ".mcp.json");
 const MCP_SERVER_PATH = path.join(repoRoot, "packages", "mcp", "server.mjs");
 const MCP_SERVER_KEY = "towerforge-ai";
 const PORT = parseInt(process.env["PORT"] ?? "5174", 10);
-const PUBLIC_DIR = path.join(__dirname, "public");
+let ACTIVE_PORT = Number.isFinite(PORT) ? PORT : 5174;
+const PUBLIC_DIR = path.join(repoRoot, "packages", "studio", "public");
+
+function loadAppInfo() {
+  try {
+    const packageInfo = readJson(path.join(repoRoot, "package.json"));
+    const repository = typeof packageInfo.repository === "string" ? packageInfo.repository : packageInfo.repository?.url;
+    return {
+      name: "TowerForge Studio",
+      version: packageInfo.version || "0.1.0",
+      studioName: packageInfo.towerforge?.studioName || "Lindforge Studios",
+      sourceUrl: String(repository || "https://github.com/MarsherSusanin/TowerForge").replace(/^git\+/, "").replace(/\.git$/, ""),
+      siteUrl: packageInfo.homepage || "https://lindforge.com",
+      telegramUrl: packageInfo.towerforge?.telegram || "https://t.me/lindforge"
+    };
+  } catch {
+    return {
+      name: "TowerForge Studio",
+      version: "0.1.0",
+      studioName: "Lindforge Studios",
+      sourceUrl: "https://github.com/MarsherSusanin/TowerForge",
+      siteUrl: "https://lindforge.com",
+      telegramUrl: "https://t.me/lindforge"
+    };
+  }
+}
 
 // ── File helpers ──────────────────────────────────────────────────────────────
 
@@ -116,7 +145,7 @@ function loadProject() {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-function serveStatic(res, filePath) {
+function serveStatic(res, filePath, extraHeaders = {}) {
   const ext = path.extname(filePath).toLowerCase();
   const types = {
     ".html": "text/html; charset=utf-8",
@@ -129,9 +158,16 @@ function serveStatic(res, filePath) {
     ".svg":  "image/svg+xml",
   };
   const ct = types[ext] ?? "application/octet-stream";
+  const securityHeaders = ext === ".html" ? {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    "X-Content-Type-Options": "nosniff"
+  } : {};
   try {
     const data = fs.readFileSync(filePath);
-    res.writeHead(200, { "Content-Type": ct, "Cache-Control": "no-store" });
+    res.writeHead(200, { "Content-Type": ct, "Cache-Control": "no-store", ...securityHeaders, ...extraHeaders });
     res.end(data);
   } catch {
     res.writeHead(404, { "Content-Type": "text/plain" });
@@ -156,14 +192,35 @@ function jsonResp(res, status, data) {
 // anything whose Host doesn't name this exact server, and — when a browser sends one — whose
 // Origin doesn't match either. No CORS headers are issued because no cross-origin caller is legitimate.
 function isAllowedAuthority(value) {
-  return value === `localhost:${PORT}` || value === `127.0.0.1:${PORT}`;
+  return value === `localhost:${ACTIVE_PORT}` || value === `127.0.0.1:${ACTIVE_PORT}`;
 }
 
 function originAllowed(req) {
   if (!isAllowedAuthority(req.headers.host)) return false;
   const origin = req.headers.origin;
   if (origin === undefined) return true; // non-browser client (curl, scripts) with no Origin header
-  return origin === `http://localhost:${PORT}` || origin === `http://127.0.0.1:${PORT}`;
+  return origin === `http://localhost:${ACTIVE_PORT}` || origin === `http://127.0.0.1:${ACTIVE_PORT}`;
+}
+
+function parseCookies(header) {
+  const out = {};
+  for (const part of String(header || "").split(";")) {
+    const index = part.indexOf("=");
+    if (index === -1) continue;
+    out[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim());
+  }
+  return out;
+}
+
+function desktopSessionAllowed(req) {
+  if (!DESKTOP_MODE) return true;
+  if (!DESKTOP_SESSION_TOKEN) return false;
+  if (req.headers["x-towerforge-session"] === DESKTOP_SESSION_TOKEN) return true;
+  return parseCookies(req.headers.cookie).tf_session === DESKTOP_SESSION_TOKEN;
+}
+
+function desktopSessionCookie() {
+  return `tf_session=${encodeURIComponent(DESKTOP_SESSION_TOKEN)}; HttpOnly; SameSite=Strict; Path=/`;
 }
 
 const MAX_BODY_BYTES = 16 * 1024 * 1024; // cap request bodies so a runaway client can't exhaust memory
@@ -200,11 +257,20 @@ function runNodeScript(args) {
 
 // ── AI co-designer ──────────────────────────────────────────────────────────
 // A Studio chat panel that drives the same tool surface the MCP exposes (author → simulate →
-// diagnose → patch → re-simulate). The user's Anthropic API key is passed per request and used
-// only transiently here — never written to disk. Every tool runs against THIS server's project.
+// diagnose → patch → re-simulate). Provider keys are passed per request and used only
+// transiently here — never written to disk. Every tool runs against THIS server's project.
 
-const AI_DEFAULT_MODEL = "claude-sonnet-4-6";
+const AI_PROVIDERS = Object.freeze({
+  anthropic: { label: "Anthropic", defaultModel: "claude-sonnet-5", auth: "apiKey" },
+  openai: { label: "OpenAI", defaultModel: "gpt-5.6-terra", auth: "apiKey" },
+  openrouter: { label: "OpenRouter", defaultModel: "openrouter/auto", auth: "apiKey" },
+  codex: { label: "Codex (ChatGPT)", defaultModel: "default", auth: "runtime" },
+  "claude-code": { label: "Claude Code", defaultModel: "sonnet", auth: "runtime" }
+});
 const AI_MAX_STEPS = 16;
+const AI_MAX_HISTORY_MESSAGES = 40;
+const AI_MAX_MESSAGE_CHARS = 50_000;
+const AI_MODEL_ID_RE = /^[A-Za-z0-9~][A-Za-z0-9._:/~+@-]{0,199}$/;
 const AI_SYSTEM_PROMPT = `You are the TowerForge AI co-designer, embedded in the TowerForge Editor. You help a game designer build and balance a hex tower-defense game by calling tools that inspect, simulate, diagnose, and patch the project on disk.
 
 Loop you should run when asked to balance or improve a mission:
@@ -218,48 +284,183 @@ Loop you should run when asked to balance or improve a mission:
 Rules: keep patches small and explain each one. Currencies are author-defined (coins is primary). Do not invent tools. When done, give a short summary of the changes and the resulting balance.`;
 
 /** Map the MCP tool registry to Anthropic tool definitions. */
-function aiToolDefs() {
+function anthropicToolDefs() {
   return TOOLS.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema }));
 }
 
-// Overridable for local proxies / tests; defaults to the real Anthropic API.
+/** Map the MCP tool registry to OpenAI-compatible function definitions. */
+function openAiToolDefs() {
+  return TOOLS.map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.inputSchema,
+    strict: false
+  }));
+}
+
+/** OpenRouter uses the Chat Completions function wrapper. */
+function openRouterToolDefs() {
+  return openAiToolDefs().map(({ name, description, parameters }) => ({
+    type: "function",
+    function: { name, description, parameters }
+  }));
+}
+
+// Overridable for local proxies / tests; defaults to each provider's public API.
 const ANTHROPIC_BASE_URL = (process.env["ANTHROPIC_BASE_URL"] || "https://api.anthropic.com").replace(/\/$/, "");
+const OPENAI_BASE_URL = (process.env["OPENAI_BASE_URL"] || "https://api.openai.com/v1").replace(/\/$/, "");
+const OPENROUTER_BASE_URL = (process.env["OPENROUTER_BASE_URL"] || "https://openrouter.ai/api/v1").replace(/\/$/, "");
 
-const ANTHROPIC_TIMEOUT_MS = 120_000;
+const AI_PROVIDER_TIMEOUT_MS = 120_000;
+const OPENROUTER_CATALOG_TIMEOUT_MS = 15_000;
+const OPENROUTER_CATALOG_TTL_MS = 10 * 60_000;
 const AI_WRITE_TOOLS = new Set(["apply_balance_patch", "apply_validated_patch", "set_enemy_stat", "upsert_tower", "add_wave_group", "bind_sprite", "compile_maps"]);
+let openRouterCatalogCache = { expiresAt: 0, models: [] };
 
-/** One non-streaming call to the Anthropic Messages API (zero-dep, uses global fetch). */
-async function anthropicMessages({ apiKey, model, system, tools, messages, signal }) {
-  // Bound the call: abort on timeout OR when the client disconnects (signal), so a hung upstream
-  // never parks the loop or leaks the open response.
+function providerConfig(provider) {
+  return AI_PROVIDERS[provider] ?? null;
+}
+
+function textFromAiContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part && (part.type === "text" || part.type === "output_text"))
+    .map((part) => String(part.text ?? ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** Keep browser history provider-neutral so changing providers starts from a safe text contract. */
+function normalizeAiHistory(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .slice(-AI_MAX_HISTORY_MESSAGES)
+    .filter((message) => message?.role === "user" || message?.role === "assistant")
+    .map((message) => ({
+      role: message.role,
+      content: textFromAiContent(message.content).slice(0, AI_MAX_MESSAGE_CHARS)
+    }))
+    .filter((message) => message.content.trim());
+}
+
+async function providerJsonRequest({ providerLabel, url, headers, body, signal, timeoutMs = AI_PROVIDER_TIMEOUT_MS }) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(new Error("Anthropic request timed out.")), ANTHROPIC_TIMEOUT_MS);
+  const forwardAbort = () => ctrl.abort(signal?.reason);
+  const timer = setTimeout(() => ctrl.abort(new Error(`${providerLabel} request timed out.`)), timeoutMs);
   if (signal) {
-    if (signal.aborted) ctrl.abort();
-    else signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+    if (signal.aborted) forwardAbort();
+    else signal.addEventListener("abort", forwardAbort, { once: true });
   }
+
   let response;
   try {
-    response = await fetch(`${ANTHROPIC_BASE_URL}/v1/messages`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({ model: model || AI_DEFAULT_MODEL, max_tokens: 4096, system, tools, messages }),
+    response = await fetch(url, {
+      method: body === undefined ? "GET" : "POST",
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal
     });
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", forwardAbort);
   }
+
   const text = await response.text();
   if (!response.ok) {
     let detail = text;
-    try { detail = JSON.parse(text)?.error?.message ?? text; } catch { /* keep raw */ }
-    throw new Error(`Anthropic API ${response.status}: ${String(detail).slice(0, 400)}`);
+    try { detail = JSON.parse(text)?.error?.message ?? JSON.parse(text)?.error ?? text; } catch { /* keep raw */ }
+    throw new Error(`${providerLabel} API ${response.status}: ${String(detail).slice(0, 400)}`);
   }
-  return JSON.parse(text);
+  try { return JSON.parse(text); }
+  catch { throw new Error(`${providerLabel} API returned invalid JSON.`); }
+}
+
+/** One non-streaming call to the Anthropic Messages API (zero-dep, uses global fetch). */
+async function anthropicMessages({ apiKey, model, system, tools, messages, signal }) {
+  return providerJsonRequest({
+    providerLabel: "Anthropic",
+    url: `${ANTHROPIC_BASE_URL}/v1/messages`,
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: { model, max_tokens: 4096, system, tools, messages },
+    signal
+  });
+}
+
+/** One non-streaming call to OpenAI's Responses API. */
+async function openAiResponse({ apiKey, model, input, signal }) {
+  return providerJsonRequest({
+    providerLabel: "OpenAI",
+    url: `${OPENAI_BASE_URL}/responses`,
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${apiKey}`
+    },
+    body: {
+      model,
+      instructions: AI_SYSTEM_PROMPT,
+      input,
+      tools: openAiToolDefs(),
+      max_output_tokens: 8192,
+      parallel_tool_calls: true,
+      store: false,
+      include: ["reasoning.encrypted_content"]
+    },
+    signal
+  });
+}
+
+/** One non-streaming call to OpenRouter's OpenAI-compatible Chat Completions API. */
+async function openRouterCompletion({ apiKey, model, messages, signal }) {
+  return providerJsonRequest({
+    providerLabel: "OpenRouter",
+    url: `${OPENROUTER_BASE_URL}/chat/completions`,
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${apiKey}`,
+      "x-openrouter-title": "TowerForge"
+    },
+    body: {
+      model,
+      messages,
+      tools: openRouterToolDefs(),
+      parallel_tool_calls: true,
+      max_tokens: 4096
+    },
+    signal
+  });
+}
+
+async function openRouterModels() {
+  if (openRouterCatalogCache.expiresAt > Date.now() && openRouterCatalogCache.models.length) {
+    return openRouterCatalogCache.models;
+  }
+  const url = new URL(`${OPENROUTER_BASE_URL}/models`);
+  url.searchParams.set("supported_parameters", "tools");
+  url.searchParams.set("sort", "top-weekly");
+  url.searchParams.set("limit", "200");
+  const payload = await providerJsonRequest({
+    providerLabel: "OpenRouter",
+    url,
+    headers: { "accept": "application/json" },
+    timeoutMs: OPENROUTER_CATALOG_TIMEOUT_MS
+  });
+  const models = (Array.isArray(payload?.data) ? payload.data : [])
+    .filter((model) => typeof model?.id === "string" && AI_MODEL_ID_RE.test(model.id))
+    .filter((model) => !Array.isArray(model?.supported_parameters) || model.supported_parameters.includes("tools"))
+    .filter((model) => !Array.isArray(model?.architecture?.output_modalities) || model.architecture.output_modalities.includes("text"))
+    .map((model) => ({
+      id: model.id,
+      name: typeof model.name === "string" && model.name.trim() ? model.name.trim() : model.id,
+      contextLength: Number.isFinite(model.context_length) ? model.context_length : null
+    }));
+  openRouterCatalogCache = { expiresAt: Date.now() + OPENROUTER_CATALOG_TTL_MS, models };
+  return models;
 }
 
 /** Compact a tool result for the live transcript (avoid dumping huge objects to the UI). */
@@ -277,6 +478,167 @@ function summarizeToolResult(name, result) {
   return keys.length > 12 ? { keys } : result;
 }
 
+const agentRuntime = createAgentRuntimeBridge({
+  projectDir: PROJECT_DIR,
+  repoRoot,
+  tools: TOOLS,
+  callTool,
+  systemPrompt: AI_SYSTEM_PROMPT,
+  summarizeToolResult,
+  writeTools: AI_WRITE_TOOLS
+});
+
+function parseToolArguments(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  const parsed = JSON.parse(value);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Tool arguments must be a JSON object.");
+  return parsed;
+}
+
+async function executeAiTools(send, toolUses) {
+  const executions = [];
+  let appliedPatch = false;
+  for (const [index, use] of toolUses.entries()) {
+    const id = String(use.id || `tool-${index}`);
+    const name = String(use.name || "");
+    let input = {};
+    let result;
+    let isError = false;
+    let announced = false;
+    try {
+      input = parseToolArguments(use.input);
+      send({ type: "tool_call", id, name, input });
+      announced = true;
+      result = await callTool(name, { ...input, projectDir: PROJECT_DIR }, { defaultProjectDir: PROJECT_DIR });
+      if (AI_WRITE_TOOLS.has(name) && result?.written !== false) appliedPatch = true;
+    } catch (error) {
+      if (!announced) send({ type: "tool_call", id, name: name || "invalid_tool", input: {} });
+      result = { error: error instanceof Error ? error.message : String(error) };
+      isError = true;
+    }
+    send({ type: "tool_result", id, name, ok: !isError, summary: summarizeToolResult(name, result) });
+    executions.push({
+      id,
+      name,
+      result,
+      isError,
+      serialized: JSON.stringify(result).slice(0, 24_000)
+    });
+  }
+  return { executions, appliedPatch };
+}
+
+async function runAnthropicAgent({ send, apiKey, model, history, signal }) {
+  const convo = history.map((message) => ({ ...message }));
+  const assistantText = [];
+  let appliedPatch = false;
+  for (let step = 0; step < AI_MAX_STEPS; step++) {
+    const reply = await anthropicMessages({
+      apiKey,
+      model,
+      system: AI_SYSTEM_PROMPT,
+      tools: anthropicToolDefs(),
+      messages: convo,
+      signal
+    });
+    const content = Array.isArray(reply?.content) ? reply.content : [];
+    convo.push({ role: "assistant", content });
+    for (const block of content) {
+      if (block?.type === "text" && block.text) {
+        assistantText.push(block.text);
+        send({ type: "text", text: block.text });
+      }
+    }
+    const toolUses = content
+      .filter((block) => block?.type === "tool_use")
+      .map((block) => ({ id: block.id, name: block.name, input: block.input }));
+    if (!toolUses.length) return { assistantText, appliedPatch };
+
+    const executed = await executeAiTools(send, toolUses);
+    appliedPatch ||= executed.appliedPatch;
+    convo.push({
+      role: "user",
+      content: executed.executions.map((item) => ({
+        type: "tool_result",
+        tool_use_id: item.id,
+        content: item.serialized,
+        is_error: item.isError
+      }))
+    });
+  }
+  return { assistantText, appliedPatch, reachedLimit: true };
+}
+
+function openAiResponseText(output) {
+  const texts = [];
+  for (const item of Array.isArray(output) ? output : []) {
+    if (item?.type !== "message") continue;
+    const text = textFromAiContent(item.content);
+    if (text) texts.push(text);
+  }
+  return texts;
+}
+
+async function runOpenAiAgent({ send, apiKey, model, history, signal }) {
+  const input = history.map((message) => ({ ...message }));
+  const assistantText = [];
+  let appliedPatch = false;
+  for (let step = 0; step < AI_MAX_STEPS; step++) {
+    const reply = await openAiResponse({ apiKey, model, input, signal });
+    const output = Array.isArray(reply?.output) ? reply.output : [];
+    for (const text of openAiResponseText(output)) {
+      assistantText.push(text);
+      send({ type: "text", text });
+    }
+    const toolUses = output
+      .filter((item) => item?.type === "function_call")
+      .map((item) => ({ id: item.call_id || item.id, name: item.name, input: item.arguments }));
+    input.push(...output);
+    if (!toolUses.length) return { assistantText, appliedPatch };
+
+    const executed = await executeAiTools(send, toolUses);
+    appliedPatch ||= executed.appliedPatch;
+    input.push(...executed.executions.map((item) => ({
+      type: "function_call_output",
+      call_id: item.id,
+      output: item.serialized
+    })));
+  }
+  return { assistantText, appliedPatch, reachedLimit: true };
+}
+
+async function runOpenRouterAgent({ send, apiKey, model, history, signal }) {
+  const messages = [{ role: "system", content: AI_SYSTEM_PROMPT }, ...history.map((message) => ({ ...message }))];
+  const assistantText = [];
+  let appliedPatch = false;
+  for (let step = 0; step < AI_MAX_STEPS; step++) {
+    const reply = await openRouterCompletion({ apiKey, model, messages, signal });
+    const choice = reply?.choices?.[0];
+    const message = choice?.message;
+    if (!message || typeof message !== "object") throw new Error("OpenRouter API returned no assistant message.");
+    messages.push(message);
+    const text = textFromAiContent(message.content);
+    if (text) {
+      assistantText.push(text);
+      send({ type: "text", text });
+    }
+    const toolUses = (Array.isArray(message.tool_calls) ? message.tool_calls : [])
+      .filter((item) => item?.type === "function" && item.function?.name)
+      .map((item) => ({ id: item.id, name: item.function.name, input: item.function.arguments }));
+    if (!toolUses.length) return { assistantText, appliedPatch };
+
+    const executed = await executeAiTools(send, toolUses);
+    appliedPatch ||= executed.appliedPatch;
+    messages.push(...executed.executions.map((item) => ({
+      role: "tool",
+      tool_call_id: item.id,
+      content: item.serialized
+    })));
+  }
+  return { assistantText, appliedPatch, reachedLimit: true };
+}
+
 /** Run the agentic loop, streaming newline-delimited JSON events to the client. */
 async function runAiChat(res, body) {
   res.writeHead(200, {
@@ -285,52 +647,40 @@ async function runAiChat(res, body) {
   });
   const send = (event) => { try { res.write(JSON.stringify(event) + "\n"); } catch { /* client gone */ } };
 
+  const provider = typeof body?.provider === "string" ? body.provider.trim().toLowerCase() : "anthropic";
+  const config = providerConfig(provider);
+  if (!config) { send({ type: "error", error: "Unsupported AI provider." }); return res.end(); }
   const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
-  if (!apiKey) { send({ type: "error", error: "Missing Anthropic API key." }); return res.end(); }
-  const model = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : AI_DEFAULT_MODEL;
-  const convo = Array.isArray(body?.messages) ? body.messages.slice() : [];
-  if (convo.length === 0) { send({ type: "error", error: "No messages provided." }); return res.end(); }
+  if (config.auth === "apiKey" && !apiKey) { send({ type: "error", error: `Missing ${config.label} API key.` }); return res.end(); }
+  const requestedModel = typeof body?.model === "string" ? body.model.trim() : "";
+  const model = requestedModel || config.defaultModel;
+  if (!AI_MODEL_ID_RE.test(model)) { send({ type: "error", error: "Invalid AI model ID." }); return res.end(); }
+  const history = normalizeAiHistory(body?.messages);
+  if (history.length === 0) { send({ type: "error", error: "No messages provided." }); return res.end(); }
 
   // Abort the loop if the client disconnects (closes the EventStream / navigates away).
   const aborter = new AbortController();
   res.on("close", () => aborter.abort());
 
-  const tools = aiToolDefs();
-  let appliedPatch = false;
+  let result = { assistantText: [], appliedPatch: false };
   try {
-    for (let step = 0; step < AI_MAX_STEPS; step++) {
-      if (aborter.signal.aborted) break;
-      const reply = await anthropicMessages({ apiKey, model, system: AI_SYSTEM_PROMPT, tools, messages: convo, signal: aborter.signal });
-      convo.push({ role: "assistant", content: reply.content });
-      for (const block of reply.content ?? []) {
-        if (block.type === "text" && block.text) send({ type: "text", text: block.text });
-      }
-      if (reply.stop_reason !== "tool_use") { send({ type: "final" }); break; }
-
-      const toolUses = (reply.content ?? []).filter((b) => b.type === "tool_use");
-      const resultBlocks = [];
-      for (const use of toolUses) {
-        send({ type: "tool_call", id: use.id, name: use.name, input: use.input ?? {} });
-        let result;
-        let isError = false;
-        try {
-          // Force the project dir: the model must not be able to escape the server's project.
-          result = await callTool(use.name, { ...(use.input ?? {}), projectDir: PROJECT_DIR }, { defaultProjectDir: PROJECT_DIR });
-          if (AI_WRITE_TOOLS.has(use.name) && result?.written !== false) appliedPatch = true;
-        } catch (error) {
-          result = { error: error.message };
-          isError = true;
-        }
-        send({ type: "tool_result", id: use.id, name: use.name, ok: !isError, summary: summarizeToolResult(use.name, result) });
-        resultBlocks.push({ type: "tool_result", tool_use_id: use.id, content: JSON.stringify(result).slice(0, 24000), is_error: isError });
-      }
-      convo.push({ role: "user", content: resultBlocks });
-      if (step === AI_MAX_STEPS - 1) send({ type: "text", text: "_(Reached the step limit — ask me to continue if needed.)_" });
+    const args = { send, apiKey, model, history, signal: aborter.signal };
+    if (config.auth === "runtime") result = await agentRuntime.runChat({ provider, model, history, send, signal: aborter.signal });
+    else if (provider === "openai") result = await runOpenAiAgent(args);
+    else if (provider === "openrouter") result = await runOpenRouterAgent(args);
+    else result = await runAnthropicAgent(args);
+    if (result.reachedLimit) {
+      const limitText = "_(Reached the step limit — ask me to continue if needed.)_";
+      result.assistantText.push(limitText);
+      send({ type: "text", text: limitText });
     }
+    send({ type: "final" });
   } catch (error) {
-    send({ type: "error", error: error.message });
+    if (!aborter.signal.aborted) send({ type: "error", error: error instanceof Error ? error.message : String(error) });
   }
-  send({ type: "done", messages: convo, appliedPatch });
+  const assistantMessage = result.assistantText.filter(Boolean).join("\n");
+  const messages = assistantMessage ? [...history, { role: "assistant", content: assistantMessage }] : history;
+  send({ type: "done", provider, model, messages, appliedPatch: result.appliedPatch });
   res.end();
 }
 
@@ -368,7 +718,10 @@ function mcpState() {
     serverPath: MCP_SERVER_PATH,
     mcpJsonPath: MCP_JSON_PATH,
     serverKey: MCP_SERVER_KEY,
-    config: { mcpServers: { [MCP_SERVER_KEY]: mcpServerEntry() } }
+    config: { mcpServers: { [MCP_SERVER_KEY]: mcpServerEntry() } },
+    // Per-client connection snippets (Claude Code, Codex, Claude Desktop, Cursor, VS Code) — the
+    // Settings panel renders these so any agent can be connected without leaving Studio.
+    clients: agentClientConfigs(PROJECT_DIR, MCP_SERVER_PATH)
   };
 }
 
@@ -408,12 +761,83 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
+  if (req.method === "GET" && pathname === "/api/health") {
+    return jsonResp(res, 200, {
+      ok: true,
+      desktop: DESKTOP_MODE,
+      port: ACTIVE_PORT
+    });
+  }
+
+  if (
+    DESKTOP_MODE &&
+    req.method === "GET" &&
+    (pathname === "/" || pathname === "/index.html") &&
+    url.searchParams.get("desktopToken") === DESKTOP_SESSION_TOKEN
+  ) {
+    return serveStatic(res, path.join(PUBLIC_DIR, "index.html"), { "Set-Cookie": desktopSessionCookie() });
+  }
+
+  if (!desktopSessionAllowed(req)) {
+    res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "Forbidden: missing or invalid TowerForge desktop session." }));
+    return;
+  }
+
   // ── GET /api/project ───────────────────────────────────────────────────────
+  if (req.method === "GET" && pathname === "/api/app-info") {
+    return jsonResp(res, 200, loadAppInfo());
+  }
+
   if (req.method === "GET" && pathname === "/api/project") {
     try {
       return jsonResp(res, 200, loadProject());
     } catch (e) {
       return jsonResp(res, 500, { error: e.message });
+    }
+  }
+
+  // GET /api/ai/models - live OpenRouter tool-capable model catalog.
+  if (req.method === "GET" && pathname === "/api/ai/models") {
+    if (url.searchParams.get("provider") !== "openrouter") {
+      return jsonResp(res, 400, { error: "Only the OpenRouter live model catalog is supported." });
+    }
+    try {
+      return jsonResp(res, 200, { provider: "openrouter", models: await openRouterModels() });
+    } catch (error) {
+      return jsonResp(res, 502, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // Account runtimes own their OAuth credentials. These endpoints expose only safe status and
+  // start/logout actions; tokens and credential files never cross into Studio or the WebView.
+  if (req.method === "GET" && pathname === "/api/ai/runtime/status") {
+    try {
+      return jsonResp(res, 200, await agentRuntime.status(url.searchParams.get("provider")));
+    } catch (error) {
+      return jsonResp(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/ai/runtime/connect") {
+    let body;
+    try { body = await readBody(req); }
+    catch { return jsonResp(res, 400, { error: "Invalid JSON body" }); }
+    try {
+      return jsonResp(res, 200, await agentRuntime.connect(body?.provider));
+    } catch (error) {
+      return jsonResp(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/ai/runtime/disconnect") {
+    let body;
+    try { body = await readBody(req); }
+    catch { return jsonResp(res, 400, { error: "Invalid JSON body" }); }
+    try {
+      return jsonResp(res, 200, await agentRuntime.disconnect(body?.provider));
+    } catch (error) {
+      return jsonResp(res, 400, { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -548,6 +972,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── POST /api/maps/compile ─────────────────────────────────────────────────
+  if (req.method === "POST" && pathname === "/api/maps/preview") {
+    let body;
+    try { body = await readBody(req); }
+    catch { return jsonResp(res, 400, { error: "Invalid JSON body" }); }
+    if (!body.mapSources || typeof body.mapSources !== "object" || Array.isArray(body.mapSources)) {
+      return jsonResp(res, 400, { error: "mapSources must be an object." });
+    }
+    const result = compileMapSources(body.mapSources);
+    if (!result.ok) return jsonResp(res, 422, result);
+    return jsonResp(res, 200, { ok: true, maps: result.maps, issues: result.issues });
+  }
+
   if (req.method === "POST" && pathname === "/api/maps/compile") {
     try {
       const files = loadProjectFiles(PROJECT_DIR);
@@ -610,6 +1046,24 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ── POST /api/mcp/connect-client — write a project-scoped client config ─────
+  // Only project-scoped targets (.mcp.json / .cursor/mcp.json / .vscode/mcp.json) are writable;
+  // user-scoped configs (Codex, Claude Desktop) stay copy-paste by design — the library refuses
+  // them, so this endpoint can never touch files outside PROJECT_DIR.
+  if (req.method === "POST" && pathname === "/api/mcp/connect-client") {
+    let body;
+    try { body = await readBody(req); }
+    catch { return jsonResp(res, 400, { error: "Invalid JSON body" }); }
+    try {
+      const written = writeProjectClientConfig(PROJECT_DIR, String(body.clientId ?? ""), MCP_SERVER_PATH);
+      writeRunTrace(PROJECT_DIR, { source: "studio", action: "mcp:connect-client", status: "ok", clientId: body.clientId });
+      return jsonResp(res, 200, { ok: true, ...written, state: mcpState() });
+    } catch (e) {
+      writeRunTrace(PROJECT_DIR, { source: "studio", action: "mcp:connect-client", status: "error", error: e.message });
+      return jsonResp(res, 400, { error: e.message });
+    }
+  }
+
   // ── POST /api/build/:targetId ──────────────────────────────────────────────
   if (req.method === "POST" && pathname.startsWith("/api/build")) {
     const targetId = pathname === "/api/build" ? "" : decodeURIComponent(pathname.slice("/api/build/".length));
@@ -654,6 +1108,9 @@ const server = http.createServer(async (req, res) => {
   // ── Static files ───────────────────────────────────────────────────────────
   if (req.method === "GET") {
     if (pathname === "/" || pathname === "/index.html") {
+      if (DESKTOP_MODE && url.searchParams.get("desktopToken") === DESKTOP_SESSION_TOKEN) {
+        return serveStatic(res, path.join(PUBLIC_DIR, "index.html"), { "Set-Cookie": desktopSessionCookie() });
+      }
       return serveStatic(res, path.join(PUBLIC_DIR, "index.html"));
     }
     if (pathname.startsWith("/renderer/")) {
@@ -713,7 +1170,29 @@ server.on("error", (err) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`\n  TowerForge Editor  http://localhost:${PORT}`);
+  const address = server.address();
+  if (address && typeof address === "object") ACTIVE_PORT = address.port;
+  if (DESKTOP_MODE) {
+    console.log(JSON.stringify({
+      type: "towerforge-studio-ready",
+      url: `http://127.0.0.1:${ACTIVE_PORT}`,
+      port: ACTIVE_PORT
+    }));
+    return;
+  }
+  console.log(`\n  TowerForge Editor  http://localhost:${ACTIVE_PORT}`);
   console.log(`  Project: ${PROJECT_DIR}\n`);
   console.log("  Press Ctrl+C to stop.\n");
 });
+
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.once(signal, () => {
+    agentRuntime.close();
+    const forceExit = setTimeout(() => process.exit(0), 1_000);
+    server.close(() => {
+      clearTimeout(forceExit);
+      process.exit(0);
+    });
+    server.closeAllConnections?.();
+  });
+}

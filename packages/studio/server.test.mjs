@@ -43,6 +43,20 @@ describe("studio server origin/host guard", () => {
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
   });
 
+  it("serves public application metadata from the root package", async () => {
+    const res = await fetch(`${BASE}/api/app-info`);
+    const info = await res.json();
+    expect(res.status).toBe(200);
+    expect(info).toMatchObject({
+      name: "TowerForge Studio",
+      version: "0.1.0",
+      studioName: "Lindforge Studios",
+      siteUrl: "https://lindforge.com",
+      telegramUrl: "https://t.me/lindforge"
+    });
+    expect(info.sourceUrl).toBe("https://github.com/MarsherSusanin/TowerForge");
+  });
+
   it("allows a same-origin request that also sends a matching Origin header", async () => {
     const res = await fetch(`${BASE}/api/project`, { headers: { Origin: `http://127.0.0.1:${PORT}` } });
     expect(res.status).toBe(200);
@@ -68,6 +82,28 @@ describe("studio server origin/host guard", () => {
   it("never issues a wildcard Access-Control-Allow-Origin header", async () => {
     const res = await fetch(`${BASE}/api/project`);
     expect(res.headers.get("access-control-allow-origin")).not.toBe("*");
+  });
+
+  it("previews unsaved map sources without replacing compiled maps on disk", async () => {
+    const project = await (await fetch(`${BASE}/api/project`)).json();
+    const sources = structuredClone(project.mapSources);
+    const source = sources["tutorial_map.tmj"];
+    const nextPath = [{ q: 6, r: 0 }, { q: 6, r: 1 }, { q: 6, r: 2 }];
+    source.properties.find((prop) => prop.name === "pathCenterline").value = JSON.stringify(nextPath);
+    const compiledPath = path.join(projectDir, "maps", "compiled", "maps.json");
+    const before = fs.readFileSync(compiledPath, "utf8");
+
+    const response = await fetch(`${BASE}/api/maps/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mapSources: sources })
+    });
+    const preview = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(preview.maps.tutorial_map.pathCenterline).toEqual(nextPath);
+    expect(preview.maps.tutorial_map.pathRoutes[0].pathCenterline).toEqual(nextPath);
+    expect(fs.readFileSync(compiledPath, "utf8")).toBe(before);
   });
 });
 

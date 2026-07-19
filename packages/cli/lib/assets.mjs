@@ -32,8 +32,21 @@ export function importProjectAsset(projectDir, visuals, request) {
   updatedVisuals.audio.sounds ??= {};
   updatedVisuals.audio.events ??= {};
 
-  const id = request?.id || path.basename(targetRel, path.extname(targetRel)).replace(/[^a-zA-Z0-9_-]+/g, "_");
   const kind = request?.kind || "sprite";
+  const collection = kind === "atlas" ? updatedVisuals.atlases : kind === "sound" ? updatedVisuals.audio.sounds : updatedVisuals.sprites;
+  // Auto-derive an id from the filename when none is given. Sanitizing a fully non-ASCII basename
+  // (e.g. Cyrillic "герой.png") used to collapse to "_", so a second such import silently
+  // overwrote the first entry. Fall back to "asset" for an empty result and uniquify on collision
+  // (unless it's the same file being re-imported, which should update in place).
+  let id;
+  if (request?.id) {
+    id = request.id;
+  } else {
+    const base = path.basename(targetRel, path.extname(targetRel))
+      .replace(/[^a-zA-Z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "asset";
+    id = uniqueAssetId(base, collection, assetRelPath);
+  }
   if (kind === "atlas") {
     updatedVisuals.atlases[id] = {
       ...(updatedVisuals.atlases[id] ?? {}),
@@ -54,6 +67,16 @@ export function importProjectAsset(projectDir, visuals, request) {
   }
 
   return { visuals: updatedVisuals, asset: { id, kind, path: assetRelPath } };
+}
+
+/** Return `base` if it's free in `collection` (or already points at `newSrc`, i.e. a re-import of
+ *  the same file), otherwise the first free `base-2`, `base-3`, … so distinct files never clobber. */
+function uniqueAssetId(base, collection, newSrc) {
+  const taken = (id) => Object.prototype.hasOwnProperty.call(collection, id) && collection[id]?.src !== newSrc;
+  if (!taken(base)) return base;
+  let n = 2;
+  while (taken(`${base}-${n}`)) n += 1;
+  return `${base}-${n}`;
 }
 
 export function copyVisualAssets(projectDir, outDir, visuals) {

@@ -34,9 +34,15 @@ export async function packageProject(projectDir, opts = {}) {
   const app = appMeta(files.manifest, selected);
   const outDir = path.resolve(projectDir, opts.outDir ?? kind);
   assertUnderProject(projectDir, outDir);
-  emptyDir(outDir);
+  // Do NOT wipe the whole outDir: on a re-package it would destroy the user's native projects
+  // (android/, ios/ from `npx cap add`, src-tauri/target/), their signing config, and node_modules.
+  // The child build cleans only the web subdir (www/dist) below, and the scaffold files are
+  // idempotent overwrites — so a re-package refreshes the bundle while preserving native work.
+  fs.mkdirSync(outDir, { recursive: true });
 
-  // Build the web bundle into the folder the native project serves from.
+  // Build the web bundle into the folder the native project serves from. The child build empties
+  // just this web subdir, so a failed build leaves the native project intact (only the bundle is
+  // cleared) rather than deleting everything under outDir.
   const webSub = kind === "desktop" ? "dist" : "www";
   const webRel = path.join(path.relative(projectDir, outDir), webSub);
   const build = await runBuild(projectDir, webTargetId, webRel);
@@ -65,7 +71,28 @@ function writeCapacitor(outDir, app) {
     appName: app.appName,
     webDir: "www",
     backgroundColor: app.backgroundColor,
-    server: { androidScheme: "https" }
+    // Hardening ported from a shipped Capacitor game: a game WebView should not pinch-zoom or
+    // auto-focus inputs, should log quietly in production, and should keep the status bar out of
+    // the playfield. These remove whole classes of "my APK feels broken" reports.
+    zoomEnabled: false,
+    initialFocus: false,
+    loggingBehavior: "production",
+    server: { androidScheme: "https" },
+    android: {
+      backgroundColor: app.backgroundColor,
+      zoomEnabled: false,
+      // Cheap devices can otherwise silently fall back to a slower WebView path; requiring it makes
+      // behavior consistent, and captureInput keeps key events inside the game.
+      captureInput: true,
+      webContentsDebuggingEnabled: false
+    },
+    plugins: {
+      StatusBar: {
+        overlaysWebView: false,
+        style: "DARK",
+        backgroundColor: app.backgroundColor
+      }
+    }
   });
   writeJson(path.join(outDir, "package.json"), {
     name: app.slug,
@@ -238,11 +265,6 @@ function assertUnderProject(projectDir, outDir) {
   }
 }
 
-function emptyDir(dir) {
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.mkdirSync(dir, { recursive: true });
-}
-
 function writeJson(filePath, data) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf8");
@@ -296,6 +318,17 @@ When the game changes, re-run \`towerforge package\` (rebuilds \`www/\`) then \`
 - **iOS signing:** set Team + Bundle Identifier (\`${app.appId}\`) in Xcode > Signing & Capabilities,
   then Archive and upload via the Organizer / Transporter.
 - **Offline:** the bundle ships an offline service worker, so the app works without a network.
+
+## Low-end device / stability checklist
+The generated \`capacitor.config.json\` already hardens the web layer (no pinch-zoom, no input
+auto-focus, quiet production logging, status bar out of the playfield). A few wins live in the
+**native Android project** that \`npx cap add android\` generates — verify them in
+\`android/app/src/main/AndroidManifest.xml\` before shipping:
+- **\`android:hardwareAccelerated="true"\`** on \`<application>\` (Capacitor default) — required for smooth WebGL.
+- **\`android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|uiMode"\`** on the main activity so a rotation/resize does NOT recreate the Activity — recreation destroys the WebView's GL context and is a classic crash. Keep Capacitor's defaults.
+- **Portrait lock** (if your game is portrait): add \`android:screenOrientation="portrait"\` to the activity.
+- **Android 12+ Game Mode:** a \`res/xml/game_mode_config.xml\` with \`supportsBatteryGameMode\`/\`supportsPerformanceGameMode\` referenced via an application \`<meta-data android:name="android.game_mode_config">\` lets the OS grant better clocks.
+- **Test in airplane mode** once: the offline service worker should let the game open with no network.
 `;
 }
 

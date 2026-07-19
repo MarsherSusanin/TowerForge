@@ -1,0 +1,12 @@
+{
+  "name": "towerforge",
+  "description": "TowerForge tower-defense game constructor: MCP tools to author, validate, simulate, balance, build, and package .tdproj games, plus a /towerforge command teaching the safe authoring loop.",
+  "version": "0.1.0",
+  "author": { "name": "TowerForge" },
+  "mcpServers": {
+    "towerforge-ai": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/packages/mcp/server.mjs"]
+    }
+  }
+}

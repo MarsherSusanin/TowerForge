@@ -12,6 +12,7 @@ This repository is already a working constructor MVP:
 - `@towerforge/cli` validates `.tdproj` projects, applies schema migrations, compiles map sources, runs headless simulations, scaffolds new projects, and builds a playable static web bundle.
 - `@towerforge/renderer` is a browser rendering adapter over engine snapshots and map definitions. The static player can be emitted as a lightweight canvas player or a vendored Phaser player.
 - `@towerforge/studio` is a local browser editor for waves, enemies, towers, missions, map sources, asset catalogs, world map data, settings, and build targets.
+- `@towerforge/desktop` packages TowerForge Studio itself as a Tauri desktop app with a bundled Node sidecar.
 - `@towerforge/mcp` exposes the constructor through MCP tools used by external agents and the Studio AI Designer.
 - `examples/starter.tdproj` is the canonical starter project.
 
@@ -30,6 +31,7 @@ The current "full constructor" means:
 - Use AI Designer or external MCP agents to inspect, simulate, validate, patch, build, and package local projects through validation-gated tools.
 - Build a playable static web bundle.
 - Export Capacitor mobile and Tauri desktop scaffolds around the built web bundle.
+- Install TowerForge Studio itself as a native desktop app for Windows, macOS, and Linux.
 - Preview and interact with the built game in a browser.
 
 Non-goals for this iteration:
@@ -51,6 +53,9 @@ packages/cli
 
 packages/studio
   local Node server and browser editor UI
+
+packages/desktop
+  Tauri shell, bundled Studio runtime, Node sidecar, desktop installers
 
 packages/mcp
   transport-agnostic tool registry plus stdio MCP server for agents
@@ -142,7 +147,7 @@ Current Studio modules:
 - Map Authoring: source map dimensions, spawn/core, path centerline, named routes, terrain overrides, and compile action.
 - Playtest: engine-backed live canvas playtest with tower placement, wave start, speed, and abilities.
 - Balance: deterministic multi-strategy balance report with advisor flags.
-- AI Designer: Anthropic-backed chat loop that reuses MCP `callTool`, streams tool calls/results, and reloads patched projects from disk.
+- AI Designer: provider-neutral chat over Anthropic Messages, OpenAI Responses, or OpenRouter Chat Completions. It reuses MCP `callTool`, streams tool calls/results, supports custom model IDs plus a live OpenRouter tool-model catalog, and reloads patched projects from disk.
 - Asset Catalog: safe project-relative asset import, sound preview/binding, atlas frame picking, sprite bindings, and `content/visuals.json` editing.
 
 Top-bar actions:
@@ -164,6 +169,8 @@ npm run build
 npm run build -- --json
 node packages/cli/package.mjs --project examples/starter.tdproj --kind desktop
 node packages/cli/package.mjs --project examples/starter.tdproj --kind mobile
+npm run desktop:dev
+npm run desktop:build
 npm run mcp -- --project examples/starter.tdproj
 npm run test:e2e
 npm run studio
@@ -173,6 +180,8 @@ node packages/cli/create.mjs my-game --dir /tmp
 `npm run build` validates the project, compiles `packages/engine` to ES modules, copies the compiled engine and renderer into the target output, copies safe referenced visual assets, emits `project-data.js`, and writes a playable web player.
 
 `node packages/cli/package.mjs` wraps a web build into a native project scaffold. It does not install Android Studio, Xcode, Rust, or Tauri toolchains, and it does not sign or publish binaries.
+
+`npm run desktop:build` builds installable TowerForge Studio desktop bundles through `packages/desktop`. This is separate from game export packaging: it prepares a bundled runtime with the Studio server, CLI/MCP libraries, renderer files, and precompiled engine dist, then launches it through a Tauri v2 shell with a Node sidecar.
 
 `npm run mcp` starts the stdio MCP server. Use `tools/list` to inspect tool schemas, `riskClass`, and `sideEffect` metadata.
 

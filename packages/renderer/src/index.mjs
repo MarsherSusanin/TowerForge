@@ -1,3 +1,7 @@
+// Max canvas backbuffer area (pixels). Above this, high-DPR mobile GPUs stall or OOM. ~1.35M px
+// ≈ 1600x844 — plenty for a hex playfield while keeping cheap Android devices stable.
+export const MAX_BACKBUFFER_PX = 1_350_000;
+
 export function createCanvasRenderer(options) {
   return new TowerForgeCanvasRenderer(options);
 }
@@ -31,9 +35,20 @@ export class TowerForgeCanvasRenderer {
 
   resize() {
     const rect = this.canvas.getBoundingClientRect();
-    const ratio = globalThis.devicePixelRatio || 1;
-    this.canvas.width = Math.max(320, Math.floor(rect.width * ratio));
-    this.canvas.height = Math.max(240, Math.floor(rect.height * ratio));
+    const cssW = Math.max(320, Math.floor(rect.width) || 320);
+    const cssH = Math.max(240, Math.floor(rect.height) || 240);
+    // Cap the backbuffer area. A high-DPR phone (e.g. 1080x2340 @ dpr 2.75) would otherwise
+    // allocate a ~2.6M-pixel canvas — GPU memory pressure, jank, and black screens on low-end
+    // Android. Scale the device-pixel-ratio down so the backbuffer never exceeds MAX_BACKBUFFER_PX,
+    // but never below the CSS resolution (scale >= 1), so desktop stays crisp. (Practice ported
+    // from a shipped Capacitor game where an uncapped backbuffer was the #1 low-end-device crash.)
+    const dpr = globalThis.devicePixelRatio || 1;
+    const cap = Math.max(MAX_BACKBUFFER_PX, cssW * cssH); // never blurrier than 1 device pixel per CSS pixel
+    let scale = dpr;
+    if (cssW * cssH * scale * scale > cap) scale = Math.sqrt(cap / (cssW * cssH));
+    scale = Math.max(1, scale);
+    this.canvas.width = Math.floor(cssW * scale);
+    this.canvas.height = Math.floor(cssH * scale);
   }
 
   drawSnapshot(snapshot) {
@@ -204,9 +219,13 @@ export class TowerForgeCanvasRenderer {
   pickTile(event, tiles) {
     const geom = this.geometry(tiles ?? []);
     const rect = this.canvas.getBoundingClientRect();
-    const ratio = globalThis.devicePixelRatio || 1;
-    const x = (event.clientX - rect.left) * ratio;
-    const y = (event.clientY - rect.top) * ratio;
+    // Pointer events are reported in CSS pixels, while geometry is calculated in backbuffer
+    // pixels. resize() may cap the effective DPR, so the browser's devicePixelRatio is not a
+    // reliable conversion factor here. Read the canvas's actual CSS-to-backbuffer scale instead.
+    const scaleX = rect.width > 0 ? this.canvas.width / rect.width : 1;
+    const scaleY = rect.height > 0 ? this.canvas.height / rect.height : 1;
+    const x = (event.clientX - rect.left) * scaleX;
+    const y = (event.clientY - rect.top) * scaleY;
     let best = null;
     let bestDist = Infinity;
     for (const tile of tiles ?? []) {
@@ -227,8 +246,16 @@ export class TowerForgeCanvasRenderer {
   }
 
   geometry(tiles) {
-    const maxQ = Math.max(...tiles.map((tile) => tile.q), 1);
-    const maxR = Math.max(...tiles.map((tile) => tile.r), 1);
+    // Loop instead of Math.max(...tiles.map(...)): the spread pushes one argument per tile onto the
+    // call stack, so a large map (256x256 = 65 536 tiles) throws "Maximum call stack size exceeded"
+    // in WebKit/JSC (Safari + packaged iOS) every frame. A loop also avoids allocating two
+    // tile-count arrays 60x/second.
+    let maxQ = 1;
+    let maxR = 1;
+    for (const tile of tiles) {
+      if (tile.q > maxQ) maxQ = tile.q;
+      if (tile.r > maxR) maxR = tile.r;
+    }
     const r = Math.min(this.canvas.width / ((maxQ + 2) * 1.65), this.canvas.height / ((maxR + 2) * 1.45));
     return { r, ox: r * 1.5, oy: r * 1.5 };
   }
@@ -309,8 +336,15 @@ export class TowerForgeCanvasRenderer {
   enemyPoint(enemy, snapshot, geom) {
     const route = enemy.routeId ? snapshot.pathRoutes?.find((item) => item.id === enemy.routeId)?.pathCenterline : snapshot.pathCenterline;
     const track = route?.length ? route : snapshot.pathCenterline;
-    const idx = Math.max(0, Math.min((track?.length ?? 1) - 1, Math.round(enemy.pathProgress)));
-    return this.center(track?.[idx] || snapshot.spawnCoord || { q: 0, r: 0 }, geom);
+    if (!track?.length) return this.center(snapshot.spawnCoord || { q: 0, r: 0 }, geom);
+    // Interpolate between hex centers by the fractional pathProgress the engine advances each tick,
+    // so enemies glide instead of teleporting tile-to-tile (matches the phaser renderer).
+    const prog = Math.max(0, Math.min(track.length - 1, enemy.pathProgress));
+    const i = Math.floor(prog);
+    const f = prog - i;
+    const a = this.center(track[i], geom);
+    const b = this.center(track[Math.min(i + 1, track.length - 1)], geom);
+    return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
   }
 
   drawHex(x, y, r, fill) {

@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "homepage": "https://lindforge.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MarsherSusanin/TowerForge.git"
+  },
+  "towerforge": {
+    "studioName": "Lindforge Studios",
+    "telegram": "https://t.me/lindforge"
+  },
   "workspaces": [
     "packages/*"
   ],
@@ -19,7 +28,19 @@
     "test:e2e": "playwright test",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p packages/engine/tsconfig.json",
-    "data:validate": "node packages/cli/validate.mjs"
+    "data:validate": "node packages/cli/validate.mjs",
+    "desktop:dev": "npm --workspace @towerforge/desktop run dev",
+    "desktop:build": "npm --workspace @towerforge/desktop run build",
+    "desktop:build:mac": "npm --workspace @towerforge/desktop run build -- --bundles dmg",
+    "desktop:build:win": "npm --workspace @towerforge/desktop run build -- --bundles nsis,msi",
+    "desktop:build:linux": "npm --workspace @towerforge/desktop run build -- --bundles appimage,deb,rpm"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.214",
+    "@anthropic-ai/sdk": "^0.93.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openai/codex": "0.144.6",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.1",

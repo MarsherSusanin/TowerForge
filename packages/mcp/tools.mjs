@@ -11,7 +11,9 @@ import process from "node:process";
 import {
   loadEngine,
   loadProjectFiles,
+  normalizeProjectFiles,
   projectSummary,
+  readRawProjectFiles,
   repoRoot,
   runBalanceSweepForProject,
   runMissionSmoke,
@@ -128,7 +130,7 @@ export const TOOLS = [
       properties: {
         projectDir: { type: "string", description: "Path to the .tdproj directory." },
         missionId: { type: "string", description: "Mission id to simulate. Defaults to the project's defaultMissionId." },
-        duration: { type: "number", description: "Simulation duration in time units (default 180)." }
+        duration: { type: "number", description: "Simulation duration in time units (default 180, capped at 3600 — the loop is synchronous)." }
       }
     }
   },
@@ -549,12 +551,21 @@ export async function callTool(name, args = {}, ctx = {}) {
     }
 
     case "simulate_mission": {
-      const duration = Number.isFinite(args.duration) && args.duration > 0 ? args.duration : 180;
+      // Clamp like the balance sweep does: the smoke loop is fully synchronous, so an unbounded
+      // duration (e.g. an agent passing milliseconds) would block the whole single-process MCP
+      // server for hours. 3600 time units is far beyond any real mission.
+      const duration = Number.isFinite(args.duration) && args.duration > 0 ? Math.min(args.duration, 3600) : 180;
       return runMissionSmoke(projectDir, args.missionId, duration);
     }
 
     case "compile_maps": {
+      assertProjectDir(projectDir);
       const sources = readMapSources(projectDir);
+      if (Object.keys(sources).length === 0) {
+        // Refuse rather than "succeed": compiling zero sources would overwrite an existing
+        // maps/compiled/maps.json with {} — almost certainly a typo'd projectDir, not intent.
+        throw new Error(`No map sources found in ${path.join(projectDir, "maps", "src")} — refusing to overwrite maps/compiled/maps.json with an empty set. Use write_map to author a map first.`);
+      }
       const result = compileMapSources(sources);
       if (!result.ok) {
         return { projectDir, ok: false, issues: result.issues };
@@ -564,6 +575,7 @@ export async function callTool(name, args = {}, ctx = {}) {
     }
 
     case "compile_maps_dry_run": {
+      assertProjectDir(projectDir);
       const sources = readMapSources(projectDir);
       const result = compileMapSources(sources);
       return {
@@ -596,7 +608,7 @@ export async function callTool(name, args = {}, ctx = {}) {
       return applyValidatedBalancePatch(projectDir, args.patch, { compatibilityToolName: "apply_balance_patch", ifRevision: args.ifRevision });
 
     case "dry_run_balance_patch":
-      return dryRunBalancePatch(projectDir, args.patch);
+      return toWire(await dryRunBalancePatch(projectDir, args.patch));
 
     case "apply_validated_patch":
       return applyValidatedBalancePatch(projectDir, args.patch, { ifRevision: args.ifRevision });
@@ -624,6 +636,15 @@ export async function callTool(name, args = {}, ctx = {}) {
 
     default:
       throw new Error(`Unhandled tool: ${name}`);
+  }
+}
+
+/** Tools that scaffold files (write_map, compile_maps) don't go through loadProjectFiles, which is
+ *  what normally rejects a non-project directory — without this check a typo'd projectDir gets a
+ *  maps/ tree silently created inside it (and the agent "succeeds" against the wrong directory). */
+function assertProjectDir(projectDir) {
+  if (!fs.existsSync(path.join(projectDir, "project.json"))) {
+    throw new Error(`No project.json found at: ${projectDir}`);
   }
 }
 
@@ -664,20 +685,38 @@ function runBuild(projectDir, targetId) {
 }
 
 async function dryRunBalancePatch(projectDir, patch) {
-  const files = loadProjectFiles(projectDir);
+  // One raw read is the source of truth for this whole operation: the WRITE payload is the
+  // AUTHORED (raw) balance with the patch's top-level sections replaced, so a write persists only
+  // the agent's delta — NOT the loader's normalization (constants-inherited mission defaults,
+  // hex→decimal colors, injected per-entity defaults). Writing the normalized object froze that
+  // inheritance into the source file on every MCP write — same defect class as the old
+  // `migrate --write` bug. Validation, revision, and diff all run on the NORMALIZED view (what the
+  // engine will actually see), derived in-memory from the same raw read.
+  const raw = readRawProjectFiles(projectDir);
+  const files = normalizeProjectFiles(raw);
   const beforeRevision = computeRevision(files.balance);
-  const { balance, applied } = mergeBalancePatch(files.balance, patch);
-  const result = await validateCandidateFiles({ ...files, balance });
+  const { balance: rawBalance, applied } = mergeBalancePatch(raw.balance, patch);
+  const candidateFiles = normalizeProjectFiles({ ...raw, balance: rawBalance });
+  const result = await validateCandidateFiles(candidateFiles);
   return {
     projectDir,
     ok: result.ok,
     dryRun: true,
     applied,
     revision: beforeRevision,
-    balance, // the fully-merged candidate — reused by applyValidatedBalancePatch, never re-derived
-    diff: computeDiff(files.balance, balance, applied),
+    rawBalance, // INTERNAL: the write payload — stripped from wire responses (see toWire below)
+    balance: candidateFiles.balance, // INTERNAL: normalized candidate, reused by the apply path
+    diff: computeDiff(files.balance, candidateFiles.balance, applied),
     validation: validationSummary(result)
   };
+}
+
+/** Strip internal plumbing (the full merged balance objects) from a dry-run result before it goes
+ *  to the wire: agents need the capped diff + validation, not tens of KB of the whole balance.json
+ *  echoed back on every call. */
+function toWire(dryRun) {
+  const { balance, rawBalance, ...wire } = dryRun;
+  return wire;
 }
 
 async function applyValidatedBalancePatch(projectDir, patch, options = {}) {
@@ -694,7 +733,7 @@ async function applyValidatedBalancePatch(projectDir, patch, options = {}) {
     };
   }
   if (!dryRun.validation.ok) {
-    return { ...dryRun, ok: false, written: false, nextValidActions: ["inspect_validation_issues", "dry_run_balance_patch"] };
+    return { ...toWire(dryRun), ok: false, written: false, nextValidActions: ["explain_validation on any issue in validation.issues", "dry_run_balance_patch"] };
   }
 
   const balancePath = path.join(projectDir, "content", "balance.json");
@@ -720,7 +759,10 @@ async function applyValidatedBalancePatch(projectDir, patch, options = {}) {
 
   const originalText = fs.existsSync(balancePath) ? fs.readFileSync(balancePath, "utf8") : null;
   const backupPath = backupFile(projectDir, balancePath);
-  writeJsonAtomic(balancePath, dryRun.balance);
+  // Persist the RAW merge (authored source + patch sections), never the normalized candidate — see
+  // the dryRunBalancePatch comment. The post-write validateProjectDir below re-normalizes on load,
+  // so the effective content is exactly the validated candidate.
+  writeJsonAtomic(balancePath, dryRun.rawBalance);
 
   const { result } = await validateProjectDir(projectDir);
   const summary = validationSummary(result);
@@ -739,7 +781,7 @@ async function applyValidatedBalancePatch(projectDir, patch, options = {}) {
       backupPath,
       compatibilityToolName: options.compatibilityToolName,
       validation: summary,
-      nextValidActions: ["inspect_validation_issues", "dry_run_balance_patch"]
+      nextValidActions: ["explain_validation on any issue in validation.issues", "dry_run_balance_patch"]
     };
   }
 
@@ -771,10 +813,12 @@ async function setEnemyStat(projectDir, args) {
     throw new Error("set_enemy_stat field is not supported.");
   }
   if (!Number.isFinite(value)) throw new Error("set_enemy_stat value must be a finite number.");
-  const files = loadProjectFiles(projectDir);
-  const current = files.balance.enemies?.[enemyId];
+  // Clone the section from the RAW (authored) balance so the patched section stays minimal too —
+  // cloning the normalized section would freeze loader-injected defaults into the file on write.
+  const raw = readRawProjectFiles(projectDir);
+  const current = raw.balance.enemies?.[enemyId];
   if (!current) throw new Error(`Enemy "${enemyId}" not found.`);
-  const enemies = { ...files.balance.enemies, [enemyId]: { ...current, [field]: value } };
+  const enemies = { ...raw.balance.enemies, [enemyId]: { ...current, [field]: value } };
   return applyValidatedBalancePatch(projectDir, { enemies }, { ifRevision });
 }
 
@@ -782,8 +826,8 @@ async function upsertTower(projectDir, args) {
   const { towerId, tower, ifRevision } = args;
   if (typeof towerId !== "string" || !towerId) throw new Error("upsert_tower requires towerId.");
   if (!tower || typeof tower !== "object" || Array.isArray(tower)) throw new Error("upsert_tower requires a tower object.");
-  const files = loadProjectFiles(projectDir);
-  const towers = { ...files.balance.towers, [towerId]: { ...tower, id: towerId } };
+  const raw = readRawProjectFiles(projectDir); // raw section: write only the authored delta
+  const towers = { ...raw.balance.towers, [towerId]: { ...tower, id: towerId } };
   return applyValidatedBalancePatch(projectDir, { towers }, { ifRevision });
 }
 
@@ -792,8 +836,8 @@ async function addWaveGroup(projectDir, args) {
   if (typeof waveSetId !== "string" || !waveSetId) throw new Error("add_wave_group requires waveSetId.");
   if (typeof waveId !== "string" || !waveId) throw new Error("add_wave_group requires waveId.");
   if (!group || typeof group !== "object" || Array.isArray(group)) throw new Error("add_wave_group requires a group object.");
-  const files = loadProjectFiles(projectDir);
-  const waves = files.balance.waveSets?.[waveSetId];
+  const raw = readRawProjectFiles(projectDir); // raw section: write only the authored delta
+  const waves = raw.balance.waveSets?.[waveSetId];
   if (!Array.isArray(waves)) throw new Error(`Wave set "${waveSetId}" not found.`);
   let found = false;
   const nextWaves = waves.map((wave) => {
@@ -802,7 +846,7 @@ async function addWaveGroup(projectDir, args) {
     return { ...wave, groups: [...(wave.groups ?? []), group] };
   });
   if (!found) throw new Error(`Wave "${waveId}" not found in wave set "${waveSetId}".`);
-  const waveSets = { ...files.balance.waveSets, [waveSetId]: nextWaves };
+  const waveSets = { ...raw.balance.waveSets, [waveSetId]: nextWaves };
   return applyValidatedBalancePatch(projectDir, { waveSets }, { ifRevision });
 }
 
@@ -811,7 +855,11 @@ async function bindSprite(projectDir, args) {
   if (!["towers", "enemies", "tiles", "ui"].includes(kind)) throw new Error("bind_sprite kind must be towers, enemies, tiles, or ui.");
   if (typeof entityId !== "string" || !entityId) throw new Error("bind_sprite requires entityId.");
   if (typeof spriteId !== "string") throw new Error("bind_sprite requires spriteId.");
-  const files = loadProjectFiles(projectDir);
+  // Raw is the write source (persist only the author's delta, not normalizeVisuals defaults);
+  // the normalized view drives checks and revision math (revisions everywhere hash the
+  // loadProjectFiles view, so ifRevision comparisons must stay in that space).
+  const raw = readRawProjectFiles(projectDir);
+  const files = normalizeProjectFiles(raw);
   if (kind === "towers" && !files.balance.towers?.[entityId]) throw new Error(`Tower "${entityId}" not found.`);
   if (kind === "enemies" && !files.balance.enemies?.[entityId]) throw new Error(`Enemy "${entityId}" not found.`);
   if (spriteId && !files.visuals?.sprites?.[spriteId]) throw new Error(`Sprite "${spriteId}" not found.`);
@@ -821,42 +869,54 @@ async function bindSprite(projectDir, args) {
     return { projectDir, ok: false, written: false, conflict: true, expectedRevision: ifRevision, actualRevision: beforeRevision };
   }
 
-  const visuals = structuredCloneCompat(files.visuals);
+  const visuals = structuredCloneCompat(raw.visuals ?? {});
   visuals.bindings ??= {};
   visuals.bindings[kind] ??= {};
   if (spriteId) visuals.bindings[kind][entityId] = spriteId;
   else delete visuals.bindings[kind][entityId];
 
-  const candidate = { ...files, visuals };
+  // Validate the EFFECTIVE (normalized) result of writing this raw payload.
+  const candidate = normalizeProjectFiles({ ...raw, visuals });
   const result = validateProjectSchemas(candidate);
   if (!result.ok) {
-    return { projectDir, ok: false, written: false, validation: validationSummary(result), nextValidActions: ["inspect_validation_issues"] };
+    return { projectDir, ok: false, written: false, validation: validationSummary(result), nextValidActions: ["explain_validation on any issue in validation.issues"] };
   }
 
   const visualsPath = path.join(projectDir, "content", "visuals.json");
   const originalText = fs.existsSync(visualsPath) ? fs.readFileSync(visualsPath, "utf8") : null;
   const backupPath = backupFile(projectDir, visualsPath);
   writeJsonAtomic(visualsPath, visuals);
-  const post = validateProjectSchemas(loadProjectFiles(projectDir));
+  const postFiles = loadProjectFiles(projectDir);
+  const post = validateProjectSchemas(postFiles);
   if (!post.ok) {
     if (originalText === null) fs.rmSync(visualsPath, { force: true });
     else writeTextAtomic(visualsPath, originalText);
     return { projectDir, ok: false, written: false, rolledBack: true, backupPath, validation: validationSummary(post) };
   }
-  return { projectDir, ok: true, written: true, backupPath, revision: computeRevision(visuals), binding: { kind, entityId, spriteId }, validation: validationSummary(post) };
+  // Report the normalized-space revision (fresh post-write read) — the same space
+  // get_project_summary reports and the next ifRevision write will be checked against.
+  return { projectDir, ok: true, written: true, backupPath, revision: computeRevision(postFiles.visuals), binding: { kind, entityId, spriteId }, validation: validationSummary(post) };
+}
+
+// Prototype-safe ENTITY_COLLECTIONS lookup: a bare bracket read would resolve inherited
+// Object.prototype members (collection: "constructor" → the inherited Function), skating past the
+// `!spec` check into a confusing downstream error — the same gap the EXPLAIN_CURATED lookup closed.
+function entityCollectionSpec(collection) {
+  return Object.prototype.hasOwnProperty.call(ENTITY_COLLECTIONS, collection) ? ENTITY_COLLECTIONS[collection] : undefined;
 }
 
 async function upsertEntity(projectDir, args) {
   const { collection, id, value, merge, ifRevision } = args;
-  const spec = ENTITY_COLLECTIONS[collection];
+  const spec = entityCollectionSpec(collection);
   if (!spec) throw new Error(`upsert_entity: unknown collection "${collection}". Expected one of ${Object.keys(ENTITY_COLLECTIONS).join(", ")}.`);
   if (typeof id !== "string" || !id) throw new Error("upsert_entity requires id.");
   if (value === undefined || value === null || typeof value !== "object") throw new Error("upsert_entity requires a value object (or array, for waveSets).");
 
-  const files = loadProjectFiles(projectDir);
-  const balance = files.balance;
+  const raw = readRawProjectFiles(projectDir);
 
   if (spec.shape === "map") {
+    // Raw section: merge/replace against the AUTHORED entity so a write persists only the delta.
+    const balance = raw.balance;
     const current = balance[spec.balanceKey]?.[id];
     const nextEntity = collection === "waveSets"
       ? value // an array of waves — no id field to force, always a full replace
@@ -865,8 +925,12 @@ async function upsertEntity(projectDir, args) {
     return applyValidatedBalancePatch(projectDir, { [spec.balanceKey]: nextCollection }, { ifRevision });
   }
 
-  // shape === "array" (currencies)
-  const list = Array.isArray(balance[spec.balanceKey]) ? balance[spec.balanceKey] : [];
+  // shape === "array" (currencies): deliberately sourced from the NORMALIZED registry, not raw —
+  // a legacy project may only imply its currencies via resource bags (the currency-registry
+  // migration materializes them), and appending to the raw (possibly absent) list would silently
+  // drop the implied ones, including required "coins". Persisting the materialized registry here
+  // is a migration delta, not normalization damage.
+  const list = normalizeProjectFiles(raw).balance.currencies ?? [];
   const index = list.findIndex((item) => item?.id === id);
   const nextItem = { ...(merge && index !== -1 ? list[index] : {}), ...value, id };
   const nextList = index === -1 ? [...list, nextItem] : list.map((item, i) => (i === index ? nextItem : item));
@@ -875,19 +939,21 @@ async function upsertEntity(projectDir, args) {
 
 async function deleteEntity(projectDir, args) {
   const { collection, id, force, ifRevision } = args;
-  const spec = ENTITY_COLLECTIONS[collection];
+  const spec = entityCollectionSpec(collection);
   if (!spec) throw new Error(`delete_entity: unknown collection "${collection}". Expected one of ${Object.keys(ENTITY_COLLECTIONS).join(", ")}.`);
   if (typeof id !== "string" || !id) throw new Error("delete_entity requires id.");
   if (collection === "currencies" && id === "coins") {
     throw new Error('delete_entity: "coins" is the required primary currency and cannot be deleted.');
   }
 
-  const files = loadProjectFiles(projectDir);
-  const balance = files.balance;
+  const raw = readRawProjectFiles(projectDir);
+  // Reference-checking (and currency existence) runs on the NORMALIZED view: inherited resource
+  // bags and the materialized currency registry are real usages the raw file doesn't spell out.
+  const files = normalizeProjectFiles(raw);
 
   if (spec.shape === "map") {
-    if (!balance[spec.balanceKey]?.[id]) throw new Error(`${collection} "${id}" not found.`);
-  } else if (!(balance[spec.balanceKey] ?? []).some((item) => item?.id === id)) {
+    if (!files.balance[spec.balanceKey]?.[id]) throw new Error(`${collection} "${id}" not found.`);
+  } else if (!(files.balance[spec.balanceKey] ?? []).some((item) => item?.id === id)) {
     throw new Error(`${collection} "${id}" not found.`);
   }
 
@@ -899,15 +965,18 @@ async function deleteEntity(projectDir, args) {
   }
 
   if (spec.shape === "map") {
-    const nextCollection = { ...balance[spec.balanceKey] };
+    // Raw section, so deleting one entity doesn't rewrite its siblings in normalized form.
+    const nextCollection = { ...raw.balance[spec.balanceKey] };
     delete nextCollection[id];
     return applyValidatedBalancePatch(projectDir, { [spec.balanceKey]: nextCollection }, { ifRevision });
   }
-  const nextList = (balance[spec.balanceKey] ?? []).filter((item) => item?.id !== id);
+  // currencies: filter the NORMALIZED registry (see upsertEntity for why raw would drop implied ones).
+  const nextList = (files.balance[spec.balanceKey] ?? []).filter((item) => item?.id !== id);
   return applyValidatedBalancePatch(projectDir, { [spec.balanceKey]: nextList }, { ifRevision });
 }
 
 async function writeMap(projectDir, args) {
+  assertProjectDir(projectDir);
   const { mapId, width, height, spawnCoord, coreCoord, pathCenterline, pathRoutes, terrainOverrides } = args;
   if (typeof mapId !== "string" || !mapId) throw new Error("write_map requires mapId.");
   const sourceName = `${mapId}.tmj`;
@@ -1058,13 +1127,27 @@ function writeTextAtomic(filePath, text) {
   fs.renameSync(tmp, filePath);
 }
 
+const BACKUPS_KEPT_PER_FILE = 20;
+let backupSequence = 0;
+
 function backupFile(projectDir, filePath) {
   if (!fs.existsSync(filePath)) return null;
   const backupDir = path.join(projectDir, ".towerforge", "mcp-backups");
   fs.mkdirSync(backupDir, { recursive: true });
+  const base = path.basename(filePath);
+  // A per-process padded sequence makes two writes within the same millisecond produce distinct
+  // backup files instead of silently overwriting each other.
+  const seq = String(backupSequence++).padStart(6, "0");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backupPath = path.join(backupDir, `${path.basename(filePath)}.${stamp}.bak`);
+  const backupPath = path.join(backupDir, `${base}.${stamp}.${seq}.bak`);
   fs.copyFileSync(filePath, backupPath);
+  // Retention: keep only the newest N backups per file, so an agent's iterative tuning loop
+  // (hundreds of writes) doesn't grow the directory without bound across sessions. Names start
+  // with an ISO stamp, so a lexicographic sort is chronological.
+  const siblings = fs.readdirSync(backupDir).filter((name) => name.startsWith(`${base}.`) && name.endsWith(".bak")).sort();
+  for (const stale of siblings.slice(0, Math.max(0, siblings.length - BACKUPS_KEPT_PER_FILE))) {
+    fs.rmSync(path.join(backupDir, stale), { force: true });
+  }
   return backupPath;
 }
 

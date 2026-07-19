@@ -20,7 +20,7 @@ const cliDir = path.resolve(__dirname, "..");
 const studioScript = path.resolve(cliDir, "../studio/server.mjs");
 const mcpScript = path.resolve(cliDir, "../mcp/server.mjs");
 
-const COMMANDS = ["validate", "sim", "balance", "build", "package", "maps:compile", "migrate", "studio", "create", "mcp"];
+const COMMANDS = ["validate", "sim", "balance", "build", "package", "maps:compile", "migrate", "studio", "create", "mcp", "mcp:connect"];
 
 const [, , cmd, ...rest] = process.argv;
 
@@ -42,6 +42,8 @@ Commands:
   studio                Launch the visual studio editor.
   create <name>         Scaffold a new .tdproj project.
   mcp                   Start the MCP server exposing constructor tools to AI agents.
+  mcp:connect           Print (or --write) MCP config for Claude Code, Codex, Claude Desktop,
+                        Cursor, VS Code — connect an AI agent to this project in one step.
 
 Options (apply to validate, sim, studio):
   --project <path>      Path to the .tdproj directory.
@@ -154,4 +156,8 @@ if (cmd === "create") {
 
 if (cmd === "mcp") {
   runScript(mcpScript, rest);
+}
+
+if (cmd === "mcp:connect") {
+  runScript(path.join(cliDir, "mcp-connect.mjs"), rest);
 }

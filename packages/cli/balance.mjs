@@ -11,6 +11,7 @@ function parseArgs() {
     if (raw[i] === "--project" && raw[i + 1]) { result.projectDir = raw[i + 1]; i += 1; }
     else if (raw[i] === "--mission" && raw[i + 1]) { result.missionIds.push(raw[i + 1]); i += 1; }
     else if (raw[i] === "--seconds" && raw[i + 1]) { result.simSeconds = Number(raw[i + 1]); i += 1; }
+    else if (!result.projectDir && !raw[i].startsWith("--")) { result.projectDir = raw[i]; } // bare positional project path
   }
   return result;
 }

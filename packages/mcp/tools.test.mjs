@@ -665,3 +665,146 @@ describe("mcp explain_validation (2.6)", () => {
     }
   });
 });
+
+describe("mcp review fixes: raw-delta writes, guards, protocol", () => {
+  let projectDir;
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-rawwrite-"));
+    fs.mkdirSync(path.join(projectDir, "content"), { recursive: true });
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+  });
+  afterEach(() => { fs.rmSync(projectDir, { recursive: true, force: true }); });
+
+  const balancePath = () => path.join(projectDir, "content", "balance.json");
+  const readBalance = () => JSON.parse(fs.readFileSync(balancePath(), "utf8"));
+
+  // Regression (HIGH): every MCP write used to persist the NORMALIZED balance — freezing
+  // constants-inherited mission defaults and hex→decimal colors into the authored file on any
+  // unrelated write (same defect class as the old `migrate --write` bug).
+  it("writes only the author's delta: minimal missions and hex color strings survive an unrelated set_enemy_stat", async () => {
+    const authored = readBalance();
+    const missionId = Object.keys(authored.missions)[0];
+    // Make the authored file rely on inheritance + friendly notation.
+    delete authored.missions[missionId].startingResources;
+    delete authored.missions[missionId].prepTimeUnits;
+    authored.enemies.basic_grunt.color = "#ff0000";
+    fs.writeFileSync(balancePath(), JSON.stringify(authored, null, 2));
+
+    const result = await callTool("set_enemy_stat", { projectDir, enemyId: "basic_grunt", field: "maxHp", value: 42 }, {});
+    expect(result.ok, JSON.stringify(result.validation?.issues ?? result)).toBe(true);
+
+    const after = readBalance();
+    expect(after.enemies.basic_grunt.maxHp).toBe(42); // the delta landed
+    expect(after.enemies.basic_grunt.color).toBe("#ff0000"); // authored notation preserved
+    expect(after.missions[missionId].startingResources).toBeUndefined(); // inheritance NOT frozen
+    expect(after.missions[missionId].prepTimeUnits).toBeUndefined();
+  });
+
+  it("upsert_entity leaves sibling entities in their authored (raw) shape", async () => {
+    const authored = readBalance();
+    authored.enemies.basic_grunt.color = "#00ff00";
+    fs.writeFileSync(balancePath(), JSON.stringify(authored, null, 2));
+
+    const result = await callTool("upsert_entity", {
+      projectDir, collection: "enemies", id: "new_creep",
+      value: { label: "Creep", maxHp: 3, speed: 1, reward: { coins: 1 }, coinReward: 1, coreDamage: 1, color: 255 }
+    }, {});
+    expect(result.ok, JSON.stringify(result.validation?.issues ?? result)).toBe(true);
+    const after = readBalance();
+    expect(after.enemies.new_creep.label).toBe("Creep");
+    expect(after.enemies.basic_grunt.color).toBe("#00ff00"); // sibling untouched, not re-normalized
+  });
+
+  it("upsert_entity(currencies) on a legacy project materializes the implied registry instead of dropping coins", async () => {
+    const authored = readBalance();
+    delete authored.currencies; // legacy: currencies only implied via resource bags
+    fs.writeFileSync(balancePath(), JSON.stringify(authored, null, 2));
+
+    const result = await callTool("upsert_entity", { projectDir, collection: "currencies", id: "gems", value: { label: "Gems" } }, {});
+    expect(result.ok, JSON.stringify(result.validation?.issues ?? result)).toBe(true);
+    const ids = readBalance().currencies.map((c) => c.id).sort();
+    expect(ids).toContain("coins"); // implied primary currency survives
+    expect(ids).toContain("gems");
+  });
+
+  // Regression (#6): dry-run and failed-apply responses used to echo the entire merged balance.
+  it("keeps the merged balance objects off the wire", async () => {
+    const dry = await callTool("dry_run_balance_patch", { projectDir, patch: { defaultMissionId: readBalance().defaultMissionId } }, {});
+    expect(dry.balance).toBeUndefined();
+    expect(dry.rawBalance).toBeUndefined();
+    expect(dry.diff).toBeTruthy(); // the capped diff is still there
+
+    const failed = await callTool("apply_validated_patch", {
+      projectDir, patch: { towers: { broken: { id: "broken", label: "B", cost: { coins: 1 }, footprintRadius: 0, range: 1, attack: { kind: "nope" } } } }
+    }, {});
+    expect(failed.ok).toBe(false);
+    expect(failed.balance).toBeUndefined();
+    expect(failed.rawBalance).toBeUndefined();
+  });
+
+  // Regression (#2): write_map/compile_maps scaffolded into arbitrary directories, and
+  // compile_maps wiped an existing maps.json to {} when maps/src was missing.
+  it("write_map refuses a directory that is not a project", async () => {
+    const notAProject = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-not-a-project-"));
+    try {
+      await expect(callTool("write_map", {
+        projectDir: notAProject, mapId: "m", width: 3, height: 3,
+        spawnCoord: { q: 0, r: 1 }, coreCoord: { q: 2, r: 1 }, pathCenterline: [{ q: 0, r: 1 }, { q: 2, r: 1 }]
+      }, {})).rejects.toThrow(/No project\.json found/);
+      expect(fs.existsSync(path.join(notAProject, "maps"))).toBe(false); // nothing scaffolded
+    } finally {
+      fs.rmSync(notAProject, { recursive: true, force: true });
+    }
+  });
+
+  it("compile_maps refuses to overwrite compiled maps with an empty set when maps/src is missing", async () => {
+    const compiledPath = path.join(projectDir, "maps", "compiled", "maps.json");
+    const before = fs.readFileSync(compiledPath, "utf8");
+    fs.rmSync(path.join(projectDir, "maps", "src"), { recursive: true, force: true });
+    await expect(callTool("compile_maps", { projectDir }, {})).rejects.toThrow(/No map sources found/);
+    expect(fs.readFileSync(compiledPath, "utf8")).toBe(before); // untouched
+  });
+
+  // Regression (#4): failure responses used to steer agents at phantom tools.
+  it("only ever suggests nextValidActions that start with a real registered tool name", async () => {
+    const registered = new Set(TOOLS.map((t) => t.name));
+    const check = (actions) => {
+      for (const action of actions ?? []) {
+        const first = String(action).split(/[ (]/)[0];
+        expect(registered.has(first), `phantom tool in nextValidActions: "${action}"`).toBe(true);
+      }
+    };
+    const failedApply = await callTool("apply_validated_patch", {
+      projectDir, patch: { towers: { broken: { id: "broken", label: "B", cost: { coins: 1 }, footprintRadius: 0, range: 1, attack: { kind: "nope" } } } }
+    }, {});
+    check(failedApply.nextValidActions);
+    const smoke = await callTool("simulate_mission", { projectDir, duration: 5 }, {});
+    check(smoke.nextValidActions);
+  });
+
+  // Regression (#5): backups grew without bound and same-millisecond writes collided.
+  it("gives every write a distinct backup file and prunes old backups past the retention cap", async () => {
+    const backupDir = path.join(projectDir, ".towerforge", "mcp-backups");
+    // Seed 30 fake old backups (lexicographically older than any new ISO stamp).
+    fs.mkdirSync(backupDir, { recursive: true });
+    for (let i = 0; i < 30; i += 1) {
+      fs.writeFileSync(path.join(backupDir, `balance.json.1999-01-01T00-00-00-000Z.${String(i).padStart(6, "0")}.bak`), "old");
+    }
+    const a = await callTool("set_enemy_stat", { projectDir, enemyId: "basic_grunt", field: "maxHp", value: 11 }, {});
+    const b = await callTool("set_enemy_stat", { projectDir, enemyId: "basic_grunt", field: "maxHp", value: 12 }, {});
+    expect(a.backupPath).not.toBe(b.backupPath); // no same-millisecond collision
+    const remaining = fs.readdirSync(backupDir).filter((n) => n.startsWith("balance.json."));
+    expect(remaining.length).toBeLessThanOrEqual(20); // pruned to the retention cap
+  });
+
+  // Regression (#8): ENTITY_COLLECTIONS lookups resolved inherited Object.prototype members.
+  it.each(["constructor", "toString", "__proto__"])(
+    "rejects prototype-member collection name %j with the designed unknown-collection error",
+    async (collection) => {
+      await expect(callTool("upsert_entity", { projectDir, collection, id: "x", value: {} }, {}))
+        .rejects.toThrow(/unknown collection/);
+      await expect(callTool("delete_entity", { projectDir, collection, id: "x" }, {}))
+        .rejects.toThrow(/unknown collection/);
+    }
+  );
+});

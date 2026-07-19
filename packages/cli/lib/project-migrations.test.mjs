@@ -105,4 +105,22 @@ describe("project migrations", () => {
     expect(files.balance.enemies.crawler.isPathBlocker).toBeUndefined();
     expect(migrations.map((migration) => migration.id)).toContain("enemy-path-blocker");
   });
+
+  // Regression: `migrate --write` must persist migration DELTAS only, never the constants-inherited
+  // mission defaults that normalizeBalance() injects for the simulator. A mission that omits
+  // startingResources/prepTimeUnits (inheriting them from constants) must stay that way after
+  // migration, so raising the constant later still cascades to every inheriting mission.
+  it("does not freeze constants-inherited mission defaults into the migrated balance", () => {
+    const { files } = migrateProjectFiles({
+      manifest: { schemaVersion: 1 },
+      balance: {
+        constants: { startingResources: { coins: 150 }, startingCoreHp: 20, prepTimeUnits: 5 },
+        currencies: [{ id: "coins", label: "Coins" }],
+        missions: { m: { id: "m", mapId: "x", waveSetId: "w" } } // omits startingResources/prepTimeUnits on purpose
+      }
+    });
+    expect(files.balance.missions.m.startingResources).toBeUndefined();
+    expect(files.balance.missions.m.prepTimeUnits).toBeUndefined();
+    expect(files.balance.missions.m.startingCoreHp).toBeUndefined();
+  });
 });

@@ -124,6 +124,12 @@ function parseCoordArray(value, fieldPath) {
   return coords.map((coord, index) => parseCoord(coord, `${fieldPath}.${index}`));
 }
 
+// Tiled packs tile flip/rotate state into the high 4 bits of every GID (H=0x80000000,
+// V=0x40000000, anti-diagonal=0x20000000, hex-120°-rotate=0x10000000). Mask them off before the
+// terrain lookup — otherwise a flipped/rotated path tile's GID (e.g. 0x80000002) misses
+// TERRAIN_BY_GID and silently falls back to the default terrain, turning the enemy road buildable.
+const GID_TILE_MASK = 0x0fffffff;
+
 /** Read the "terrain" tilelayer (or the first tilelayer) into sparse {q,r,terrain} overrides, skipping default-terrain tiles. */
 function readTerrainLayer(source, defaultTerrain, width, height) {
   const layers = Array.isArray(source.layers) ? source.layers : [];
@@ -131,15 +137,35 @@ function readTerrainLayer(source, defaultTerrain, width, height) {
     ?? layers.find((l) => l && l.type === "tilelayer");
   if (!layer || !Array.isArray(layer.data)) return [];
   const w = Number.isInteger(layer.width) && layer.width > 0 ? layer.width : width;
+  const firstGid = terrainFirstGid(source);
   const overrides = [];
   for (let i = 0; i < layer.data.length; i += 1) {
-    const terrain = TERRAIN_BY_GID[layer.data[i]];
+    const gid = layer.data[i] & GID_TILE_MASK; // strip flip/rotate flags
+    if (gid === 0) continue; // empty cell
+    // TERRAIN_BY_GID is 1-based within the terrain tileset; offset by the tileset's firstgid so a
+    // .tmj that declares firstgid != 1 still maps buildable/path/… to the right kinds.
+    const terrain = TERRAIN_BY_GID[gid - firstGid + 1];
     if (!terrain || terrain === defaultTerrain) continue;
     const q = i % w;
     const r = Math.floor(i / w);
     if (q < width && r < height) overrides.push({ q, r, terrain });
   }
   return overrides;
+}
+
+/** The firstgid of the terrain tileset. Prefers a tileset named "terrain"; otherwise the lowest
+ *  declared firstgid (the first tileset). Defaults to 1 when no tilesets are declared — the Studio
+ *  map editor emits raw 1-6 GIDs with no tileset block, which this preserves. */
+function terrainFirstGid(source) {
+  const tilesets = Array.isArray(source.tilesets) ? source.tilesets : [];
+  let firstGid = 1;
+  let best = Infinity;
+  for (const ts of tilesets) {
+    if (!ts || !Number.isInteger(ts.firstgid)) continue;
+    if (typeof ts.name === "string" && /terrain/i.test(ts.name)) return ts.firstgid;
+    if (ts.firstgid < best) { best = ts.firstgid; firstGid = ts.firstgid; }
+  }
+  return firstGid;
 }
 
 /** Merge tile-layer overrides with explicit terrainOverrides; explicit entries win per coord. */

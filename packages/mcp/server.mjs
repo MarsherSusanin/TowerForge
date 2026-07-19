@@ -19,6 +19,10 @@ import { resolveProjectDir } from "../cli/lib/project-loader.mjs";
 import { TOOLS, callTool } from "./tools.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
+// Version NEGOTIATION, not echo: we only implement 2024-11-05 semantics, so claiming whatever
+// string the client sent (e.g. a newer version with batching) would make it use features we
+// silently drop. Unsupported requested versions get countered with ours, per the MCP spec.
+const SUPPORTED_PROTOCOL_VERSIONS = new Set([PROTOCOL_VERSION]);
 const SERVER_INFO = { name: "towerforge-ai", version: "0.1.0" };
 const defaultProjectDir = resolveProjectDir(null, process.argv.slice(2));
 
@@ -33,16 +37,32 @@ function replyError(id, code, message) {
 }
 
 async function handleMessage(message) {
+  // JSON-RPC batch arrays and non-object frames aren't supported — say so instead of silently
+  // dropping them (a client that thinks batching works would otherwise hang forever on the reply).
+  if (Array.isArray(message)) {
+    replyError(null, -32600, "Batch requests are not supported by this server.");
+    return;
+  }
+  if (!message || typeof message !== "object") {
+    replyError(null, -32600, "Invalid request: expected a JSON-RPC object.");
+    return;
+  }
+
   const { id, method, params } = message;
+  // A frame without an id is a NOTIFICATION: it must never get a response. Replying anyway would
+  // emit a malformed id-less result frame (JSON.stringify drops the undefined id).
   const isRequest = id !== undefined && id !== null;
 
   switch (method) {
     case "initialize":
-      reply(id, {
-        protocolVersion: typeof params?.protocolVersion === "string" ? params.protocolVersion : PROTOCOL_VERSION,
-        capabilities: { tools: {} },
-        serverInfo: SERVER_INFO
-      });
+      if (isRequest) {
+        const requested = params?.protocolVersion;
+        reply(id, {
+          protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.has(requested) ? requested : PROTOCOL_VERSION,
+          capabilities: { tools: {} },
+          serverInfo: SERVER_INFO
+        });
+      }
       return;
 
     case "notifications/initialized":
@@ -54,7 +74,7 @@ async function handleMessage(message) {
       return;
 
     case "tools/list":
-      reply(id, { tools: TOOLS });
+      if (isRequest) reply(id, { tools: TOOLS });
       return;
 
     case "tools/call": {
@@ -62,9 +82,9 @@ async function handleMessage(message) {
       const args = params?.arguments ?? {};
       try {
         const result = await callTool(name, args, { defaultProjectDir });
-        reply(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
+        if (isRequest) reply(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
       } catch (error) {
-        reply(id, { content: [{ type: "text", text: String(error?.message ?? error) }], isError: true });
+        if (isRequest) reply(id, { content: [{ type: "text", text: String(error?.message ?? error) }], isError: true });
       }
       return;
     }
@@ -91,7 +111,8 @@ rl.on("line", (line) => {
   try {
     message = JSON.parse(text);
   } catch {
-    return; // ignore non-JSON noise
+    replyError(null, -32700, "Parse error: invalid JSON."); // per JSON-RPC: id null on parse errors
+    return;
   }
   const task = handleMessage(message)
     .catch((error) => {
