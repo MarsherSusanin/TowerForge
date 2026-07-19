@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { packageMatchesTargets } from "./runtime-packages.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const desktopRoot = path.resolve(__dirname, "..");
@@ -85,18 +86,14 @@ function targetTriples() {
 function targetPlatform(triple) {
   if (triple.includes("apple-darwin")) return { os: "darwin", cpu: triple.startsWith("aarch64") ? "arm64" : "x64" };
   if (triple.includes("windows-msvc")) return { os: "win32", cpu: triple.startsWith("aarch64") ? "arm64" : "x64" };
-  if (triple.includes("linux")) return { os: "linux", cpu: triple.startsWith("aarch64") ? "arm64" : "x64" };
+  if (triple.includes("linux")) {
+    return {
+      os: "linux",
+      cpu: triple.startsWith("aarch64") ? "arm64" : "x64",
+      libc: triple.includes("-musl") ? "musl" : "gnu"
+    };
+  }
   throw new Error(`Unsupported target triple: ${triple}`);
-}
-
-function packageMatchesTargets(meta, targets) {
-  const osList = Array.isArray(meta.os) ? meta.os : null;
-  const cpuList = Array.isArray(meta.cpu) ? meta.cpu : null;
-  return targets.some((target) => {
-    const osAllowed = !osList || osList.includes(target.os);
-    const cpuAllowed = !cpuList || cpuList.includes(target.cpu);
-    return osAllowed && cpuAllowed;
-  });
 }
 
 function copyRuntimeDependencies() {
@@ -106,7 +103,7 @@ function copyRuntimeDependencies() {
   for (const [packagePath, meta] of Object.entries(lock.packages || {})) {
     if (!packagePath.startsWith("node_modules/") || meta.dev || meta.link) continue;
     if (packagePath.startsWith("node_modules/@towerforge/")) continue;
-    if (!packageMatchesTargets(meta, targets)) continue;
+    if (!packageMatchesTargets(packagePath, meta, targets)) continue;
     const source = path.join(repoRoot, packagePath);
     if (!fs.existsSync(source)) continue;
     copyDir(source, path.join(runtimeRoot, packagePath), (rel) => path.basename(rel) !== ".DS_Store");
