@@ -308,9 +308,23 @@ class JsonLineRpcClient {
   }
 
   close() {
-    this.child?.kill("SIGTERM");
+    const child = this.child;
     this.child = null;
     this.#failAll(new Error("Codex App Server closed."));
+    if (!child || child.exitCode !== null) return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, 2_000);
+      child.once("close", finish);
+      child.once("error", finish);
+      child.kill("SIGTERM");
+    });
   }
 }
 
@@ -696,12 +710,13 @@ export class AgentRuntimeBridge {
   }
 
   close() {
-    this.codex?.close();
+    const codexClose = this.codex?.close() ?? Promise.resolve();
     this.codex = null;
     this.claudeLogin?.kill("SIGTERM");
     this.claudeLogin = null;
     for (const controller of this.activeAborts) controller.abort();
     this.activeAborts.clear();
+    return codexClose;
   }
 }
 

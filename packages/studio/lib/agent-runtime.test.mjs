@@ -141,7 +141,7 @@ describe("Codex App Server adapter", () => {
       expect(events).toContainEqual({ type: "text", text: "Project is valid." });
       expect(result.assistantText.join("")).toBe("Project is valid.");
     } finally {
-      bridge.close();
+      await bridge.close();
     }
   });
 });
@@ -187,7 +187,7 @@ describe("Claude Agent SDK adapter", () => {
       await expect(capturedOptions.canUseTool("mcp__towerforge__validate_project", {})).resolves.toMatchObject({ behavior: "allow" });
       expect(events).toContainEqual({ type: "text", text: "Claude validated it." });
     } finally {
-      bridge.close();
+      await bridge.close();
     }
   });
 });
