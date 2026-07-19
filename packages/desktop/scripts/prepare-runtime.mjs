@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { packExecutableForBundle } from "../../cli/lib/packed-executable.mjs";
 import { packageMatchesTargets } from "./runtime-packages.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -128,6 +129,18 @@ function copyNodeSidecar() {
   return copied;
 }
 
+function packLinuxClaudeExecutables() {
+  const packed = [];
+  for (const triple of targetTriples()) {
+    const target = targetPlatform(triple);
+    if (target.os !== "linux" || target.libc !== "gnu") continue;
+    const packageName = `claude-agent-sdk-linux-${target.cpu}`;
+    const executable = path.join(runtimeRoot, "node_modules", "@anthropic-ai", packageName, "claude");
+    if (fs.existsSync(executable)) packed.push(packExecutableForBundle(executable).packedPath);
+  }
+  return packed;
+}
+
 runBuildEngine();
 cleanDir(runtimeRoot);
 fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(runtimeRoot, "package.json"));
@@ -139,8 +152,10 @@ copyDir(path.join(repoRoot, "packages", "renderer"), path.join(runtimeRoot, "pac
 copyDir(path.join(repoRoot, "packages", "engine", "dist"), path.join(runtimeRoot, "packages", "engine", "dist"), runtimeFilter);
 copyDir(path.join(repoRoot, "examples", "starter.tdproj"), path.join(runtimeRoot, "examples", "starter.tdproj"), runtimeFilter);
 const runtimeDependencies = copyRuntimeDependencies();
+const packedExecutables = packLinuxClaudeExecutables();
 
 const nodeSidecars = copyNodeSidecar();
 console.log(`Prepared TowerForge desktop runtime at ${runtimeRoot}`);
 console.log(`Prepared ${runtimeDependencies} production dependency packages for agent runtimes.`);
+for (const executable of packedExecutables) console.log(`Packed Linux agent executable at ${executable}`);
 for (const nodeSidecar of nodeSidecars) console.log(`Prepared Node sidecar at ${nodeSidecar}`);

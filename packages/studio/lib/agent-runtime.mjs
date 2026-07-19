@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { z } from "zod";
+import { restorePackedExecutable } from "../../cli/lib/packed-executable.mjs";
 
 const RUNTIME_PROVIDERS = new Set(["codex", "claude-code"]);
 const MAX_RPC_LINE_BYTES = 2 * 1024 * 1024;
@@ -121,7 +122,7 @@ function codexLaunch(repoRoot) {
   return { command: "codex", prefixArgs: [] };
 }
 
-function claudeExecutable(repoRoot) {
+function claudeExecutable(repoRoot, destinationDir) {
   const override = executableOverride("TOWERFORGE_CLAUDE_BIN");
   if (override) return override;
   const platform = process.platform;
@@ -129,7 +130,9 @@ function claudeExecutable(repoRoot) {
   const suffix = platform === "win32" ? ".exe" : "";
   const packageName = `claude-agent-sdk-${platform}-${arch}`;
   const candidate = path.join(repoRoot, "node_modules", "@anthropic-ai", packageName, `claude${suffix}`);
-  return fs.existsSync(candidate) ? candidate : null;
+  if (fs.existsSync(candidate)) return candidate;
+  const packed = `${candidate}.towerforge-packed`;
+  return fs.existsSync(packed) ? restorePackedExecutable(packed, destinationDir) : null;
 }
 
 function writeCodexConfig(configDir) {
@@ -409,6 +412,10 @@ export class AgentRuntimeBridge {
     return provider;
   }
 
+  #claudeExecutable() {
+    return claudeExecutable(this.repoRoot, path.join(this.baseDir, "bin"));
+  }
+
   async #codexClient() {
     this.#prepareRuntime("codex");
     if (!this.codex) {
@@ -439,7 +446,7 @@ export class AgentRuntimeBridge {
           subscription: safeString(account?.planType, 80) || null
         };
       }
-      const executable = claudeExecutable(this.repoRoot);
+      const executable = this.#claudeExecutable();
       if (!executable) return { provider, available: false, connected: false, error: "Claude Code runtime is not installed." };
       this.#prepareRuntime("claude-code");
       const result = await runRuntimeCommand(executable, ["auth", "status", "--json"], {
@@ -469,7 +476,7 @@ export class AgentRuntimeBridge {
       return { provider, started: true, authUrl: result.authUrl };
     }
 
-    const executable = claudeExecutable(this.repoRoot);
+    const executable = this.#claudeExecutable();
     if (!executable) throw new Error("Claude Code runtime is not installed.");
     this.#prepareRuntime("claude-code");
     if (this.claudeLogin && this.claudeLogin.exitCode === null) return { provider, started: true };
@@ -492,7 +499,7 @@ export class AgentRuntimeBridge {
       await client.request("account/logout", {});
       return { provider, connected: false };
     }
-    const executable = claudeExecutable(this.repoRoot);
+    const executable = this.#claudeExecutable();
     if (!executable) throw new Error("Claude Code runtime is not installed.");
     this.#prepareRuntime("claude-code");
     const result = await runRuntimeCommand(executable, ["auth", "logout"], {
@@ -633,7 +640,7 @@ export class AgentRuntimeBridge {
   }
 
   async #runClaudeChat({ model, history, send, signal }) {
-    const executable = claudeExecutable(this.repoRoot);
+    const executable = this.#claudeExecutable();
     if (!executable) throw new Error("Claude Code runtime is not installed.");
     this.#prepareRuntime("claude-code");
     const sdk = await this.claudeSdkLoader();
