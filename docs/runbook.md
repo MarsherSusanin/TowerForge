@@ -17,12 +17,42 @@
 | Migrate project schema | `npm run migrate -- --project examples/starter.tdproj --write` | Writes migrated files after creating `.towerforge/migration-backups`. |
 | Typecheck | `npm run typecheck` | Engine only. |
 | Compile engine runtime | `npm run build:engine` | Writes `packages/engine/dist`. |
+| Unit/integration tests | `npm run test` | Engine, CLI, MCP, renderer contracts, templates, packs, and shared logic. |
 | Build web player | `npm run build` | Writes `examples/starter.tdproj/dist`, including engine, renderer, project data, and safe project assets. |
+| Build single-file player | `npm run build -- --single-file` | Also emits `index.single.html`, runnable directly from `file://`. |
+| Package portable web archive | `npm run package:web -- --project examples/starter.tdproj` | Writes a PWA, single-file fallback, loopback launcher, and deterministic ZIP under `<project>/web`. |
+| Export project handoff | `npm run project:export -- --project examples/starter.tdproj --out game.tdpack` | Writes a deterministic checksummed archive after validation. |
+| Import project handoff | `npm run project:import -- game.tdpack --dir ./projects` | Confines extraction, validates, and refuses an existing destination. |
+| List bundled themes | `npm run themes:list` | Lists local packs without reading or changing a project. |
+| Preview a theme | `npm run themes:apply -- verdant-frontier --project examples/starter.tdproj --dry-run` | Reports affected files/missions and the revision without writing. |
+| Apply a theme | `npm run themes:apply -- verdant-frontier --project examples/starter.tdproj` | Copies only bundled assets, backs up catalogs, validates, and rolls back on failure. |
 | Package mobile scaffold | `node packages/cli/package.mjs --project examples/starter.tdproj --kind mobile` | Builds the web bundle into a Capacitor project under `<project>/mobile`. |
 | Package desktop scaffold | `node packages/cli/package.mjs --project examples/starter.tdproj --kind desktop` | Builds the web bundle into a Tauri v2 project under `<project>/desktop`. |
 | Run packaged Studio shell | `npm run desktop:dev` | Prepares the bundled runtime and launches the Tauri desktop wrapper around Studio. |
 | Build desktop Studio installers | `npm run desktop:build` | Produces Tauri bundles under `packages/desktop/src-tauri/target/release/bundle`. |
+| Test desktop shell | `cargo test --manifest-path packages/desktop/src-tauri/Cargo.toml` | Native menu/state/close lifecycle tests. |
 | E2E smoke | `npm run test:e2e` | Starts Studio against a temp project and verifies build/player interactions with Playwright. |
+
+Russian is the default Studio language. Switch between Russian and English under **Settings > Appearance > Language**; the choice is stored only on the current device as `towerforge:language`. In desktop builds the same setting also rebuilds the native menu. Project content is never translated or modified by this preference.
+
+The template/renderer conformance gate is part of `npm run test` and `npm run test:e2e`: Classic, Maze, Idle, and Roguelike are built with Canvas and Phaser. The browser matrix must boot each output, expose three difficulties and meta upgrades, and place a tower through keyboard focus plus Enter.
+
+## TowerScript Authoring
+
+Open `Project > Scripts` or the **Scripts** sidebar item. The left pane is a filtered project tree; project/content/map files can be inspected there, while generic editing and file operations are intentionally limited to `scripts/`.
+
+TowerScript files:
+
+- live under `scripts/` and end in `.tower.json`;
+- declare `schemaVersion: 1`, a unique `id`, one or more `bindings`, optional `initialState`, and lifecycle `handlers`;
+- bind to `global`, `mission`, `map`, `wave` (wave-set id), `tower` (tower-type id), `enemy` (enemy-type id), or `ability` (ability id);
+- read values with `{ "$get": "event.enemyTypeId" }` and compose conditions/math with `{ "$op": "eq", "args": [...] }`;
+- run typed actions such as resource/core/enemy changes, statuses, tower cooldown/stacks, enemy spawning, state updates, and custom signals;
+- can receive author-defined JSON events through the engine `emitScriptSignal` method or a headless `{ type: "emitSignal" }` action.
+
+Save validates the candidate definition and all project references before an atomic write. A stale source revision returns a conflict; invalid post-write state restores the previous file. The runtime also caps expression work, actions, events, recursion, spawns, state, and payload size. A runtime error appears in `snapshot.scriptState.diagnostics` and as a `scriptDiagnostic` event instead of crashing the game.
+
+TowerScript deliberately cannot run JavaScript, import packages, access files/network/DOM/environment, read wall-clock time, or generate randomness. Add a missing capability as a typed engine event/action with deterministic tests; do not add `eval`, `Function`, or raw host bridges.
 
 ## Desktop Studio Navigation
 
@@ -43,24 +73,28 @@ python3 -m http.server 5175 --bind 127.0.0.1 --directory examples/starter.tdproj
 
 Open `http://127.0.0.1:5175`.
 
+For a no-server handoff, run `npm run build -- --single-file` and open `dist/index.single.html`. For a distributable web ZIP with its own loopback launcher, use `npm run package:web`.
+
 ## Configuration
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `PROJECT_DIR` | no | Overrides the default `.tdproj` project for Studio/CLI. |
 | `PORT` | no | Overrides Studio port, default `5174`. |
-| `ANTHROPIC_BASE_URL` | no | Overrides the AI Designer Anthropic base URL, default `https://api.anthropic.com`. |
-| `OPENAI_BASE_URL` | no | Overrides the AI Designer OpenAI base URL, default `https://api.openai.com/v1`. |
-| `OPENROUTER_BASE_URL` | no | Overrides the AI Designer OpenRouter base URL, default `https://openrouter.ai/api/v1`. |
+| `ANTHROPIC_BASE_URL` | no | Overrides the AI Chat Anthropic base URL, default `https://api.anthropic.com`. |
+| `OPENAI_BASE_URL` | no | Overrides the AI Chat OpenAI base URL, default `https://api.openai.com/v1`. |
+| `OPENROUTER_BASE_URL` | no | Overrides the AI Chat OpenRouter base URL, default `https://openrouter.ai/api/v1`. |
 
-Packaged Studio builds set internal desktop variables such as `TOWERFORGE_DESKTOP`, `TOWERFORGE_RUNTIME_ROOT`, `TOWERFORGE_USER_DATA_DIR`, and `TOWERFORGE_SESSION_TOKEN`. These are runtime diagnostics only; normal users should not need to set them manually.
+Packaged Studio builds set internal desktop variables such as `TOWERFORGE_DESKTOP`, `TOWERFORGE_BUNDLED_RUNTIME`, `TOWERFORGE_RUNTIME_ROOT`, `TOWERFORGE_USER_DATA_DIR`, and `TOWERFORGE_SESSION_TOKEN`. `TOWERFORGE_DESKTOP` enables loopback/session security, while `TOWERFORGE_BUNDLED_RUNTIME` requires the precompiled engine shipped in the app. These are runtime diagnostics only; normal users should not need to set them manually.
 
-AI Designer has two authentication paths:
+Configure AI under `Settings > AI Connections`; provider, model, and reasoning defaults are under `Settings > AI Chat Defaults`. Open the right-side chat from the top bar, sidebar, command palette, or native `Project > AI Chat` command. AI Chat has two authentication paths:
 
 - **Account runtimes**: Codex uses ChatGPT OAuth through Codex App Server; Claude Code uses the official Claude Agent SDK/runtime login. Click Connect and finish the provider-owned browser flow. TowerForge never receives the OAuth token and does not read the runtime credential cache. Credentials live under the provider runtime's protected directory in `<app-data>/agent-runtimes`; Codex is configured to use the OS keyring.
 - **Direct APIs**: Anthropic, OpenAI, and OpenRouter keys remain separate browser `localStorage` entries for that device and are sent only to the loopback Studio server for the selected request. The old `towerforge:anthropic-key` entry is migrated automatically.
 
 Both paths send the user prompt and the tool results needed for the task to the selected provider. Account isolation protects credentials; it does not make inference offline. TowerForge disables local account-runtime transcript persistence, gives each runtime a private home and empty working directory, restricts Codex filesystem reads to that workspace, disables Claude built-in tools, exposes only validated TowerForge tools, and does not inherit API/cloud/proxy credentials into the runtime process. Never put provider credentials in `.tdproj` files, committed docs, traces, or support logs.
+
+AI Chat accepts up to eight JPEG/PNG/GIF/WebP images per turn, at most 4 MB each and 10 MB total. For a selected video up to 200 MB, the WebView decodes it locally and samples up to four JPEG frames. Only those frames are sent; the filename, original video, and audio are not sent. Codex attachment files use generated names inside its isolated turn directory and are deleted after the turn.
 
 ## Debugging
 
@@ -68,12 +102,14 @@ Both paths send the user prompt and the tool results needed for the task to the 
 - Engine compile failures: run `npm run typecheck`, then `npm run build:engine`.
 - Build failures: inspect validation output first; build stops on validation errors.
 - Project write conflicts: Studio returns a conflict when files changed on disk after load; reload before saving again.
-- Browser player issues: serve the `dist` directory over HTTP because ES modules do not reliably run from `file://`.
+- Browser player issues: serve the normal `dist` directory over HTTP. Only the generated `index.single.html` is designed and tested for direct `file://` use.
 - Map compile issues: run `npm run maps:compile -- --project <project> --json` and inspect source map issues.
 - Studio action traces: inspect `.towerforge/runs/*.jsonl` inside the active `.tdproj`.
-- MCP balance edits: prefer `dry_run_balance_patch`, `apply_validated_patch`, or granular tools such as `set_enemy_stat` and `add_wave_group`; they validate before writing and keep backups under `.towerforge/mcp-backups`.
+- MCP edits: call domain-scoped `describe_schema`, then prefer compact reads, `get_progression`, recipes, `dry_run_progression_patch`, `preview_theme_pack`, and granular commit tools such as `apply_progression_patch`, `upsert_tower_script`, `apply_theme_pack`, or entity/map/asset/narrative writes. Commits validate, accept revision guards, and keep rollback backups under `.towerforge/mcp-backups` or `.towerforge/backups`.
+- TowerScript load failures: run `npm run validate` and inspect the reported script file/field. Parse errors are associated with the source path; reference/schema errors identify the script id and field path.
+- TowerScript runtime issues: inspect Studio Playtest events or `snapshot.scriptState.diagnostics`. Budget errors usually indicate recursive signals, broad `allEnemies/allTowers` work, or an unbounded tick handler; add `when`/`every`, narrow the binding, or split the rule.
 - MCP tool discovery: run `npm run mcp -- --project <project>` and issue `tools/list`; tools include `riskClass` and `sideEffect` metadata for permission decisions.
-- AI Designer direct-provider issues: verify the selected provider has a saved browser-local key and a tool-capable model, check `/api/ai/chat`, then reproduce the same action through `validate_project`, `simulate_mission`, or `balance_report`. OpenRouter model discovery uses `/api/ai/models?provider=openrouter`; custom model IDs remain available when the live catalog is offline.
+- AI Chat direct-provider issues: verify the selected provider has a saved browser-local key and a tool-capable model, check `/api/ai/chat`, then reproduce the same action through `validate_project`, `simulate_mission`, or `balance_report`. OpenRouter model discovery uses `/api/ai/models?provider=openrouter`; Codex and Claude use the same endpoint with `provider=codex|claude-code`. Custom model IDs remain available when a live catalog is offline.
 - Codex/Claude account issues: use Disconnect, restart Studio, and Connect again. The safe status endpoint is `/api/ai/runtime/status?provider=codex` or `provider=claude-code`; it never returns tokens. A packaged build must contain compatible packages under `runtime/node_modules/@openai` and `runtime/node_modules/@anthropic-ai`. `TOWERFORGE_CODEX_BIN` and `TOWERFORGE_CLAUDE_BIN` are internal test/diagnostic overrides only and must point to an absolute trusted executable path.
 - Native packaging issues: inspect `<project>/mobile/README.md` or `<project>/desktop/README.md`; TowerForge only scaffolds Capacitor/Tauri projects and does not install native SDKs, sign binaries, or submit to stores.
 - Desktop Studio packaging issues: run `npm run desktop:dev` first to verify the sidecar starts, then inspect `packages/desktop/src-tauri/runtime` for Studio files and production agent-runtime dependencies, and `packages/desktop/src-tauri/binaries` for the Node sidecar binary. If `/api/health` works but the app UI does not load, check the desktop session token/cookie handshake in the Tauri console.
@@ -83,38 +119,35 @@ Both paths send the user prompt and the tool results needed for the task to the 
 
 ## Deploy
 
-The deployable web-game artifact is the static web bundle created by `npm run build`. The installable TowerForge Studio artifacts come from `npm run desktop:build`:
+Deployable web-game artifacts are the static bundle from `npm run build`, its optional `index.single.html`, or the deterministic archive from `npm run package:web`. The installable TowerForge Studio artifacts come from `npm run desktop:build`:
 
 - Windows: `packages/desktop/src-tauri/target/release/bundle/nsis/*.exe` and `packages/desktop/src-tauri/target/release/bundle/msi/*.msi`
 - macOS: `packages/desktop/src-tauri/target/release/bundle/dmg/*.dmg`
 - Linux: `packages/desktop/src-tauri/target/release/bundle/appimage/*.AppImage`, `packages/desktop/src-tauri/target/release/bundle/deb/*.deb`, and `packages/desktop/src-tauri/target/release/bundle/rpm/*.rpm`
 
-CI is configured in `.github/workflows/ci.yml` for local-alpha quality gates. `.github/workflows/desktop-release.yml` builds unsigned desktop artifacts on Windows, macOS, and Ubuntu. Production macOS distribution requires Developer ID signing plus notarization; production Windows distribution requires a code-signing certificate.
+CI is configured in `.github/workflows/ci.yml` for local-alpha quality gates. `.github/workflows/desktop-release.yml` builds unsigned desktop artifacts on Windows, macOS, and Ubuntu. A manual run uploads a consolidated `towerforge-release-candidate` Actions artifact. Pushing a matching `vX.Y.Z` tag additionally publishes that candidate as a GitHub pre-release after version, installer, and checksum validation. Production macOS distribution requires Developer ID signing plus notarization; production Windows distribution requires a code-signing certificate.
 
-Public desktop releases follow [the desktop release policy](releasing.md). Until signing is configured, publish them as GitHub pre-releases with `Unsigned build` in the title. After building from the committed source and writing the final hash into both `SHA256SUMS` and the release notes, publish with:
+Public desktop releases follow [the desktop release policy](releasing.md). Until signing is configured, they remain GitHub pre-releases with `Unsigned build` in the title. To inspect a cross-platform candidate without publishing, run **Actions > Unsigned Desktop Builds > Run workflow** against the intended commit. To publish, merge the release commit, then create and push an annotated tag whose version matches all desktop manifests:
 
 ```bash
-gh release create <tag> \
-  <installer-path> \
-  <sha256sums-path> \
-  --repo MarsherSusanin/TowerForge \
-  --prerelease \
-  --title "TowerForge <tag> - Unsigned build" \
-  --notes-file <release-notes-path>
+git tag -a vX.Y.Z -m "TowerForge vX.Y.Z"
+git push origin vX.Y.Z
 ```
 
-The release operator must then download both GitHub-hosted assets, recalculate the installer checksum, and verify the tag and source links. GitHub Actions artifacts are not a substitute for a GitHub Release.
+The workflow refuses to overwrite an existing release. After publication, the release operator must download all GitHub-hosted installers and `SHA256SUMS`, recalculate every checksum, run `hdiutil verify` for the DMG on macOS, and verify the tag, commit, and source links. GitHub Actions artifacts are build evidence, not a substitute for the published GitHub Release.
 
 ## Rollback
 
 For local project edits:
 
 1. Stop Studio.
-2. Inspect `.towerforge/*.bak`, `.towerforge/migration-backups/*.bak`, and `.towerforge/mcp-backups/*.bak` in the affected `.tdproj`.
+2. Inspect `.towerforge/*.bak`, `.towerforge/migration-backups/*.bak`, `.towerforge/mcp-backups/*.bak`, `.towerforge/backups/scripts`, and `.towerforge/backups/theme-*` in the affected `.tdproj`.
 3. Restore the relevant JSON file manually.
 4. Run `npm run validate`.
 
 For generated builds, delete the project `dist` directory and rerun `npm run build`.
+
+For generated portable web packages, delete only the selected `<project>/web` output and rerun `npm run package:web`; project source files are not modified.
 
 For generated native scaffolds, delete `<project>/mobile` or `<project>/desktop` and rerun the matching `node packages/cli/package.mjs` command.
 

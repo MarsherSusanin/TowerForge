@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { packageMobile, packageDesktop } from "./packaging.mjs";
+import { packageMobile, packageDesktop, packageWeb } from "./packaging.mjs";
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(dir, "../../..");
@@ -46,6 +46,23 @@ describe("mobile packaging (Capacitor)", () => {
     expect(fs.existsSync(path.join(mobile, "www", "index.html"))).toBe(true);
     expect(fs.existsSync(path.join(mobile, "www", "project-data.js"))).toBe(true);
     expect(fs.existsSync(path.join(mobile, "README.md"))).toBe(true);
+  });
+
+  it("creates a portable deterministic web archive with both launch modes", async () => {
+    const result = await packageWeb(projectDir);
+    expect(result.ok, result.error).toBe(true);
+    expect(result.kind).toBe("web");
+    expect(fs.existsSync(path.join(result.outDir, "game", "index.html"))).toBe(true);
+    expect(fs.existsSync(path.join(result.outDir, "game", "index.single.html"))).toBe(true);
+    expect(fs.existsSync(path.join(result.outDir, "serve.mjs"))).toBe(true);
+    expect(fs.existsSync(result.archive.outputPath)).toBe(true);
+    const zip = fs.readFileSync(result.archive.outputPath);
+    expect(zip.readUInt32LE(0)).toBe(0x04034b50);
+    expect(zip.includes(Buffer.from("game/index.single.html"))).toBe(true);
+    expect(zip.includes(Buffer.from("serve.mjs"))).toBe(true);
+    const launcher = path.join(result.outDir, "serve.mjs");
+    expect(execFileSync(process.execPath, [launcher, "--check-path", "/"], { encoding: "utf8" }).trim()).toBe("allowed");
+    expect(execFileSync(process.execPath, [launcher, "--check-path", "/..%2fproject.json"], { encoding: "utf8" }).trim()).toBe("blocked");
   });
 
   it("derives a valid reverse-DNS appId and refuses to escape the project dir", async () => {

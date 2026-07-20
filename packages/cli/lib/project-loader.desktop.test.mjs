@@ -24,6 +24,7 @@ describe("desktop packaged runtime", () => {
       env: {
         ...process.env,
         TOWERFORGE_DESKTOP: "1",
+        TOWERFORGE_BUNDLED_RUNTIME: "1",
         TOWERFORGE_RUNTIME_ROOT: runtimeRoot
       },
       encoding: "utf8"

@@ -2,7 +2,11 @@
   "schemaVersion": 1,
   "assetsRoot": "assets",
   "atlases": {},
-  "sprites": {},
+  "sprites": {
+    "frontier_before_battle": {
+      "src": "assets/backgrounds/frontier-before-battle.png"
+    }
+  },
   "bindings": {
     "towers": {
       "arrow_tower": "arrow_tower",
@@ -18,7 +22,9 @@
   },
   "audio": {
     "sounds": {},
-    "events": {}
+    "events": {},
+    "musicTracks": {},
+    "musicByMission": {}
   },
   "terrainTextureSize": 128,
   "creatureFrameSize": 512,

@@ -67,6 +67,10 @@ function buildContent(): ReturnType<typeof createGameContentRegistry> {
         oneTank: [{ id: "w1", label: "W1", groups: [{ enemyId: "tank", count: 1, spawnInterval: 1, startDelay: 0 }] }],
         oneSponge: [{ id: "w1", label: "W1", groups: [{ enemyId: "sponge", count: 1, spawnInterval: 1, startDelay: 0 }] }],
         oneArmored: [{ id: "w1", label: "W1", groups: [{ enemyId: "armored", count: 1, spawnInterval: 1, startDelay: 0 }] }],
+        targetPair: [{ id: "w1", label: "W1", groups: [
+          { enemyId: "grunt", count: 1, spawnInterval: 1, startDelay: 0 },
+          { enemyId: "tank", count: 1, spawnInterval: 1, startDelay: 0 }
+        ] }],
         blockerLine: [
           {
             id: "w1",
@@ -83,7 +87,8 @@ function buildContent(): ReturnType<typeof createGameContentRegistry> {
         leak: mission("leak", "oneTank", 3),
         dot: mission("dot", "oneSponge", 50),
         blocker: mission("blocker", "blockerLine", 50),
-        armored: mission("armored", "oneArmored", 3)
+        armored: mission("armored", "oneArmored", 3),
+        targeting: mission("targeting", "targetPair", 20)
       }
     },
     maps: {
@@ -157,6 +162,140 @@ describe("TowerDefenseGame", () => {
     const result = game.placeTower("pelter", { q: 1, r: 0 });
     expect(result.ok).toBe(false);
     expect(result.reasonKey).toBe("reason.needCost");
+  });
+
+  it("refunds placement and upgrade investment when a tower is sold", () => {
+    const content = buildContent();
+    content.missions.basic!.economy = { sellRefundRatio: 0.5 };
+    const game = new TowerDefenseGame({ missionId: "basic", content });
+    expect(game.placeTower("pelter", { q: 1, r: 0 }).ok).toBe(true);
+    const towerId = game.towers[0]!.id;
+    expect(game.upgradeTower(towerId).ok).toBe(true);
+    expect(game.getTowerSellRefund(towerId)).toEqual({ coins: 3 });
+    expect(game.resources.coins).toBe(94);
+
+    expect(game.sellTower(towerId).ok).toBe(true);
+    expect(game.resources.coins).toBe(97);
+    expect(game.towers).toHaveLength(0);
+    expect(game.getTowerIdAt({ q: 1, r: 0 })).toBeUndefined();
+    expect(game.lastEvents).toContainEqual({ type: "towerSold", towerId, towerTypeId: "pelter", refund: { coins: 3 } });
+  });
+
+  it("refuses to sell the only support source of a dependent tower", () => {
+    const content = buildContent();
+    content.towers.beacon = {
+      id: "beacon", label: "Beacon", cost: { coins: 1 }, footprintRadius: 0, range: 3,
+      attack: { kind: "support", auraRadius: 3, unlocksTowerIds: ["ward"] }
+    };
+    content.towers.ward = {
+      id: "ward", label: "Ward", cost: { coins: 1 }, footprintRadius: 0, range: 2, requiresAuraFrom: "beacon",
+      attack: { kind: "single", fireRate: 1, damagePerStack: 1, startingStacks: 1, maxStacks: 1, upgradeCost: 1 }
+    };
+    const game = new TowerDefenseGame({ missionId: "basic", content });
+    expect(game.placeTower("beacon", { q: 1, r: 0 }).ok).toBe(true);
+    const beaconId = game.towers[0]!.id;
+    expect(game.placeTower("ward", { q: 2, r: 0 }).ok).toBe(true);
+    expect(game.sellTower(beaconId)).toMatchObject({ ok: false, reasonKey: "reason.dependentsLoseAura" });
+    expect(game.towers.map((tower) => tower.typeId)).toEqual(["beacon", "ward"]);
+  });
+
+  it("applies authored wave, passive, interest, and early-start income deterministically", () => {
+    const content = buildContent();
+    content.missions.basic!.waves = [
+      { id: "empty_1", label: "Empty 1", groups: [] },
+      { id: "empty_2", label: "Empty 2", groups: [] }
+    ];
+    content.missions.basic!.prepTimeUnits = 5;
+    content.missions.basic!.economy = {
+      perWaveStart: { coins: 2 },
+      perWaveClear: { coins: 5 },
+      passivePerTimeUnit: { coins: 1 },
+      interestRate: 0.1,
+      interestCap: { coins: 10 },
+      earlyStartBonusPerUnit: { coins: 3 }
+    };
+    const game = new TowerDefenseGame({ missionId: "basic", content });
+
+    expect(game.startNextWave().ok).toBe(true);
+    game.tick(0.2);
+    expect(game.getSnapshot().clearedWaveCount).toBe(1);
+    expect(game.startNextWave().ok).toBe(true);
+    game.tick(0.2);
+
+    const snapshot = game.getSnapshot();
+    expect(snapshot.outcome).toBe("victory");
+    expect(snapshot.clearedWaveCount).toBe(2);
+    expect(snapshot.resources.coins).toBeCloseTo(148.8, 5);
+    expect(snapshot.lastEvents.some((event) => event.type === "waveCleared" && event.waveIndex === 1)).toBe(true);
+  });
+
+  it("supports selling through the headless action contract", () => {
+    const result = runHeadlessMission({
+      content: buildContent(), missionId: "basic",
+      actions: [
+        { type: "placeTower", towerTypeId: "pelter", coord: { q: 1, r: 0 } },
+        { type: "sellTower", towerId: "tower_1" }
+      ]
+    });
+    expect(result.actionResults.every((item) => item.result.ok)).toBe(true);
+    expect(result.snapshot.towers).toHaveLength(0);
+    expect(result.snapshot.resources.coins).toBe(99.7);
+  });
+
+  it("wins from an authored survive objective and awards deterministic stars", () => {
+    const content = buildContent();
+    content.missions.basic!.objectives = {
+      victory: [{ id: "hold", label: "Hold the line", kind: "surviveSeconds", seconds: 1 }],
+      failure: [{ id: "late", kind: "timeLimit", seconds: 3 }],
+      stars: [
+        { id: "healthy", label: "Untouched core", kind: "coreHpAtLeast", amount: 20 },
+        { id: "fast", label: "Quick hold", kind: "timeAtMost", seconds: 1.5 }
+      ]
+    };
+    const game = new TowerDefenseGame({ missionId: "basic", content });
+    game.startNextWave();
+    for (let index = 0; index < 10 && game.outcome === "playing"; index += 1) game.tick(0.2);
+    const snapshot = game.getSnapshot();
+    expect(snapshot.outcome).toBe("victory");
+    expect(snapshot.enemies.length).toBeGreaterThan(0);
+    expect(snapshot.objectiveProgress).toContainEqual(expect.objectContaining({ id: "hold", complete: true }));
+    expect(snapshot.stars).toEqual([
+      { id: "healthy", label: "Untouched core", achieved: true },
+      { id: "fast", label: "Quick hold", achieved: true }
+    ]);
+    expect(snapshot.lastEvents.filter((event) => event.type === "starEarned")).toHaveLength(2);
+  });
+
+  it("loses when an authored max-leaks condition is exceeded", () => {
+    const content = buildContent();
+    content.missions.leak!.startingCoreHp = 20;
+    content.missions.leak!.objectives = {
+      victory: [{ id: "clear", kind: "clearWaves" }],
+      failure: [{ id: "perfect", label: "No leaks", kind: "maxLeaks", maxLeaks: 0 }]
+    };
+    const game = new TowerDefenseGame({ missionId: "leak", content });
+    game.startNextWave();
+    for (let index = 0; index < 200 && game.outcome === "playing"; index += 1) game.tick(0.2);
+    const snapshot = game.getSnapshot();
+    expect(snapshot.outcome).toBe("defeat");
+    expect(snapshot.coreHp).toBeGreaterThan(0);
+    expect(snapshot.leakCount).toBe(1);
+    expect(snapshot.lastEvents).toContainEqual({ type: "objectiveFailed", objectiveId: "perfect", kind: "maxLeaks" });
+  });
+
+  it("can win by accumulating an authored resource target", () => {
+    const content = buildContent();
+    content.missions.basic!.economy = { passivePerTimeUnit: { coins: 2 } };
+    content.missions.basic!.objectives = {
+      victory: [{ id: "bank", kind: "accumulateResource", resourceId: "coins", amount: 101 }]
+    };
+    const game = new TowerDefenseGame({ missionId: "basic", content });
+    game.startNextWave();
+    for (let index = 0; index < 10 && game.outcome === "playing"; index += 1) game.tick(0.2);
+    expect(game.getSnapshot()).toMatchObject({
+      outcome: "victory",
+      objectiveProgress: [expect.objectContaining({ id: "bank", complete: true })]
+    });
   });
 
   // Arbitrary currencies: a tower priced in a non-coins currency spends/rewards that currency.
@@ -237,6 +376,51 @@ describe("TowerDefenseGame", () => {
     expect(mid!.hp).toBeLessThan(96); // > the ~2 direct damage dealt so far → poison contributed
     tickFor(game, 16);
     expect(game.getSnapshot().enemies.length).toBe(0); // poison finished it off before it leaked
+  });
+
+  it("lets an author opt flying enemies into splash damage and slow without changing the ground-only default", () => {
+    const run = (affectsClasses?: Array<"ground" | "flying">) => {
+      const reg = buildContent();
+      reg.enemies.flier = {
+        id: "flier", label: "Flier", maxHp: 100, speed: 0.2, reward: { coins: 1 }, coinReward: 1,
+        coreDamage: 1, color: 0x99aaff, movementKind: "direct_flying", targetClass: "flying"
+      };
+      reg.towers.mortar = {
+        id: "mortar", label: "Mortar", cost: { coins: 1 }, footprintRadius: 0, range: 8,
+        attack: {
+          kind: "splash", interval: 1, damage: 1, splashDamage: 5, armoredChipDamage: 0,
+          splashRadius: 2, slowFactor: 0.5, slowDuration: 3, ...(affectsClasses ? { affectsClasses } : {})
+        }
+      };
+      reg.waveSets.mixed = [{ id: "w1", label: "W1", groups: [
+        { enemyId: "grunt", count: 1, spawnInterval: 1, startDelay: 0 },
+        { enemyId: "flier", count: 1, spawnInterval: 1, startDelay: 0 }
+      ] }];
+      const baseMission = reg.missions.basic!;
+      reg.missions.mixed = {
+        ...baseMission,
+        id: "mixed",
+        label: "Mixed",
+        mapId: baseMission.mapId!,
+        mapFactory: baseMission.mapFactory!,
+        abilityIds: baseMission.abilityIds ?? [],
+        waveSetId: "mixed",
+        waves: reg.waveSets.mixed,
+        buildTowerIds: ["mortar"]
+      };
+      const game = new TowerDefenseGame({ missionId: "mixed", content: reg });
+      expect(game.placeTower("mortar", { q: 1, r: 0 }).ok).toBe(true);
+      game.startNextWave();
+      tickFor(game, 1);
+      return game.getSnapshot().enemies.find((enemy) => enemy.typeId === "flier");
+    };
+
+    const legacy = run();
+    expect(legacy?.hp).toBe(100);
+    expect(legacy?.statuses?.slow).toBeUndefined();
+    const configured = run(["ground", "flying"]);
+    expect(configured?.hp).toBeLessThan(100);
+    expect(configured?.statuses?.slow?.remaining ?? 0).toBeGreaterThan(0);
   });
 
   it("scales tower damage by the enemy's resistance for the attack's damage type", () => {
@@ -421,13 +605,39 @@ describe("TowerDefenseGame", () => {
     expect(game.getSnapshot().towers[0]!.targetMode).toBe("largest_hp");
   });
 
-  it("refuses target mode on towers that do not support it", () => {
+  it("allows target modes on non-sniper attacking towers", () => {
     const game = new TowerDefenseGame({ missionId: "basic", content: buildContent() });
     expect(game.placeTower("pelter", { q: 2, r: 0 }).ok).toBe(true);
     const towerId = game.getSnapshot().towers[0]!.id;
-    const result = game.setTowerTargetMode(towerId, "largest_hp");
+    const result = game.setTowerTargetMode(towerId, "weakest");
+    expect(result.ok).toBe(true);
+    expect(game.getSnapshot().towers[0]!.targetMode).toBe("weakest");
+  });
+
+  it("refuses target mode on area-all towers and unknown modes", () => {
+    const game = new TowerDefenseGame({ missionId: "dot", content: buildContent() });
+    expect(game.placeTower("sprayer", { q: 0, r: 0 }).ok).toBe(true);
+    const towerId = game.getSnapshot().towers[0]!.id;
+    const result = game.setTowerTargetMode(towerId, "strongest");
     expect(result.ok).toBe(false);
     expect(result.reasonKey).toBe("reason.targetModeUnsupported");
+
+    const other = new TowerDefenseGame({ missionId: "basic", content: buildContent() });
+    expect(other.placeTower("pelter", { q: 2, r: 0 }).ok).toBe(true);
+    expect(other.setTowerTargetMode(other.getSnapshot().towers[0]!.id, "random" as never)).toMatchObject({ ok: false, reasonKey: "reason.targetModeUnknown" });
+  });
+
+  it("uses strongest and weakest priorities deterministically", () => {
+    const firstHit = (mode: "strongest" | "weakest") => {
+      const game = new TowerDefenseGame({ missionId: "targeting", content: buildContent() });
+      expect(game.placeTower("pelter", { q: 2, r: 0 }).ok).toBe(true);
+      expect(game.setTowerTargetMode(game.getSnapshot().towers[0]!.id, mode).ok).toBe(true);
+      expect(game.startNextWave().ok).toBe(true);
+      game.tick(0.05);
+      return game.getSnapshot().lastEvents.find((event) => event.type === "enemyHit")?.enemyTypeId;
+    };
+    expect(firstHit("strongest")).toBe("tank");
+    expect(firstHit("weakest")).toBe("grunt");
   });
 
   // Regression for #2: dots from a renamed pulse tower keep ticking after the enemy leaves the aura.
@@ -489,6 +699,127 @@ describe("TowerDefenseGame", () => {
       }
     }
     expect(maxFollowerOffset).toBeGreaterThan(0);
+  });
+
+  it("executes declarative tower targeting, area delivery, and ordered effects", () => {
+    const content = buildContent();
+    content.towers.conduit = {
+      id: "conduit",
+      label: "Conduit",
+      cost: { coins: 1 },
+      footprintRadius: 0,
+      range: 8,
+      attack: {
+        kind: "pipeline",
+        interval: 1,
+        targeting: { classes: ["ground"], mode: "strongest" },
+        delivery: { kind: "area", radius: 2, secondaryMultiplier: 0.5 },
+        effects: [
+          { kind: "damage", amount: 10, damageType: "arcane", armorPiercing: true },
+          { kind: "status", status: { stun: 2 } }
+        ]
+      }
+    };
+    content.missions.targeting!.buildTowerIds.push("conduit");
+    const game = new TowerDefenseGame({ missionId: "targeting", content });
+    expect(game.placeTower("conduit", { q: 1, r: 0 }).ok).toBe(true);
+    expect(game.startNextWave().ok).toBe(true);
+    game.tick(0.1);
+
+    const enemies = game.getSnapshot().enemies;
+    expect(enemies).toHaveLength(2);
+    expect(enemies.every((enemy) => enemy.hp < enemy.maxHp)).toBe(true);
+    expect(enemies.every((enemy) => (enemy.statuses?.stun?.remaining ?? 0) > 0)).toBe(true);
+    expect(game.lastEvents.filter((event) => event.type === "towerFired")).toHaveLength(2);
+  });
+
+  it("applies selected difficulty and persistent meta upgrades as launch-time inputs", () => {
+    const content = buildContent();
+    content.difficulties = [
+      { id: "normal", label: "Normal" },
+      { id: "veteran", label: "Veteran", enemyHpMultiplier: 2, enemySpeedMultiplier: 1.25, startingResourceMultiplier: 0.5, coreHpMultiplier: 1.5 }
+    ];
+    content.defaultDifficultyId = "normal";
+    content.metaProgression = {
+      currencies: [{ id: "shards", label: "Shards" }],
+      rewardsByMission: {},
+      upgrades: {
+        foundation: {
+          id: "foundation", label: "Foundation", maxLevel: 2,
+          costs: [{ shards: 1 }, { shards: 2 }],
+          effects: [{ kind: "coreHp", amountPerLevel: 2 }, { kind: "startingResource", resourceId: "coins", amountPerLevel: 10 }]
+        }
+      }
+    };
+    const game = new TowerDefenseGame({ missionId: "basic", content, difficultyId: "veteran", metaUpgradeLevels: { foundation: 2 } });
+    const beforeWave = game.getSnapshot();
+    expect(beforeWave.difficultyId).toBe("veteran");
+    expect(beforeWave.maxCoreHp).toBe(34);
+    expect(beforeWave.resources.coins).toBe(70);
+    game.startNextWave();
+    game.tick(0.1);
+    expect(game.getSnapshot().enemies[0]?.maxHp).toBe(12);
+  });
+
+  it("executes deterministic global and object-bound TowerScripts", () => {
+    const content = buildContent();
+    content.scripts = {
+      authored_rules: {
+        schemaVersion: 1,
+        id: "authored_rules",
+        bindings: [{ scope: "global" }, { scope: "tower", ids: ["pelter"] }, { scope: "enemy", ids: ["grunt"] }],
+        initialState: { executions: 0 },
+        handlers: {
+          gameStarted: [{ actions: [{ action: "grantResource", resourceId: "coins", amount: 5 }] }],
+          towerPlaced: [{
+            when: { $op: "eq", args: [{ $get: "self.typeId" }, "pelter"] },
+            actions: [{ action: "grantResource", resourceId: "coins", amount: 3 }, { action: "incrementState", key: "executions" }]
+          }],
+          waveStarted: [{ actions: [{ action: "emitSignal", signal: "wave_bonus", payload: { $get: "event.waveIndex" } }] }],
+          signal: [{
+            when: { $op: "eq", args: [{ $get: "event.signal" }, "wave_bonus"] },
+            actions: [{ action: "grantResource", resourceId: "coins", amount: 2 }]
+          }],
+          tick: [{ every: 0.1, actions: [{ action: "damageEnemy", target: "self", amount: 100 }] }],
+          enemyKilled: [{
+            when: { $op: "eq", args: [{ $get: "self.typeId" }, "grunt"] },
+            actions: [{ action: "grantResource", resourceId: "coins", amount: 7 }, { action: "incrementState", key: "executions" }]
+          }]
+        }
+      },
+      external_bridge: {
+        schemaVersion: 1,
+        id: "external_bridge",
+        bindings: [{ scope: "wave", ids: ["oneGrunt"] }],
+        initialState: { starts: 0 },
+        handlers: {
+          waveStarted: [{ actions: [{ action: "incrementState", key: "starts" }] }],
+          signal: [{
+            when: { $op: "eq", args: [{ $get: "event.signal" }, "author_bonus"] },
+            actions: [{ action: "grantResource", resourceId: "coins", amount: { $get: "event.payload.amount" } }]
+          }]
+        }
+      }
+    };
+
+    const game = new TowerDefenseGame({ missionId: "basic", content });
+    expect(game.coins).toBe(105);
+    expect(game.placeTower("pelter", { q: 1, r: 0 }).ok).toBe(true);
+    expect(game.coins).toBe(107);
+    expect(game.startNextWave().ok).toBe(true);
+    expect(game.coins).toBe(109);
+    expect(game.emitScriptSignal("author_bonus", { amount: 11 }).ok).toBe(true);
+    expect(game.emitScriptSignal("bad signal", null).ok).toBe(false);
+    game.tick(0.1);
+
+    const snapshot = game.getSnapshot();
+    expect(snapshot.outcome).toBe("victory");
+    expect(snapshot.scriptState.values.authored_rules?.["tower:tower_1"]?.executions).toBe(1);
+    expect(snapshot.scriptState.values.authored_rules?.["enemy:enemy_1"]?.executions).toBe(1);
+    expect(snapshot.scriptState.values.external_bridge?.["wave:oneGrunt"]?.starts).toBe(1);
+    expect(snapshot.scriptState.diagnostics).toEqual([]);
+    expect(game.coins).toBe(129); // +11 external signal, +2 normal kill reward, +7 scripted reward
+    expect(game.lastEvents.some((event) => event.type === "scriptSignal" && event.signal === "wave_bonus")).toBe(false); // action events reset on tick
   });
 });
 

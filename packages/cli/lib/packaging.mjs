@@ -11,16 +11,17 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { loadProjectFiles, repoRoot, selectBuildTarget } from "./project-loader.mjs";
+import { writeDirectoryZip } from "./zip-store.mjs";
 
 const CAPACITOR_VERSION = "^6.0.0";
 const TAURI_CLI_VERSION = "^2.0.0";
 
 /**
  * @param {string} projectDir
- * @param {{ kind?: "mobile"|"desktop", targetId?: string|null, outDir?: string|null }} [opts]
+ * @param {{ kind?: "mobile"|"desktop"|"web", targetId?: string|null, outDir?: string|null }} [opts]
  */
 export async function packageProject(projectDir, opts = {}) {
-  const kind = opts.kind === "desktop" ? "desktop" : "mobile";
+  const kind = ["desktop", "web"].includes(opts.kind) ? opts.kind : "mobile";
   const files = loadProjectFiles(projectDir);
 
   // The native app wraps a WEB bundle — pick a web target to actually build.
@@ -43,11 +44,19 @@ export async function packageProject(projectDir, opts = {}) {
   // Build the web bundle into the folder the native project serves from. The child build empties
   // just this web subdir, so a failed build leaves the native project intact (only the bundle is
   // cleared) rather than deleting everything under outDir.
-  const webSub = kind === "desktop" ? "dist" : "www";
+  const webSub = kind === "desktop" ? "dist" : (kind === "web" ? "game" : "www");
   const webRel = path.join(path.relative(projectDir, outDir), webSub);
-  const build = await runBuild(projectDir, webTargetId, webRel);
+  const build = await runBuild(projectDir, webTargetId, webRel, { singleFile: kind === "web" });
   if (!build.ok) {
     return { ok: false, projectDir, error: build.error ?? "Web build failed.", output: build.output };
+  }
+
+  if (kind === "web") {
+    const nextSteps = writeWebPackage(outDir, app);
+    const archiveName = `${app.slug}-${app.version}-web.zip`;
+    const archivePath = path.join(outDir, archiveName);
+    const archive = writeDirectoryZip(outDir, archivePath, { exclude: [archiveName] });
+    return { ok: true, projectDir, outDir, kind, webTargetId, app, copiedAssets: build.copiedAssets, archive, nextSteps };
   }
 
   const nextSteps = kind === "desktop" ? writeTauri(outDir, app) : writeCapacitor(outDir, app);
@@ -61,6 +70,81 @@ export function packageMobile(projectDir, opts = {}) {
 }
 export function packageDesktop(projectDir, opts = {}) {
   return packageProject(projectDir, { ...opts, kind: "desktop" });
+}
+export function packageWeb(projectDir, opts = {}) {
+  return packageProject(projectDir, { ...opts, kind: "web" });
+}
+
+// ── Portable web archive ──────────────────────────────────────────────────────
+
+function writeWebPackage(outDir, app) {
+  writeText(path.join(outDir, "serve.mjs"), webServerTemplate());
+  writeText(path.join(outDir, "README.md"), `# ${app.appName} — Portable web build
+
+This archive contains a complete offline game under \`game/\`.
+
+- Double-click \`game/index.single.html\` to play without installing anything.
+- Or run \`node serve.mjs\` and open the printed loopback URL for the installable PWA build.
+- The local server binds only to \`127.0.0.1\` and serves only files inside this archive.
+
+No package installation or network connection is required.\n`);
+  return ["extract the zip", "double-click game/index.single.html", "or run: node serve.mjs"];
+}
+
+function webServerTemplate() {
+  return `import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+const ROOT = fs.realpathSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "game"));
+const portIndex = process.argv.indexOf("--port");
+const requestedPort = portIndex >= 0 ? Number(process.argv[portIndex + 1]) : 4173;
+const port = Number.isInteger(requestedPort) && requestedPort >= 0 && requestedPort <= 65535 ? requestedPort : 4173;
+const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".svg": "image/svg+xml", ".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg" };
+
+function confinedFile(rawUrl) {
+  let pathname;
+  try { pathname = decodeURIComponent(new URL(rawUrl || "/", "http://127.0.0.1").pathname); }
+  catch { return null; }
+  const requested = path.resolve(ROOT, "." + (pathname === "/" ? "/index.html" : pathname));
+  const lexical = path.relative(ROOT, requested);
+  if (lexical.startsWith("..") || path.isAbsolute(lexical)) return null;
+  try {
+    const candidate = fs.statSync(requested).isDirectory() ? path.join(requested, "index.html") : requested;
+    const real = fs.realpathSync(candidate);
+    const relative = path.relative(ROOT, real);
+    if (relative.startsWith("..") || path.isAbsolute(relative) || !fs.statSync(real).isFile()) return null;
+    return real;
+  } catch { return null; }
+}
+
+const checkPathIndex = process.argv.indexOf("--check-path");
+if (checkPathIndex >= 0) {
+  process.stdout.write(confinedFile(process.argv[checkPathIndex + 1]) ? "allowed\\n" : "blocked\\n");
+  process.exit(0);
+}
+
+const server = http.createServer((req, res) => {
+  if (!['GET', 'HEAD'].includes(req.method || '')) { res.writeHead(405, { Allow: "GET, HEAD" }); res.end(); return; }
+  const file = confinedFile(req.url);
+  if (!file) { res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }); res.end("Not found"); return; }
+  const headers = {
+    "Content-Type": TYPES[path.extname(file).toLowerCase()] || "application/octet-stream",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  };
+  res.writeHead(200, headers);
+  if (req.method === 'HEAD') { res.end(); return; }
+  fs.createReadStream(file).pipe(res);
+});
+server.listen(port, "127.0.0.1", () => {
+  const address = server.address();
+  console.log("TowerForge game: http://127.0.0.1:" + address.port);
+});
+`;
 }
 
 // ── Capacitor (mobile) ──────────────────────────────────────────────────────────
@@ -237,9 +321,10 @@ function slugify(value) {
 
 const BUILD_TIMEOUT_MS = 180_000;
 
-function runBuild(projectDir, targetId, outRel) {
+function runBuild(projectDir, targetId, outRel, options = {}) {
   return new Promise((resolve) => {
     const args = [path.join(repoRoot, "packages", "cli", "build.mjs"), "--project", projectDir, "--target", targetId, "--out", outRel, "--json"];
+    if (options.singleFile) args.push("--single-file");
     const child = spawn(process.execPath, args, { cwd: repoRoot, timeout: BUILD_TIMEOUT_MS, killSignal: "SIGKILL" });
     let stdout = "";
     let stderr = "";

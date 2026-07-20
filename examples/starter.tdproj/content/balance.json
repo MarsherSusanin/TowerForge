@@ -6,6 +6,82 @@
       "color": 16107330
     }
   ],
+  "defaultDifficultyId": "normal",
+  "difficulties": [
+    {
+      "id": "story",
+      "label": "Story",
+      "description": "More room to learn and experiment.",
+      "enemyHpMultiplier": 0.8,
+      "enemySpeedMultiplier": 0.9,
+      "enemyRewardMultiplier": 1.15,
+      "coreDamageMultiplier": 0.75,
+      "startingResourceMultiplier": 1.2,
+      "coreHpMultiplier": 1.2
+    },
+    {
+      "id": "normal",
+      "label": "Normal",
+      "description": "The authored baseline."
+    },
+    {
+      "id": "veteran",
+      "label": "Veteran",
+      "description": "Tighter economy and faster, tougher enemies.",
+      "enemyHpMultiplier": 1.25,
+      "enemySpeedMultiplier": 1.1,
+      "enemyRewardMultiplier": 0.9,
+      "coreDamageMultiplier": 1.25,
+      "startingResourceMultiplier": 0.85,
+      "coreHpMultiplier": 0.9
+    }
+  ],
+  "metaProgression": {
+    "currencies": [
+      {
+        "id": "forge_shards",
+        "label": "Forge Shards",
+        "color": 8304856
+      }
+    ],
+    "upgrades": {
+      "sharpened_tools": {
+        "id": "sharpened_tools",
+        "label": "Sharpened Tools",
+        "description": "All towers deal 8% more damage per level.",
+        "maxLevel": 3,
+        "costs": [
+          { "forge_shards": 2 },
+          { "forge_shards": 4 },
+          { "forge_shards": 7 }
+        ],
+        "effects": [
+          { "kind": "towerDamage", "multiplierPerLevel": 0.08 }
+        ]
+      },
+      "reinforced_core": {
+        "id": "reinforced_core",
+        "label": "Reinforced Core",
+        "description": "Begin each mission with 2 additional core HP per level.",
+        "maxLevel": 3,
+        "costs": [
+          { "forge_shards": 1 },
+          { "forge_shards": 3 },
+          { "forge_shards": 5 }
+        ],
+        "effects": [
+          { "kind": "coreHp", "amountPerLevel": 2 }
+        ]
+      }
+    },
+    "rewardsByMission": {
+      "tutorial_01": {
+        "firstClear": { "forge_shards": 2 },
+        "repeatClear": { "forge_shards": 1 },
+        "perStar": { "forge_shards": 1 }
+      }
+    }
+  },
   "constants": {
     "timeUnitSeconds": 0.1,
     "startingCoreHp": 10,

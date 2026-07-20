@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 112" role="img" aria-labelledby="title desc">
+  <title id="title">TowerForge</title>
+  <desc id="desc">TowerForge game constructor by Lindforge Studios.</desc>
+  <g transform="translate(8 8) scale(1.5)">
+    <path fill="#f7f9f5" stroke="#2f6b34" stroke-width="3" stroke-linejoin="round" d="M32 4 56 18v28L32 60 8 46V18L32 4Z"/>
+    <path fill="none" stroke="#265f93" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".62" d="m8 18 24 14 24-14M32 32v28"/>
+    <path fill="#18201a" d="M19 18h7v5h4v-5h4v5h4v-5h7v11h-4v16.5L32 51l-9-5.5V29h-4V18Z"/>
+    <path fill="#43804a" d="M28 31h8v13l-4 2.5-4-2.5V31Z"/>
+    <path fill="#9a5a12" d="m47.5 8 1.5 3.5 3.5 1.5-3.5 1.5-1.5 3.5-1.5-3.5-3.5-1.5 3.5-1.5L47.5 8Z"/>
+  </g>
+  <text x="124" y="61" fill="#18201a" font-family="Inter, Arial, sans-serif" font-size="43" font-weight="750" letter-spacing="0">TowerForge</text>
+  <text x="127" y="86" fill="#2f6b34" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" letter-spacing="3">GAME CONSTRUCTOR</text>
+</svg>

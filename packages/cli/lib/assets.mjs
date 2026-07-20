@@ -3,6 +3,13 @@ import path from "node:path";
 import { listVisualAssetPaths, validateSafeAssetPath } from "./project-schema.mjs";
 
 export function importProjectAsset(projectDir, visuals, request) {
+  const plan = planProjectAssetImport(projectDir, visuals, request);
+  commitProjectAssetImport(plan);
+  return { visuals: plan.visuals, asset: plan.asset };
+}
+
+/** Build the registry update and confined copy paths without touching disk. */
+export function planProjectAssetImport(projectDir, visuals, request) {
   const assetsRoot = visuals.assetsRoot || "assets";
   const sourceRel = request?.sourcePath;
   const targetRel = request?.targetPath || path.basename(sourceRel || "");
@@ -18,10 +25,7 @@ export function importProjectAsset(projectDir, visuals, request) {
 
   const assetRelPath = path.posix.join(assetsRoot, toPosix(targetRel));
   const destPath = resolveInsideProject(projectDir, assetRelPath);
-  fs.mkdirSync(path.dirname(destPath), { recursive: true });
-  if (path.resolve(sourcePath) !== path.resolve(destPath)) {
-    fs.copyFileSync(sourcePath, destPath);
-  }
+  const copyRequired = path.resolve(sourcePath) !== path.resolve(destPath);
 
   const updatedVisuals = JSON.parse(JSON.stringify(visuals));
   updatedVisuals.assetsRoot ??= assetsRoot;
@@ -31,9 +35,18 @@ export function importProjectAsset(projectDir, visuals, request) {
   updatedVisuals.audio ??= { sounds: {}, events: {} };
   updatedVisuals.audio.sounds ??= {};
   updatedVisuals.audio.events ??= {};
+  updatedVisuals.audio.musicTracks ??= {};
+  updatedVisuals.audio.musicByMission ??= {};
 
   const kind = request?.kind || "sprite";
-  const collection = kind === "atlas" ? updatedVisuals.atlases : kind === "sound" ? updatedVisuals.audio.sounds : updatedVisuals.sprites;
+  if (!["sprite", "atlas", "sound", "music"].includes(kind)) throw new Error("Asset kind must be sprite, atlas, sound, or music.");
+  const collection = kind === "atlas"
+    ? updatedVisuals.atlases
+    : kind === "sound"
+      ? updatedVisuals.audio.sounds
+      : kind === "music"
+        ? updatedVisuals.audio.musicTracks
+        : updatedVisuals.sprites;
   // Auto-derive an id from the filename when none is given. Sanitizing a fully non-ASCII basename
   // (e.g. Cyrillic "герой.png") used to collapse to "_", so a second such import silently
   // overwrote the first entry. Fall back to "asset" for an empty result and uniquify on collision
@@ -59,6 +72,12 @@ export function importProjectAsset(projectDir, visuals, request) {
       ...(updatedVisuals.audio.sounds[id] ?? {}),
       src: assetRelPath
     };
+  } else if (kind === "music") {
+    updatedVisuals.audio.musicTracks[id] = {
+      ...(updatedVisuals.audio.musicTracks[id] ?? {}),
+      src: assetRelPath,
+      volume: Number.isFinite(Number(request?.volume)) ? Math.max(0, Math.min(1, Number(request.volume))) : (updatedVisuals.audio.musicTracks[id]?.volume ?? 0.6)
+    };
   } else {
     updatedVisuals.sprites[id] = {
       ...(updatedVisuals.sprites[id] ?? {}),
@@ -66,7 +85,26 @@ export function importProjectAsset(projectDir, visuals, request) {
     };
   }
 
-  return { visuals: updatedVisuals, asset: { id, kind, path: assetRelPath } };
+  return {
+    visuals: updatedVisuals,
+    asset: { id, kind, path: assetRelPath },
+    sourcePath,
+    destPath,
+    copyRequired
+  };
+}
+
+/** Execute a previously validated plan with an atomic destination replace. */
+export function commitProjectAssetImport(plan) {
+  if (!plan?.copyRequired) return;
+  fs.mkdirSync(path.dirname(plan.destPath), { recursive: true });
+  const tmp = `${plan.destPath}.tmp.${process.pid}`;
+  try {
+    fs.copyFileSync(plan.sourcePath, tmp);
+    fs.renameSync(tmp, plan.destPath);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 }
 
 /** Return `base` if it's free in `collection` (or already points at `newSrc`, i.e. a re-import of

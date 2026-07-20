@@ -1,0 +1,11 @@
+{
+  "fallbackMissionId": "tutorial_01",
+  "placeholderMissionIds": [],
+  "definitions": {
+    "tutorial_01": {
+      "color": "#101410",
+      "spriteId": "frontier_before_battle",
+      "opacity": 0.6
+    }
+  }
+}

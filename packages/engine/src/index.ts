@@ -7,3 +7,7 @@ export * from "./simulation/TowerDefenseGame.js";
 export * from "./content/registry.js";
 export * from "./content/validate.js";
 export * from "./content/schema-descriptor.js";
+export * from "./scripting/types.js";
+export * from "./scripting/schema-descriptor.js";
+export * from "./scripting/expression.js";
+export * from "./scripting/validate.js";

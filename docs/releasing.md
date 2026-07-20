@@ -1,15 +1,29 @@
 # Desktop Release Policy
 
-TowerForge desktop artifacts are published through GitHub Releases. Until platform signing credentials are configured, every macOS and Windows artifact is an internal/alpha **Unsigned build**.
+TowerForge desktop artifacts are built and published through GitHub Actions. Until platform signing credentials are configured, every macOS and Windows artifact is an internal/alpha **Unsigned build**.
 
 ## Release Invariants
 
 - A release MUST point to the exact git tag and commit used for the build.
 - An unsigned release MUST be a GitHub pre-release and MUST include `Unsigned build` in its title and warning block.
-- Release assets MUST include the installer and a plain-text `SHA256SUMS` file.
+- Release assets MUST include every platform installer and a plain-text `SHA256SUMS` file.
 - Release notes MUST repeat the full SHA-256 value for every attached installer and link to both the tag and tagged source tree.
 - Release notes MUST NOT recommend `xattr -d`, disabling Gatekeeper, or reducing operating-system security.
+- A manual `Unsigned Desktop Builds` run produces a private release-candidate artifact for inspection but does not publish a release.
+- A pushed `vX.Y.Z` tag publishes only after every platform build and release-assembly job succeeds.
 - GitHub Actions artifacts are build evidence, not public releases. A release is complete only after its assets and notes are visible on the repository Releases page.
+
+## Automated Pipeline
+
+`.github/workflows/desktop-release.yml` builds on native GitHub-hosted runners:
+
+- macOS: `.dmg`;
+- Windows: NSIS `.exe` and `.msi`;
+- Linux: `.AppImage`, `.deb`, and `.rpm`.
+
+Every run creates the `towerforge-release-candidate` Actions artifact. It contains the installers, `SHA256SUMS`, and generated release notes. A manual run stops there. A tag run additionally creates a GitHub pre-release titled `TowerForge vX.Y.Z - Unsigned build` using the repository-scoped `GITHUB_TOKEN`; no provider, signing, or user API keys are exposed to the workflow.
+
+The release assembler rejects mismatched versions across root npm, desktop npm, Tauri, and Cargo manifests, duplicate installer names, unsupported tag syntax, missing installers, and attempts to reuse an existing release tag. It never silently replaces published assets.
 
 ## macOS Unsigned Build
 
@@ -31,16 +45,16 @@ Users may install the app by moving it to Applications. If macOS blocks the firs
 
 ## Publication Checklist
 
-1. Confirm `package.json` and Tauri versions match the release tag.
+1. Confirm `package.json`, desktop npm, Tauri, and Cargo versions match the intended release tag.
 2. Run the relevant quality gates from `AGENTS.md`.
-3. Build the installer from a clean source commit.
-4. Verify the DMG and calculate SHA-256.
-5. Create an annotated version tag on that commit and push it.
-6. Create a GitHub pre-release titled `TowerForge <tag> - Unsigned build`.
-7. Use [the canonical release-notes example](examples/unsigned-release-notes.md), replacing every placeholder.
-8. Attach the installer and `SHA256SUMS`.
-9. Download both assets from GitHub, recalculate the checksum, and compare it with the release notes.
-10. Confirm the tag and source links resolve to the released commit.
+3. Merge the exact source commit intended for release and confirm required CI passes.
+4. Run `Unsigned Desktop Builds` manually on that commit when a cross-platform release candidate is needed before tagging.
+5. Create an annotated `vX.Y.Z` tag on the release commit and push it.
+6. Wait for all three native builds, release assembly, and publication to pass.
+7. Confirm the GitHub pre-release title contains `Unsigned build` and all six installer formats are attached when supported by the runners.
+8. Download the published installers and `SHA256SUMS`, recalculate the checksums, and compare them with the release notes.
+9. Verify the DMG with `hdiutil verify` on macOS.
+10. Confirm the tag, tagged source, and commit links resolve to the released commit.
 
 ## Rollback
 

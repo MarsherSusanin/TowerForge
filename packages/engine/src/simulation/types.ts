@@ -8,13 +8,17 @@ export type TowerAttackKind =
   | "antiair"
   | "splash"
   | "support"
-  | "support_buff";
+  | "support_buff"
+  | "pipeline";
 // Currencies are author-defined. "coins" is the conventional primary currency that always
 // exists, but a project may declare any number of additional currencies (see CurrencyDefinition).
 export type ResourceId = "coins" | (string & {});
 export type EnemyMovementKind = "path" | "direct_flying";
 export type EnemyTargetClass = "ground" | "flying";
-export type TowerTargetMode = "fastest_ahead" | "largest_hp";
+export const TOWER_TARGET_MODES = [
+  "first", "last", "closest", "furthest", "strongest", "weakest", "fastest_ahead", "largest_hp"
+] as const;
+export type TowerTargetMode = (typeof TOWER_TARGET_MODES)[number];
 /**
  * Author-defined (open, like `ResourceId`). Three ids are engine-implemented presets that need
  * no `effects` declaration: `path_water` (a bespoke path-tile terrain effect, routed to its own
@@ -199,6 +203,8 @@ export interface SplashAttackModel {
   splashRadius: number;
   slowFactor: number;
   slowDuration: number;
+  /** Classes affected by splash damage and its built-in slow. Defaults to ground only. */
+  affectsClasses?: EnemyTargetClass[];
   intervalByLevel?: [number, number, number];
   upgradeCosts?: ResourceCost[];
   statusOnHit?: StatusEffectSpec;
@@ -220,6 +226,49 @@ export interface SupportBuffAttackModel {
   affectsTowerIds: string[];
 }
 
+export interface TowerPipelineTargetingSpec {
+  /** Enemy classes eligible for selection. Defaults to ground. */
+  classes?: EnemyTargetClass[];
+  /** Default priority for newly placed towers. Players may override it at runtime. */
+  mode?: TowerTargetMode;
+  /** Primary targets selected per activation. Defaults to one. */
+  maxTargets?: number;
+}
+
+export type TowerPipelineDeliverySpec =
+  | { kind: "single" }
+  | { kind: "multi" }
+  | { kind: "area"; radius: number; secondaryMultiplier?: number }
+  | { kind: "chain"; maxJumps: number; jumpRadius: number; damageFalloff?: number }
+  | { kind: "aura" };
+
+export type TowerEffectSpec =
+  | {
+      kind: "damage";
+      amount: number;
+      amountByLevel?: number[];
+      damageType?: string;
+      armorPiercing?: boolean;
+    }
+  | { kind: "status"; status: StatusEffectSpec }
+  | { kind: "resource"; resources: ResourceBag };
+
+/**
+ * Declarative tower execution model. Targeting chooses primary enemies, delivery expands that set,
+ * and effects are applied in order to every delivered target. This is the preferred authoring
+ * surface for new towers; legacy attack kinds remain supported for existing projects.
+ */
+export interface EffectPipelineAttackModel {
+  kind: "pipeline";
+  interval: number;
+  intervalByLevel?: number[];
+  rangeByLevel?: number[];
+  targeting?: TowerPipelineTargetingSpec;
+  delivery: TowerPipelineDeliverySpec;
+  effects: TowerEffectSpec[];
+  upgradeCosts?: ResourceCost[];
+}
+
 export interface TowerType {
   id: string;
   label: string;
@@ -236,7 +285,53 @@ export interface TowerType {
     | AntiAirAttackModel
     | SplashAttackModel
     | SupportAttackModel
-    | SupportBuffAttackModel;
+    | SupportBuffAttackModel
+    | EffectPipelineAttackModel;
+}
+
+export interface DifficultyDefinition {
+  id: string;
+  label: string;
+  description?: string;
+  enemyHpMultiplier?: number;
+  enemySpeedMultiplier?: number;
+  enemyRewardMultiplier?: number;
+  coreDamageMultiplier?: number;
+  startingResourceMultiplier?: number;
+  coreHpMultiplier?: number;
+}
+
+export interface MetaCurrencyDefinition {
+  id: string;
+  label: string;
+  color?: number;
+}
+
+export type MetaUpgradeEffect =
+  | { kind: "towerDamage"; multiplierPerLevel: number }
+  | { kind: "towerFireRate"; multiplierPerLevel: number }
+  | { kind: "startingResource"; resourceId: string; amountPerLevel: number }
+  | { kind: "coreHp"; amountPerLevel: number };
+
+export interface MetaUpgradeDefinition {
+  id: string;
+  label: string;
+  description?: string;
+  maxLevel: number;
+  costs: ResourceBag[];
+  effects: MetaUpgradeEffect[];
+}
+
+export interface MissionMetaRewardDefinition {
+  firstClear?: ResourceBag;
+  repeatClear?: ResourceBag;
+  perStar?: ResourceBag;
+}
+
+export interface MetaProgressionDefinition {
+  currencies: MetaCurrencyDefinition[];
+  upgrades: Record<string, MetaUpgradeDefinition>;
+  rewardsByMission: Record<string, MissionMetaRewardDefinition>;
 }
 
 export interface WaveGroup {
@@ -262,6 +357,8 @@ export interface MissionDefinition {
   waveSetId?: string;
   buildTowerIds?: string[];
   abilityIds?: MissionAbilityId[];
+  economy?: MissionEconomyDefinition;
+  objectives?: MissionObjectivesDefinition;
   startingCoreHp: number;
   startingResources: ResourceBag;
   prepTimeUnits: number;
@@ -269,6 +366,47 @@ export interface MissionDefinition {
   countsTowardProgress?: boolean;
   abilities?: MissionAbilityDefinition[];
   sunlight?: MissionSunlightDefinition;
+}
+
+/** Optional mission-local economy rules. Omitted fields preserve the original reward-on-kill economy. */
+export interface MissionEconomyDefinition {
+  /** Resources granted when a wave starts, including manually started waves. */
+  perWaveStart?: ResourceBag;
+  /** Resources granted once each started wave has no queued or living enemies left. */
+  perWaveClear?: ResourceBag;
+  /** Continuous income while the mission clock is running. Values may be fractional. */
+  passivePerTimeUnit?: ResourceBag;
+  /** Fraction of current resources granted as interest on each wave clear. */
+  interestRate?: number;
+  /** Optional per-currency cap for one wave's interest grant. */
+  interestCap?: ResourceBag;
+  /** Resource amount per skipped prep-time unit when the player starts the next wave early. */
+  earlyStartBonusPerUnit?: ResourceBag;
+  /** Fraction of placement + upgrade spend refunded on sell. Defaults to 0.7. */
+  sellRefundRatio?: number;
+}
+
+export type MissionVictoryObjective =
+  | { id: string; label?: string; kind: "clearWaves" }
+  | { id: string; label?: string; kind: "surviveSeconds"; seconds: number }
+  | { id: string; label?: string; kind: "killCount"; count: number; enemyTypeId?: string }
+  | { id: string; label?: string; kind: "accumulateResource"; resourceId: string; amount: number };
+
+export type MissionFailureObjective =
+  | { id: string; label?: string; kind: "maxLeaks"; maxLeaks: number }
+  | { id: string; label?: string; kind: "timeLimit"; seconds: number };
+
+export type MissionStarCondition =
+  | { id: string; label: string; kind: "coreHpAtLeast"; amount: number }
+  | { id: string; label: string; kind: "maxLeaks"; maxLeaks: number }
+  | { id: string; label: string; kind: "timeAtMost"; seconds: number }
+  | { id: string; label: string; kind: "resourceAtLeast"; resourceId: string; amount: number };
+
+/** All victory objectives must complete; any failure condition ends the mission. Core depletion always loses. */
+export interface MissionObjectivesDefinition {
+  victory: MissionVictoryObjective[];
+  failure?: MissionFailureObjective[];
+  stars?: MissionStarCondition[];
 }
 
 /**
@@ -351,6 +489,8 @@ export interface StatusEffectSpec {
   slow?: { factor: number; duration: number };
   /** Damage-over-time: `dps` damage per time-unit for `duration` seconds. */
   poison?: { dps: number; duration: number };
+  /** Classes affected by `slow`. Defaults to ground only; stun/poison keep their legacy all-class behavior. */
+  slowAffectsClasses?: EnemyTargetClass[];
 }
 
 export interface TowerState {
@@ -362,6 +502,8 @@ export interface TowerState {
   targetMode?: TowerTargetMode;
   stacks: number;
   cooldown: number;
+  /** Placement and upgrade costs accumulated for deterministic sell refunds. */
+  investedResources: ResourceBag;
   /** Remaining time this tower is disabled (silenced) by an enemy tower-disrupt pulse; 0 = active. */
   disabledFor?: number;
   /** Current health if the tower type has `maxHp`; when it reaches 0 the tower is destroyed. */
@@ -370,6 +512,7 @@ export interface TowerState {
 
 export type GameEvent =
   | { type: "towerPlaced"; towerId: string; towerTypeId: string }
+  | { type: "towerSold"; towerId: string; towerTypeId: string; refund: ResourceBag }
   | { type: "towerMoved"; towerId: string; from: HexCoord; to: HexCoord; cost: ResourceBag }
   | { type: "towerUpgraded"; towerId: string; level: number; stacks: number }
   | { type: "towerDisrupted"; enemyId: string; enemyTypeId: string; towerIds: string[]; duration: number }
@@ -386,6 +529,11 @@ export type GameEvent =
     }
   | { type: "enemyLeaked"; enemyId: string; enemyTypeId: string; damage: number }
   | { type: "waveStarted"; waveIndex: number }
+  | { type: "waveCleared"; waveIndex: number; income: ResourceBag; interest: ResourceBag }
+  | { type: "resourcesGranted"; source: "waveStart" | "earlyStart"; waveIndex: number; resources: ResourceBag }
+  | { type: "objectiveCompleted"; objectiveId: string; kind: MissionVictoryObjective["kind"] }
+  | { type: "objectiveFailed"; objectiveId: string; kind: MissionFailureObjective["kind"] }
+  | { type: "starEarned"; starId: string }
   | { type: "towerFired"; towerId: string; enemyId: string; damage: number }
   | { type: "enemyHit"; towerId: string; enemyId: string; enemyTypeId: string; damage: number }
   | { type: "enemyArmorBlocked"; towerId: string; enemyId: string; enemyTypeId: string; rawDamage: number }
@@ -399,8 +547,11 @@ export type GameEvent =
       hpRatio: number;
     }
   | { type: "areaPulse"; towerId: string; enemyIds: string[] }
+  | { type: "towerResourcesGranted"; towerId: string; enemyId: string; resources: ResourceBag }
   | { type: "waterAbilityUsed"; abilityId: MissionAbilityId; center: HexCoord; coords: HexCoord[]; duration: number }
   | { type: "abilityUsed"; abilityId: MissionAbilityId; center: HexCoord; enemyIds: string[]; effects: AbilityEffect[] }
+  | { type: "scriptSignal"; scriptId: string; signal: string; payload: import("../scripting/types.js").TowerScriptJson }
+  | { type: "scriptDiagnostic"; diagnostic: import("../scripting/types.js").TowerScriptDiagnostic }
   | { type: "victory" }
   | { type: "defeat" };
 
@@ -426,6 +577,8 @@ export interface SunlightTile extends HexCoord {
 export interface GameSnapshot {
   missionId: string;
   missionLabel: string;
+  difficultyId: string;
+  difficultyLabel: string;
   coreHp: number;
   maxCoreHp: number;
   coins: number;
@@ -433,6 +586,12 @@ export interface GameSnapshot {
   waveIndex: number;
   totalWaves: number;
   startedWaveCount: number;
+  clearedWaveCount: number;
+  killCount: number;
+  leakCount: number;
+  killCountByEnemyType: Record<string, number>;
+  objectiveProgress: MissionObjectiveProgress[];
+  stars: MissionStarSnapshot[];
   missionElapsed: number;
   waveState: WaveState;
   prepRemaining: number;
@@ -449,7 +608,23 @@ export interface GameSnapshot {
   spawnCoord: HexCoord;
   coreCoord: HexCoord;
   outcome: Outcome;
+  scriptState: import("../scripting/types.js").TowerScriptStateSnapshot;
   lastEvents: GameEvent[];
+}
+
+export interface MissionObjectiveProgress {
+  id: string;
+  label: string;
+  kind: MissionVictoryObjective["kind"];
+  current: number;
+  target: number;
+  complete: boolean;
+}
+
+export interface MissionStarSnapshot {
+  id: string;
+  label: string;
+  achieved: boolean;
 }
 
 export interface ActionResult {

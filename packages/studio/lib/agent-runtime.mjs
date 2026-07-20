@@ -4,8 +4,10 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { restorePackedExecutable } from "../../cli/lib/packed-executable.mjs";
+import { AI_TOOL_NAMES } from "./ai-tool-policy.mjs";
 
 const RUNTIME_PROVIDERS = new Set(["codex", "claude-code"]);
+const MODEL_ID_RE = /^[A-Za-z0-9~][A-Za-z0-9._:/~+@-]{0,199}$/;
 const MAX_RPC_LINE_BYTES = 2 * 1024 * 1024;
 const MAX_RUNTIME_OUTPUT_BYTES = 64 * 1024;
 const MAX_TOOL_RESULT_CHARS = 24_000;
@@ -18,26 +20,7 @@ const PASSTHROUGH_ENV = [
   "SSL_CERT_FILE", "SSL_CERT_DIR"
 ];
 
-export const AGENT_RUNTIME_TOOL_NAMES = Object.freeze([
-  "describe_schema",
-  "explain_validation",
-  "get_project_summary",
-  "list_missions",
-  "validate_project",
-  "simulate_mission",
-  "compile_maps_dry_run",
-  "balance_report",
-  "dry_run_balance_patch",
-  "apply_validated_patch",
-  "set_enemy_stat",
-  "upsert_tower",
-  "add_wave_group",
-  "bind_sprite",
-  "upsert_entity",
-  "delete_entity",
-  "write_map",
-  "compile_maps"
-]);
+export const AGENT_RUNTIME_TOOL_NAMES = AI_TOOL_NAMES;
 
 function ensurePrivateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -48,7 +31,7 @@ function safeString(value, max = 400) {
   return typeof value === "string" ? value.slice(0, max) : "";
 }
 
-export function redactRuntimeText(value, { projectDir = "" } = {}) {
+export function redactRuntimeText(value, { projectDir = "", maxLength = 800 } = {}) {
   let text = String(value || "");
   text = text
     .replace(/\b(Authorization|access[_ -]?token|refresh[_ -]?token)\s*[:=]?\s*(?:Bearer\s+)?[^\s,;]+/gi, "$1 [redacted]")
@@ -58,7 +41,7 @@ export function redactRuntimeText(value, { projectDir = "" } = {}) {
   if (projectDir) text = text.split(projectDir).join("<project>");
   const home = os.homedir();
   if (home) text = text.split(home).join("~");
-  return text.slice(0, 800);
+  return text.slice(0, maxLength);
 }
 
 export function isAllowedRuntimeAuthUrl(value) {
@@ -370,6 +353,11 @@ function historyPrompt(history) {
     .join("\n\n");
 }
 
+function normalizedReasoningLevels(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => safeString(item?.reasoningEffort ?? item, 20)).filter(Boolean))];
+}
+
 function parseClaudeStatus(output) {
   let value = null;
   try { value = JSON.parse(output); } catch { /* Older runtimes can return plain text. */ }
@@ -461,6 +449,60 @@ export class AgentRuntimeBridge {
     }
   }
 
+  async models(value) {
+    const provider = this.#provider(value);
+    if (provider === "codex") {
+      const client = await this.#codexClient();
+      const result = await client.request("model/list", { limit: 100, includeHidden: false });
+      const models = (Array.isArray(result?.data) ? result.data : [])
+        .map((entry) => {
+          const id = safeString(entry?.model || entry?.id, 200);
+          if (!MODEL_ID_RE.test(id)) return null;
+          return {
+            id,
+            label: safeString(entry?.displayName, 120) || id,
+            description: safeString(entry?.description, 300) || null,
+            reasoningLevels: normalizedReasoningLevels(entry?.supportedReasoningEfforts),
+            defaultReasoning: safeString(entry?.defaultReasoningEffort, 20) || null,
+            inputModalities: Array.isArray(entry?.inputModalities) ? entry.inputModalities.filter((item) => item === "text" || item === "image") : ["text", "image"],
+            isDefault: Boolean(entry?.isDefault)
+          };
+        })
+        .filter(Boolean);
+      return { provider, models };
+    }
+
+    const executable = this.#claudeExecutable();
+    if (!executable) throw new Error("Claude Code runtime is not installed.");
+    this.#prepareRuntime("claude-code");
+    const sdk = await this.claudeSdkLoader();
+    const query = sdk.query({
+      prompt: "",
+      options: this.#claudeBaseOptions(executable)
+    });
+    try {
+      const entries = await query.supportedModels();
+      const models = (Array.isArray(entries) ? entries : [])
+        .map((entry) => {
+          const id = safeString(entry?.value, 200);
+          if (!MODEL_ID_RE.test(id)) return null;
+          return {
+            id,
+            label: safeString(entry?.displayName, 120) || id,
+            description: safeString(entry?.description, 300) || null,
+            reasoningLevels: Array.isArray(entry?.supportedEffortLevels) ? entry.supportedEffortLevels.filter((item) => typeof item === "string") : [],
+            defaultReasoning: entry?.supportsEffort ? "high" : null,
+            inputModalities: ["text", "image"],
+            isDefault: id === "sonnet"
+          };
+        })
+        .filter(Boolean);
+      return { provider, models };
+    } finally {
+      query.close();
+    }
+  }
+
   async connect(value) {
     const provider = this.#provider(value);
     if (provider === "codex") {
@@ -511,16 +553,26 @@ export class AgentRuntimeBridge {
     return { provider, connected: false };
   }
 
-  async #executeTool(name, input, send) {
-    if (!this.toolMap.has(name)) throw new Error("Tool is not allowed by TowerForge.");
+  async #executeTool(name, input, send, allowedToolNames = null) {
+    if (!this.toolMap.has(name) || (allowedToolNames && !allowedToolNames.has(name))) {
+      throw new Error("Tool is not allowed by TowerForge in this mode.");
+    }
     const id = `${name}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
     const safeInput = input && typeof input === "object" && !Array.isArray(input) ? input : {};
     send({ type: "tool_call", id, name, input: safeInput });
     try {
       const result = await this.callTool(name, { ...safeInput, projectDir: this.projectDir }, { defaultProjectDir: this.projectDir });
       const appliedPatch = this.writeTools.has(name) && result?.written !== false;
-      send({ type: "tool_result", id, name, ok: true, summary: this.summarizeToolResult(name, result) });
-      return { result, serialized: JSON.stringify(result).slice(0, MAX_TOOL_RESULT_CHARS), appliedPatch };
+      const raw = JSON.stringify(result);
+      const sanitizedText = redactRuntimeText(raw, {
+        projectDir: this.projectDir,
+        maxLength: raw.length + 1
+      });
+      let sanitized = result;
+      try { sanitized = JSON.parse(sanitizedText); } catch { /* Keep the original shape only if serialization itself was invalid. */ }
+      const serialized = JSON.stringify(sanitized).slice(0, MAX_TOOL_RESULT_CHARS);
+      send({ type: "tool_result", id, name, ok: true, summary: this.summarizeToolResult(name, sanitized) });
+      return { result: sanitized, serialized, appliedPatch };
     } catch (error) {
       const message = redactRuntimeText(error?.message || error, { projectDir: this.projectDir });
       send({ type: "tool_result", id, name, ok: false, summary: { error: message } });
@@ -534,7 +586,7 @@ export class AgentRuntimeBridge {
     if (!context || params.namespace !== "towerforge" || !this.toolMap.has(params.tool)) {
       throw new Error("TowerForge declined an out-of-scope tool call.");
     }
-    const executed = await this.#executeTool(params.tool, params.arguments, context.send);
+    const executed = await this.#executeTool(params.tool, params.arguments, context.send, context.allowedToolNames);
     context.appliedPatch ||= executed.appliedPatch;
     return {
       success: !executed.isError,
@@ -542,19 +594,33 @@ export class AgentRuntimeBridge {
     };
   }
 
-  async runChat({ provider: value, model, history, send, signal }) {
+  async runChat({ provider: value, model, reasoning, attachments = [], history, send, signal, allowedToolNames }) {
     const provider = this.#provider(value);
-    if (provider === "codex") return this.#runCodexChat({ model, history, send, signal });
-    return this.#runClaudeChat({ model, history, send, signal });
+    const allowed = new Set((allowedToolNames ?? [...this.toolMap.keys()]).filter((name) => this.toolMap.has(name)));
+    if (provider === "codex") return this.#runCodexChat({ model, reasoning, attachments, history, send, signal, allowedToolNames: allowed });
+    return this.#runClaudeChat({ model, reasoning, attachments, history, send, signal, allowedToolNames: allowed });
   }
 
-  async #runCodexChat({ model, history, send, signal }) {
+  #codexAttachmentInputs(attachments) {
+    if (!attachments.length) return { inputs: [], cleanup: () => {} };
+    const dir = fs.mkdtempSync(path.join(this.workspace, "turn-attachments-"));
+    try { fs.chmodSync(dir, 0o700); } catch { /* best effort on non-POSIX filesystems */ }
+    const extensions = { "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp" };
+    const inputs = attachments.map((attachment, index) => {
+      const filePath = path.join(dir, `image-${index + 1}${extensions[attachment.mimeType] || ".img"}`);
+      fs.writeFileSync(filePath, Buffer.from(attachment.data, "base64"), { mode: 0o600 });
+      return { type: "localImage", path: filePath };
+    });
+    return { inputs, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  async #runCodexChat({ model, reasoning, attachments, history, send, signal, allowedToolNames }) {
     const client = await this.#codexClient();
     const dynamicTools = [{
       type: "namespace",
       name: "towerforge",
       description: "Validated TowerForge project inspection, simulation, and authoring tools.",
-      tools: [...this.toolMap.values()].map((entry) => ({
+      tools: [...this.toolMap.values()].filter((entry) => allowedToolNames.has(entry.name)).map((entry) => ({
         type: "function",
         name: entry.name,
         description: entry.description,
@@ -575,10 +641,11 @@ export class AgentRuntimeBridge {
     const started = await client.request("thread/start", params);
     const threadId = started?.thread?.id;
     if (!threadId) throw new Error("Codex App Server did not create a thread.");
-    const context = { send, appliedPatch: false, assistantText: [] };
+    const context = { send, appliedPatch: false, assistantText: [], allowedToolNames };
     this.codexTurns.set(threadId, context);
     let turnId = null;
 
+    const materialized = this.#codexAttachmentInputs(attachments);
     try {
       let stop = () => {};
       let abort = () => {};
@@ -610,8 +677,9 @@ export class AgentRuntimeBridge {
         try {
           turn = await client.request("turn/start", {
             threadId,
-            input: [{ type: "text", text: historyPrompt(history), text_elements: [] }],
+            input: [{ type: "text", text: historyPrompt(history), text_elements: [] }, ...materialized.inputs],
             cwd: this.workspace,
+            ...(reasoning ? { effort: reasoning } : {}),
             approvalPolicy: "never",
             sandboxPolicy: {
               type: "readOnly",
@@ -635,23 +703,39 @@ export class AgentRuntimeBridge {
         signal?.removeEventListener("abort", abort);
       }
     } finally {
+      materialized.cleanup();
       this.codexTurns.delete(threadId);
     }
   }
 
-  async #runClaudeChat({ model, history, send, signal }) {
+  #claudeBaseOptions(executable) {
+    return {
+      cwd: this.workspace,
+      env: runtimeChildEnv("claude", this.claudeHome),
+      pathToClaudeCodeExecutable: executable,
+      tools: [],
+      disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit", "Skill"],
+      strictMcpConfig: true,
+      settingSources: [],
+      skills: [],
+      plugins: [],
+      persistSession: false
+    };
+  }
+
+  async #runClaudeChat({ model, reasoning, attachments, history, send, signal, allowedToolNames }) {
     const executable = this.#claudeExecutable();
     if (!executable) throw new Error("Claude Code runtime is not installed.");
     this.#prepareRuntime("claude-code");
     const sdk = await this.claudeSdkLoader();
-    const allowedNames = new Set([...this.toolMap].map(([name]) => `mcp__towerforge__${name}`));
+    const allowedNames = new Set([...allowedToolNames].map((name) => `mcp__towerforge__${name}`));
     const state = { appliedPatch: false };
-    const sdkTools = [...this.toolMap.values()].map((entry) => sdk.tool(
+    const sdkTools = [...this.toolMap.values()].filter((entry) => allowedToolNames.has(entry.name)).map((entry) => sdk.tool(
       entry.name,
       entry.description,
       jsonSchemaToZodShape(entry.inputSchema),
       async (input) => {
-        const executed = await this.#executeTool(entry.name, input, send);
+        const executed = await this.#executeTool(entry.name, input, send, allowedToolNames);
         state.appliedPatch ||= executed.appliedPatch;
         return { content: [{ type: "text", text: executed.serialized }], isError: Boolean(executed.isError) };
       },
@@ -670,27 +754,36 @@ export class AgentRuntimeBridge {
     this.activeAborts.add(abortController);
     const assistantText = [];
     try {
+      const promptText = historyPrompt(history);
+      const prompt = attachments.length ? (async function* () {
+        yield {
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "text", text: promptText },
+              ...attachments.map((attachment) => ({
+                type: "image",
+                source: { type: "base64", media_type: attachment.mimeType, data: attachment.data }
+              }))
+            ]
+          },
+          parent_tool_use_id: null
+        };
+      })() : promptText;
       const stream = sdk.query({
-        prompt: historyPrompt(history),
+        prompt,
         options: {
+          ...this.#claudeBaseOptions(executable),
           abortController,
-          cwd: this.workspace,
-          env: runtimeChildEnv("claude", this.claudeHome),
-          pathToClaudeCodeExecutable: executable,
           model: model && model !== "default" ? model : undefined,
+          effort: reasoning || undefined,
           systemPrompt: this.systemPrompt,
-          tools: [],
           allowedTools: [...allowedNames],
-          disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "NotebookEdit", "Skill"],
           canUseTool: async (toolName, input) => allowedNames.has(toolName)
             ? { behavior: "allow", updatedInput: input }
             : { behavior: "deny", message: "TowerForge only permits its validated in-process tools.", interrupt: true },
           mcpServers: { towerforge: server },
-          strictMcpConfig: true,
-          settingSources: [],
-          skills: [],
-          plugins: [],
-          persistSession: false,
           maxTurns: 16,
           includePartialMessages: false
         }

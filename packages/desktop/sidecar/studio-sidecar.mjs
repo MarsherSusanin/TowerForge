@@ -29,6 +29,7 @@ const child = spawn(process.execPath, [serverScript, "--project", projectDir], {
     PROJECT_DIR: projectDir,
     PORT: process.env["PORT"] || "0",
     TOWERFORGE_DESKTOP: "1",
+    TOWERFORGE_BUNDLED_RUNTIME: "1",
     TOWERFORGE_RUNTIME_ROOT: runtimeRoot,
     TOWERFORGE_USER_DATA_DIR: userDataDir
   },

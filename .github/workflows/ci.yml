@@ -17,8 +17,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run typecheck
-      - run: npm test
       - run: npm run build:engine
+      - run: npm test
       - run: npm run validate
       - run: npm run sim tutorial_01 60
       - run: npm run maps:compile -- --project examples/starter.tdproj

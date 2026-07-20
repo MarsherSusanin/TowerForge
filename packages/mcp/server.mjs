@@ -17,6 +17,7 @@ import process from "node:process";
 import readline from "node:readline";
 import { resolveProjectDir } from "../cli/lib/project-loader.mjs";
 import { TOOLS, callTool } from "./tools.mjs";
+import { TOWERFORGE_AGENT_INSTRUCTIONS } from "./agent-instructions.mjs";
 
 const PROTOCOL_VERSION = "2024-11-05";
 // Version NEGOTIATION, not echo: we only implement 2024-11-05 semantics, so claiming whatever
@@ -60,7 +61,8 @@ async function handleMessage(message) {
         reply(id, {
           protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.has(requested) ? requested : PROTOCOL_VERSION,
           capabilities: { tools: {} },
-          serverInfo: SERVER_INFO
+          serverInfo: SERVER_INFO,
+          instructions: TOWERFORGE_AGENT_INSTRUCTIONS
         });
       }
       return;

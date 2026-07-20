@@ -26,8 +26,14 @@ export class TowerForgeAudio {
   constructor(options = {}) {
     this.enabled = options.enabled !== false;
     this.volume = typeof options.volume === "number" ? options.volume : 0.5;
+    this.musicVolume = typeof options.musicVolume === "number" ? options.musicVolume : 0.35;
     this.ctx = null;
     this.master = null;
+    this.musicMaster = null;
+    this.musicSource = null;
+    this.currentMusicId = null;
+    this.desiredMusicId = null;
+    this.musicLoadToken = 0;
     // Custom-sound catalog: { sounds: { id: { src } }, events: { eventType: soundId } }
     this.audio = options.audio || null;
     this.assetBase = options.assetBase ?? "";
@@ -40,11 +46,29 @@ export class TowerForgeAudio {
     this.audio = audio || null;
     if (typeof assetBase === "string") this.assetBase = assetBase;
     this.preload();
+    this.ensureMusic();
   }
 
   setEnabled(enabled) {
     this.enabled = !!enabled;
-    if (this.enabled) this.resume();
+    if (!this.enabled) this.suspend();
+    else if (this.ctx) this.resume();
+  }
+
+  setVolumes(sfxVolume, musicVolume) {
+    if (Number.isFinite(sfxVolume)) this.volume = Math.max(0, Math.min(1, sfxVolume));
+    if (Number.isFinite(musicVolume)) this.musicVolume = Math.max(0, Math.min(1, musicVolume));
+    if (this.master) this.master.gain.value = this.volume;
+    if (this.musicMaster) this.musicMaster.gain.value = this.musicVolume;
+  }
+
+  selectMusic(trackId) {
+    const next = typeof trackId === "string" && trackId ? trackId : null;
+    if (this.desiredMusicId === next && this.currentMusicId === next) return;
+    this.desiredMusicId = next;
+    this.musicLoadToken += 1;
+    this.stopMusicSource();
+    if (this.enabled && next && this.ctx) this.ensureMusic();
   }
 
   /** Must be called from a user gesture (click/keydown) before sound can play in most browsers. */
@@ -52,6 +76,7 @@ export class TowerForgeAudio {
     this.ensureContext();
     if (this.ctx && this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
     this.preload();
+    this.ensureMusic();
   }
 
   /** Suspend the AudioContext when the app is backgrounded (mobile). Frees the audio hardware and
@@ -68,11 +93,12 @@ export class TowerForgeAudio {
     return sound && typeof sound.src === "string" ? sound.src : null;
   }
   assetUrl(src) {
-    return this.assetBase + String(src).split("/").map(encodeURIComponent).join("/");
+    const value = String(src ?? "");
+    if (/^(?:data:|blob:|https?:)/i.test(value)) return value;
+    return this.assetBase + value.split("/").map(encodeURIComponent).join("/");
   }
   async preload() {
     if (!this.audio || !this.audio.events) return;
-    this.ensureContext();
     if (!this.ctx || typeof globalThis.fetch !== "function") return;
     const srcs = new Set();
     for (const eventType of Object.keys(this.audio.events)) { const s = this.eventSrc(eventType); if (s) srcs.add(s); }
@@ -86,6 +112,42 @@ export class TowerForgeAudio {
       } catch { /* keep the synth fallback */ }
       this.loading.delete(src);
     }
+  }
+  async ensureMusic() {
+    const trackId = this.desiredMusicId;
+    if (!this.enabled || !trackId || this.currentMusicId === trackId || !this.audio?.musicTracks?.[trackId]) return;
+    if (!this.ctx || !this.musicMaster || typeof globalThis.fetch !== "function") return;
+    const track = this.audio.musicTracks[trackId];
+    const src = track?.src;
+    if (typeof src !== "string" || !src) return;
+    const token = ++this.musicLoadToken;
+    let buffer = this.buffers.get(src);
+    if (!buffer) {
+      try {
+        const res = await globalThis.fetch(this.assetUrl(src));
+        if (res.ok === false) return;
+        buffer = await this.ctx.decodeAudioData(await res.arrayBuffer());
+        this.buffers.set(src, buffer);
+      } catch { return; }
+    }
+    if (token !== this.musicLoadToken || this.desiredMusicId !== trackId || !this.enabled) return;
+    const source = this.ctx.createBufferSource();
+    const trackGain = this.ctx.createGain();
+    source.buffer = buffer;
+    source.loop = true;
+    trackGain.gain.value = Number.isFinite(track.volume) ? Math.max(0, Math.min(1, track.volume)) : 1;
+    source.connect(trackGain);
+    trackGain.connect(this.musicMaster);
+    source.start();
+    source.onended = () => { if (this.musicSource === source) { this.musicSource = null; this.currentMusicId = null; } };
+    this.musicSource = source;
+    this.currentMusicId = trackId;
+  }
+  stopMusicSource() {
+    const source = this.musicSource;
+    this.musicSource = null;
+    this.currentMusicId = null;
+    if (source) { try { source.stop(); } catch {} }
   }
   playBuffer(buffer, delay = 0) {
     const t0 = this.ctx.currentTime + delay;
@@ -138,6 +200,9 @@ export class TowerForgeAudio {
     this.master = this.ctx.createGain();
     this.master.gain.value = this.volume;
     this.master.connect(this.ctx.destination);
+    this.musicMaster = this.ctx.createGain();
+    this.musicMaster.gain.value = this.musicVolume;
+    this.musicMaster.connect(this.ctx.destination);
   }
 
   /** Coalesce a frame's events into a small set of sounds and play them (custom-or-synth). */

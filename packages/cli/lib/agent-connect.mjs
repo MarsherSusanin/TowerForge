@@ -176,7 +176,7 @@ The safe authoring loop:
 1. \`describe_schema\` first — attack kinds, ability effects, and currency rules, so shapes are right on the first try.
 2. \`get_project_summary\` / \`validate_project\` — current state plus \`revisions\` tokens.
 3. Preview risky balance changes with \`dry_run_balance_patch\` (returns a leaf-level \`diff\`).
-4. Write with the narrow tools (\`set_enemy_stat\`, \`upsert_tower\`, \`upsert_entity\`, \`add_wave_group\`, \`write_map\`, \`bind_sprite\`) passing \`ifRevision\` from step 2 — a stale revision returns \`{conflict:true}\` instead of clobbering concurrent edits.
+4. Write with the narrow tools (\`set_enemy_stat\`, \`upsert_tower\`, \`upsert_entity\`, \`add_wave_group\`, \`write_map\`, \`bind_sprite\`, \`bind_mission_music\`, \`import_asset\`, \`upsert_story_comic\`, \`set_battle_background\`) passing \`ifRevision\` from step 2 — a stale revision returns \`{conflict:true}\` instead of clobbering concurrent edits.
 5. If validation fails, call \`explain_validation\` with the issue to get the constraint and a runnable example.
 6. Check results with \`simulate_mission\` and \`balance_report\` before calling the work done.
 
@@ -244,7 +244,7 @@ npx towerforge mcp:connect . --client claude-code --write   # or one-shot into t
 2. \`get_project_summary\` / \`validate_project\` — state + \`revisions\` for optimistic concurrency.
 3. \`dry_run_balance_patch\` — preview a change as a leaf-level diff before committing.
 4. Narrow writes with \`ifRevision\`: \`set_enemy_stat\`, \`upsert_tower\`, \`upsert_entity\`,
-   \`add_wave_group\`, \`write_map\`, \`bind_sprite\`, \`delete_entity\` (reference-aware).
+   \`add_wave_group\`, \`write_map\`, \`bind_sprite\`, \`bind_mission_music\`, \`import_asset\`, \`upsert_story_comic\`, \`set_battle_background\`, \`delete_entity\` (reference-aware).
 5. \`explain_validation\` — turn any validation error code into a constraint + runnable example.
 6. \`simulate_mission\` + \`balance_report\` — verify the game still plays and stays winnable.
 

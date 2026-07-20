@@ -10,6 +10,8 @@ import {
   runtimeChildEnv
 } from "./agent-runtime.mjs";
 
+const PNG_1PX = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 const tempRoots = new Set();
 const originalEnv = {
   data: process.env.TOWERFORGE_USER_DATA_DIR,
@@ -95,6 +97,7 @@ describe("Codex App Server adapter", () => {
     const root = tempRoot();
     const fakeCodex = path.join(root, "fake-codex.mjs");
     fs.writeFileSync(fakeCodex, `
+      import fs from "node:fs";
       import readline from "node:readline";
       const rl = readline.createInterface({ input: process.stdin });
       const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
@@ -102,14 +105,17 @@ describe("Codex App Server adapter", () => {
         const msg = JSON.parse(line);
         if (msg.method === "initialize") return send({ id: msg.id, result: { userAgent: "fake" } });
         if (msg.method === "account/read") return send({ id: msg.id, result: { account: { type: "chatgpt", planType: "plus", email: null }, requiresOpenaiAuth: true } });
+        if (msg.method === "model/list") return send({ id: msg.id, result: { data: [{ model: "gpt-test", displayName: "GPT Test", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }], defaultReasoningEffort: "high", inputModalities: ["text", "image"], isDefault: true }] } });
         if (msg.method === "account/login/start") return send({ id: msg.id, result: { type: "chatgpt", loginId: "login-1", authUrl: "https://auth.openai.com/oauth/authorize?client_id=test" } });
         if (msg.method === "thread/start") {
-          if (msg.params.cwd.includes("game.tdproj") || msg.params.sandbox !== "read-only" || !msg.params.ephemeral || msg.params.dynamicTools?.[0]?.name !== "towerforge") process.exit(9);
+          if (msg.params.cwd.includes("game.tdproj") || msg.params.sandbox !== "read-only" || !msg.params.ephemeral || msg.params.dynamicTools?.[0]?.name !== "towerforge" || msg.params.dynamicTools[0].tools?.length !== 1 || msg.params.dynamicTools[0].tools[0].name !== "validate_project") process.exit(9);
           return send({ id: msg.id, result: { thread: { id: "thread-1" } } });
         }
         if (msg.method === "turn/start") {
           const policy = msg.params.sandboxPolicy;
           if (msg.params.approvalPolicy !== "never" || policy?.type !== "readOnly" || policy?.access?.type !== "restricted" || policy?.access?.readableRoots?.length !== 1 || policy.access.readableRoots[0] !== msg.params.cwd) process.exit(10);
+          const image = msg.params.input?.find((item) => item.type === "localImage");
+          if (msg.params.effort !== "high" || !image?.path.startsWith(msg.params.cwd) || !fs.existsSync(image.path)) process.exit(11);
           send({ id: msg.id, result: { turn: { id: "turn-1", status: "inProgress", items: [] } } });
           return send({ id: 900, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", callId: "call-1", namespace: "towerforge", tool: "validate_project", arguments: { projectDir: "/outside/project" } } });
         }
@@ -123,23 +129,35 @@ describe("Codex App Server adapter", () => {
     process.env.TOWERFORGE_CODEX_BIN = fakeCodex;
     const calls = [];
     const bridge = new AgentRuntimeBridge(bridgeOptions(root, {
+      tools: [
+        { name: "validate_project", description: "Validate", inputSchema: { type: "object", properties: {} } },
+        { name: "upsert_entity", description: "Write", inputSchema: { type: "object", properties: {} } }
+      ],
       callTool: async (name, input) => { calls.push({ name, input }); return { ok: true }; }
     }));
 
     try {
       await expect(bridge.status("codex")).resolves.toMatchObject({ available: true, connected: true, subscription: "plus" });
       await expect(bridge.connect("codex")).resolves.toMatchObject({ authUrl: expect.stringContaining("auth.openai.com") });
+      await expect(bridge.models("codex")).resolves.toMatchObject({
+        models: [expect.objectContaining({ id: "gpt-test", label: "GPT Test", reasoningLevels: ["low", "high"], defaultReasoning: "high", isDefault: true })]
+      });
       const events = [];
       const result = await bridge.runChat({
         provider: "codex",
         model: "default",
+        reasoning: "high",
+        attachments: [{ name: "private/path.png", mimeType: "image/png", data: PNG_1PX }],
         history: [{ role: "user", content: "Validate" }],
+        allowedToolNames: ["validate_project"],
         send: (event) => events.push(event),
         signal: new AbortController().signal
       });
       expect(calls).toEqual([{ name: "validate_project", input: { projectDir: path.join(root, "game.tdproj") } }]);
       expect(events).toContainEqual({ type: "text", text: "Project is valid." });
       expect(result.assistantText.join("")).toBe("Project is valid.");
+      const workspace = path.join(root, "user-data", "agent-runtimes", "workspace");
+      expect(fs.readdirSync(workspace).filter((entry) => entry.startsWith("turn-attachments-"))).toEqual([]);
     } finally {
       await bridge.close();
     }
@@ -151,12 +169,15 @@ describe("Claude Agent SDK adapter", () => {
     const root = tempRoot();
     process.env.TOWERFORGE_USER_DATA_DIR = path.join(root, "user-data");
     let capturedOptions;
+    let capturedPrompt;
     const fakeSdk = {
       tool: (name, _description, _shape, handler) => ({ name, handler }),
       createSdkMcpServer: ({ tools }) => ({ type: "sdk", name: "towerforge", instance: { tools } }),
-      query: ({ options }) => {
+      query: ({ options, prompt }) => {
         capturedOptions = options;
         return (async function* () {
+          if (typeof prompt === "string") capturedPrompt = prompt;
+          else for await (const message of prompt) capturedPrompt = message;
           const selected = options.mcpServers.towerforge.instance.tools.find((tool) => tool.name === "validate_project");
           await selected.handler({ projectDir: "/outside/project" });
           yield { type: "assistant", message: { content: [{ type: "text", text: "Claude validated it." }] } };
@@ -166,6 +187,10 @@ describe("Claude Agent SDK adapter", () => {
     };
     const calls = [];
     const bridge = new AgentRuntimeBridge(bridgeOptions(root, {
+      tools: [
+        { name: "validate_project", description: "Validate", inputSchema: { type: "object", properties: {} } },
+        { name: "upsert_entity", description: "Write", inputSchema: { type: "object", properties: {} } }
+      ],
       callTool: async (name, input) => { calls.push({ name, input }); return { ok: true }; },
       claudeSdkLoader: async () => fakeSdk
     }));
@@ -175,7 +200,10 @@ describe("Claude Agent SDK adapter", () => {
       await bridge.runChat({
         provider: "claude-code",
         model: "sonnet",
+        reasoning: "high",
+        attachments: [{ name: "capture.png", mimeType: "image/png", data: PNG_1PX }],
         history: [{ role: "user", content: "Validate" }],
+        allowedToolNames: ["validate_project"],
         send: (event) => events.push(event),
         signal: new AbortController().signal
       });
@@ -183,9 +211,42 @@ describe("Claude Agent SDK adapter", () => {
       expect(capturedOptions.tools).toEqual([]);
       expect(capturedOptions.settingSources).toEqual([]);
       expect(capturedOptions.persistSession).toBe(false);
+      expect(capturedOptions.effort).toBe("high");
+      expect(capturedPrompt.message.content).toContainEqual(expect.objectContaining({
+        type: "image",
+        source: expect.objectContaining({ type: "base64", media_type: "image/png" })
+      }));
       await expect(capturedOptions.canUseTool("Read", { file_path: "/etc/passwd" })).resolves.toMatchObject({ behavior: "deny", interrupt: true });
       await expect(capturedOptions.canUseTool("mcp__towerforge__validate_project", {})).resolves.toMatchObject({ behavior: "allow" });
+      await expect(capturedOptions.canUseTool("mcp__towerforge__upsert_entity", {})).resolves.toMatchObject({ behavior: "deny", interrupt: true });
       expect(events).toContainEqual({ type: "text", text: "Claude validated it." });
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  it("loads the official Claude model catalog without enabling project tools", async () => {
+    const root = tempRoot();
+    process.env.TOWERFORGE_USER_DATA_DIR = path.join(root, "user-data");
+    let capturedOptions;
+    let closed = false;
+    const bridge = new AgentRuntimeBridge(bridgeOptions(root, {
+      claudeSdkLoader: async () => ({
+        query: ({ options }) => {
+          capturedOptions = options;
+          return {
+            supportedModels: async () => [{ value: "sonnet", displayName: "Sonnet", description: "Balanced", supportsEffort: true, supportedEffortLevels: ["low", "high"] }],
+            close: () => { closed = true; }
+          };
+        }
+      })
+    }));
+    try {
+      await expect(bridge.models("claude-code")).resolves.toMatchObject({
+        models: [expect.objectContaining({ id: "sonnet", reasoningLevels: ["low", "high"], inputModalities: ["text", "image"] })]
+      });
+      expect(capturedOptions).toMatchObject({ tools: [], settingSources: [], persistSession: false });
+      expect(closed).toBe(true);
     } finally {
       await bridge.close();
     }

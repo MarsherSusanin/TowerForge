@@ -1,0 +1,22 @@
+{
+  "seenStoragePrefix": "story_seen_",
+  "comics": {
+    "frontier_briefing": {
+      "missionId": "tutorial_01",
+      "title": "The Frontier Holds",
+      "trigger": "beforeMission",
+      "replay": "once",
+      "panels": [
+        {
+          "speaker": "Scout",
+          "text": "The first wave is crossing the old frontier road. Build where the route bends and protect the crystal core.",
+          "spriteId": "frontier_before_battle"
+        },
+        {
+          "speaker": "Commander",
+          "text": "Start with an Arrow Tower. Add heavier fire only when the armored enemies arrive."
+        }
+      ]
+    }
+  }
+}

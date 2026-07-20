@@ -8,10 +8,13 @@ import { readMapSources } from "./map-compiler.mjs";
 import { migrateProjectFiles } from "./project-migrations.mjs";
 import { defaultVisuals, normalizeManifest, normalizeVisuals, validateProjectSchemas } from "./project-schema.mjs";
 import { mergeValidationResults } from "./trace.mjs";
+import { readTowerScriptFiles } from "./project-scripts.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(process.env["TOWERFORGE_RUNTIME_ROOT"] || path.resolve(__dirname, "../../.."));
-const BUNDLED_RUNTIME = process.env["TOWERFORGE_DESKTOP"] === "1" || process.env["TOWERFORGE_BUNDLED_RUNTIME"] === "1";
+// Desktop security mode is also used by source-level integration tests. Only the explicit
+// bundled-runtime flag may disable engine compilation and require the packaged engine dist.
+const BUNDLED_RUNTIME = process.env["TOWERFORGE_BUNDLED_RUNTIME"] === "1";
 
 export function resolveProjectDir(explicitDir, args = process.argv.slice(2)) {
   if (explicitDir) return path.resolve(explicitDir);
@@ -41,6 +44,7 @@ export function readRawProjectFiles(projectDir) {
 
   const contentDir = path.join(projectDir, "content");
   const mapsDir = path.join(projectDir, "maps", "compiled");
+  const scriptCatalog = readTowerScriptFiles(projectDir);
   return {
     projectDir,
     manifest: readJsonOr(projectFile, {}),
@@ -64,7 +68,10 @@ export function readRawProjectFiles(projectDir) {
       schemaVersion: 1,
       defaults: { web: "web-pwa" },
       targets: {}
-    })
+    }),
+    scripts: scriptCatalog.scripts,
+    scriptFiles: scriptCatalog.files,
+    scriptIssues: scriptCatalog.issues
   };
 }
 
@@ -86,6 +93,9 @@ export function normalizeProjectFiles(rawFiles) {
     storyComics: normalizeStoryComics(migrated.files.storyComics),
     battleBackgrounds: normalizeBattleBackgrounds(migrated.files.battleBackgrounds),
     buildTargets: normalizeBuildTargets(migrated.files.buildTargets),
+    scripts: migrated.files.scripts ?? {},
+    scriptFiles: migrated.files.scriptFiles ?? {},
+    scriptIssues: migrated.files.scriptIssues ?? [],
     appliedMigrations: migrated.migrations
   };
 }
@@ -99,6 +109,9 @@ export function projectSummary(files) {
     manifest: files.manifest,
     constants: files.balance.constants,
     currencies: files.balance.currencies,
+    defaultDifficultyId: files.balance.defaultDifficultyId,
+    difficulties: files.balance.difficulties,
+    metaProgression: files.balance.metaProgression,
     defaultMissionId: files.balance.defaultMissionId,
     abilities: files.balance.abilities,
     enemies: files.balance.enemies,
@@ -112,6 +125,8 @@ export function projectSummary(files) {
     buildTargets: files.buildTargets,
     maps: files.maps,
     mapSources: files.mapSources,
+    scripts: files.scripts,
+    scriptFiles: files.scriptFiles,
     schemaVersions: {
       project: files.manifest.schemaVersion ?? 1,
       buildTargets: files.buildTargets.schemaVersion ?? 1,
@@ -140,6 +155,7 @@ export async function loadContentRegistry(projectDir) {
     balance: files.balance,
     maps: files.maps,
     worldMap: files.worldMap,
+    scripts: files.scripts,
     visuals: files.visuals,
     storyComics: files.storyComics,
     battleBackgrounds: files.battleBackgrounds
@@ -168,13 +184,14 @@ export async function runMissionSmoke(projectDir, missionId, duration = 180) {
   const placements = autoPlaceInitialTowers(game, content.missions[resolvedMissionId].buildTowerIds ?? []);
   const startResult = game.startNextWave();
   const eventCounts = {};
+  const enemyStats = {};
   const eventTimeline = [];
   const resourceTimeline = [];
   const milestones = [];
   const maxTimelineEvents = 200;
   const maxResourceSamples = 80;
   const milestoneTargets = [0, 0.25, 0.5, 0.75, 1].map((n) => duration * n);
-  recordEvents(eventCounts, eventTimeline, game.lastEvents, 0, maxTimelineEvents);
+  recordEvents(eventCounts, eventTimeline, game.lastEvents, 0, maxTimelineEvents, enemyStats);
   recordMilestones(milestones, game.getSnapshot(), 0, milestoneTargets);
   recordResourceSample(resourceTimeline, game.getSnapshot(), 0, maxResourceSamples);
 
@@ -186,7 +203,7 @@ export async function runMissionSmoke(projectDir, missionId, duration = 180) {
     elapsed += step;
     const tickElapsed = Math.round(elapsed * 10) / 10;
     const tickSnapshot = game.getSnapshot();
-    recordEvents(eventCounts, eventTimeline, game.lastEvents, tickElapsed, maxTimelineEvents);
+    recordEvents(eventCounts, eventTimeline, game.lastEvents, tickElapsed, maxTimelineEvents, enemyStats);
     recordMilestones(milestones, tickSnapshot, tickElapsed, milestoneTargets);
     recordResourceSample(resourceTimeline, tickSnapshot, tickElapsed, maxResourceSamples);
   }
@@ -226,11 +243,27 @@ export async function runMissionSmoke(projectDir, missionId, duration = 180) {
       tickStep
     },
     eventCounts,
+    enemyStats,
     eventTimeline,
     resourceTimeline,
     milestones,
     waveStats: summarizeWaves(mission.waves, content.enemies),
     nextValidActions: nextValidActionsForSmoke(snapshot)
+  };
+}
+
+/**
+ * Turn the deterministic smoke run into an agent-friendly diagnosis. The raw timeline remains
+ * available for evidence, while findings stay compact and stable enough for automation.
+ */
+export async function runMissionPlaytestReport(projectDir, missionId, duration = 180) {
+  const report = await runMissionSmoke(projectDir, missionId, duration);
+  return {
+    ...report,
+    diagnosis: diagnoseMissionSmoke(report),
+    nextValidActions: report.outcome === "victory"
+      ? ["balance_report", "release_readiness"]
+      : ["balance_report", "get_entity", "apply_validated_patch"]
   };
 }
 
@@ -549,13 +582,107 @@ function summarizeWaves(waves, enemies) {
   });
 }
 
-function recordEvents(counts, timeline, events, elapsed, maxTimelineEvents) {
+function recordEvents(counts, timeline, events, elapsed, maxTimelineEvents, enemyStats = {}) {
   for (const event of events ?? []) {
     counts[event.type] = (counts[event.type] ?? 0) + 1;
+    if (event.enemyTypeId) {
+      const stats = enemyStats[event.enemyTypeId] ??= { killed: 0, leaked: 0, hits: 0, damageTaken: 0, leakDamage: 0, firstLeakAt: null };
+      if (event.type === "enemyKilled") stats.killed += 1;
+      if (event.type === "enemyLeaked") {
+        stats.leaked += 1;
+        stats.leakDamage += event.damage ?? 0;
+        if (stats.firstLeakAt == null) stats.firstLeakAt = elapsed;
+      }
+      if (event.type === "enemyHit") {
+        stats.hits += 1;
+        stats.damageTaken += event.damage ?? 0;
+      }
+    }
     if (timeline.length < maxTimelineEvents) {
       timeline.push(summarizeEvent(event, elapsed));
     }
   }
+}
+
+function diagnoseMissionSmoke(report) {
+  const findings = [];
+  const kills = report.eventCounts.enemyKilled ?? 0;
+  const leaks = report.eventCounts.enemyLeaked ?? 0;
+  const expectedEnemies = report.waveStats.reduce((sum, wave) => sum + wave.count, 0);
+  const completedWaves = report.eventCounts.waveCleared ?? 0;
+
+  if (!report.startResult.ok) {
+    findings.push({
+      code: "WAVE_START_REJECTED",
+      severity: "error",
+      message: `The first wave could not start: ${report.startResult.reason ?? "unknown reason"}.`,
+      evidence: { startResult: report.startResult },
+      recommendation: "Validate the mission, map, and wave-set references before tuning balance."
+    });
+  }
+  if (report.towersBuilt === 0 && expectedEnemies > 0) {
+    findings.push({
+      code: "NO_AUTO_PLACEMENT",
+      severity: "error",
+      message: "The smoke strategy could not place any tower.",
+      evidence: { availableTowers: report.availableTowers, startingResources: report.startingResources },
+      recommendation: "Check buildable tiles, tower costs, footprint rules, and starting resources."
+    });
+  }
+  if (report.towersBuilt > 0 && (report.eventCounts.towerFired ?? 0) === 0 && expectedEnemies > 0) {
+    findings.push({
+      code: "NO_TOWER_ENGAGEMENT",
+      severity: "error",
+      message: "Towers were placed but never fired.",
+      evidence: { placements: report.placements, pathLength: report.pathLength },
+      recommendation: "Inspect tower range, target classes, route geometry, and placement constraints."
+    });
+  }
+  if (leaks > 0) {
+    const pressure = Object.entries(report.enemyStats)
+      .filter(([, stats]) => stats.leaked > 0)
+      .sort(([, a], [, b]) => b.leaked - a.leaked || b.leakDamage - a.leakDamage)
+      .map(([enemyTypeId, stats]) => ({ enemyTypeId, leaked: stats.leaked, leakDamage: stats.leakDamage, firstLeakAt: stats.firstLeakAt }));
+    findings.push({
+      code: "ENEMY_LEAKS",
+      severity: report.outcome === "defeat" ? "error" : "warning",
+      message: `${leaks} enem${leaks === 1 ? "y" : "ies"} leaked for ${pressure.reduce((sum, item) => sum + item.leakDamage, 0)} core damage.`,
+      evidence: { pressure },
+      recommendation: "Inspect the leading enemy types, then compare near-path, far-path, and upgrade strategies with balance_report."
+    });
+  }
+  if (report.outcome === "playing") {
+    findings.push({
+      code: "SIMULATION_INCOMPLETE",
+      severity: "warning",
+      message: `The mission was still playing after ${report.elapsed} time units.`,
+      evidence: { completedWaves, totalWaves: report.totalWaves, activeEnemies: report.activeEnemies },
+      recommendation: "Run playtest_report with a longer duration or inspect long inter-wave delays."
+    });
+  }
+
+  const status = findings.some((finding) => finding.severity === "error")
+    ? "error"
+    : findings.some((finding) => finding.severity === "warning") ? "warning" : "pass";
+  const summary = status === "pass"
+    ? `Smoke strategy completed ${completedWaves}/${report.totalWaves} waves with ${report.coreHp}/${report.maxCoreHp} core HP.`
+    : `${findings.length} diagnostic finding${findings.length === 1 ? "" : "s"}; outcome ${report.outcome}.`;
+  return {
+    status,
+    summary,
+    metrics: {
+      expectedEnemies,
+      kills,
+      leaks,
+      completedWaves,
+      totalWaves: report.totalWaves,
+      coreHpLost: report.maxCoreHp - report.coreHp
+    },
+    enemyPressure: Object.entries(report.enemyStats)
+      .map(([enemyTypeId, stats]) => ({ enemyTypeId, ...stats }))
+      .sort((a, b) => b.leaked - a.leaked || b.killed - a.killed || a.enemyTypeId.localeCompare(b.enemyTypeId)),
+    findings
+  };
 }
 
 function summarizeEvent(event, elapsed) {

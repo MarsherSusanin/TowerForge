@@ -20,7 +20,7 @@ const cliDir = path.resolve(__dirname, "..");
 const studioScript = path.resolve(cliDir, "../studio/server.mjs");
 const mcpScript = path.resolve(cliDir, "../mcp/server.mjs");
 
-const COMMANDS = ["validate", "sim", "balance", "build", "package", "maps:compile", "migrate", "studio", "create", "mcp", "mcp:connect"];
+const COMMANDS = ["validate", "sim", "balance", "build", "package", "maps:compile", "migrate", "studio", "create", "export", "import", "inspect-pack", "themes:list", "themes:apply", "mcp", "mcp:connect"];
 
 const [, , cmd, ...rest] = process.argv;
 
@@ -36,11 +36,16 @@ Commands:
   sim <missionId>       Run a headless mission smoke simulation.
   balance               Simulation-driven balance report (win-rate, advisor flags).
   build                 Build a playable static web bundle.
-  package               Wrap the web build into a native app (--kind mobile|desktop).
+  package               Create a portable web archive or native wrapper (--kind web|mobile|desktop).
   maps:compile          Compile maps/src/*.tmj into maps/compiled/maps.json.
   migrate               Inspect or write .tdproj schema migrations.
   studio                Launch the visual studio editor.
   create <name>         Scaffold a new .tdproj project.
+  export                Export a validated project as one verified .tdpack file.
+  import <file>         Import and validate a .tdpack into a new .tdproj directory.
+  inspect-pack <file>   Verify a .tdpack without extracting it.
+  themes:list           List bundled visual theme packs.
+  themes:apply <id>     Preview or apply a validated theme pack (--dry-run).
   mcp                   Start the MCP server exposing constructor tools to AI agents.
   mcp:connect           Print (or --write) MCP config for Claude Code, Codex, Claude Desktop,
                         Cursor, VS Code — connect an AI agent to this project in one step.
@@ -62,6 +67,7 @@ Options for sim:
 Options for build:
   --target <targetId>   Build target ID from build-targets.json.
   --out <dir>           Output directory inside the project.
+  --single-file         Also emit index.single.html, runnable directly via file://.
 
 Options for migrate:
   --write               Persist migrated files and create .towerforge backups.
@@ -70,10 +76,13 @@ Examples:
   towerforge validate --project ./my-game.tdproj
   towerforge sim meadow_01 --project ./my-game.tdproj
   towerforge build --project ./my-game.tdproj --target web-pwa
+  towerforge package --project ./my-game.tdproj --kind web
   towerforge maps:compile --project ./my-game.tdproj
   towerforge migrate --project ./my-game.tdproj --write
   towerforge studio --project ./my-game.tdproj --port 3000
   towerforge create my-game --dir ~/Projects
+  towerforge export --project ./my-game.tdproj --out ./my-game.tdpack
+  towerforge import ./my-game.tdpack --dir ~/Projects
 `.trim());
 }
 
@@ -154,10 +163,18 @@ if (cmd === "create") {
   runScript(path.join(cliDir, "create.mjs"), rest);
 }
 
+if (cmd === "export" || cmd === "import" || cmd === "inspect-pack") {
+  runScript(path.join(cliDir, "project-pack.mjs"), [cmd === "inspect-pack" ? "inspect" : cmd, ...rest]);
+}
+
 if (cmd === "mcp") {
   runScript(mcpScript, rest);
 }
 
 if (cmd === "mcp:connect") {
   runScript(path.join(cliDir, "mcp-connect.mjs"), rest);
+}
+
+if (cmd === "themes:list" || cmd === "themes:apply") {
+  runScript(path.join(cliDir, "theme-pack.mjs"), [cmd === "themes:list" ? "list" : "apply", ...rest]);
 }

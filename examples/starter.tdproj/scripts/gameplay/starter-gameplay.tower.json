@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "starter_gameplay",
+  "label": "Starter gameplay hooks",
+  "description": "A safe TowerScript example. Extend handlers or add more files under scripts/.",
+  "enabled": true,
+  "bindings": [
+    {
+      "scope": "global"
+    }
+  ],
+  "initialState": {
+    "wavesStarted": 0
+  },
+  "handlers": {
+    "waveStarted": [
+      {
+        "id": "count_waves",
+        "actions": [
+          {
+            "action": "incrementState",
+            "key": "wavesStarted",
+            "amount": 1
+          }
+        ]
+      }
+    ]
+  }
+}
