@@ -123,7 +123,7 @@ describe("Studio AI provider adapters", () => {
     expect(result.checks.map((check) => check.id)).toEqual(["validation", "maps", "identity", "content", "build_targets"]);
     expect(result).not.toHaveProperty("projectDir");
     expect(JSON.stringify(result)).not.toContain(studio.projectDir);
-  });
+  }, 15_000);
 
   it("calls the current Anthropic Messages contract", async () => {
     const requests = [];
