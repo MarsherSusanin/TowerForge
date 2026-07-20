@@ -68,11 +68,27 @@ export function createProject({ name, parentDir = process.cwd(), templateName = 
       }
     }
   };
+  const starterScript = {
+    schemaVersion: 1,
+    id: "starter_gameplay",
+    label: "Starter gameplay hooks",
+    description: "A safe TowerScript example. Extend handlers or add more files under scripts/.",
+    enabled: true,
+    bindings: [{ scope: "global" }],
+    initialState: { wavesStarted: 0 },
+    handlers: {
+      waveStarted: [{
+        id: "count_waves",
+        actions: [{ action: "incrementState", key: "wavesStarted", amount: 1 }]
+      }]
+    }
+  };
 
   ensureDir(path.join(projectDir, "content"));
   ensureDir(path.join(projectDir, "maps", "compiled"));
   ensureDir(path.join(projectDir, "maps", "src"));
   ensureDir(path.join(projectDir, "assets"));
+  ensureDir(path.join(projectDir, "scripts", "gameplay"));
   writeJson(path.join(projectDir, "project.json"), projectJson);
   writeJson(path.join(projectDir, "content", "balance.json"), balanceJson);
   writeJson(path.join(projectDir, "content", "world-map.json"), worldMapJson);
@@ -82,6 +98,7 @@ export function createProject({ name, parentDir = process.cwd(), templateName = 
     writeJson(path.join(projectDir, "maps", "src", `${mapId}.tmj`), source);
   }
   writeJson(path.join(projectDir, "maps", "compiled", "maps.json"), mapsJson);
+  writeJson(path.join(projectDir, "scripts", "gameplay", "starter-gameplay.tower.json"), starterScript);
   fs.writeFileSync(path.join(projectDir, ".gitignore"), ".towerforge/\n*.bak\n", "utf8");
   fs.writeFileSync(path.join(projectDir, "AGENTS.md"), agentProjectGuide(projectName), "utf8");
 

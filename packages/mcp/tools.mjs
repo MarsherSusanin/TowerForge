@@ -16,16 +16,33 @@ import {
   readRawProjectFiles,
   repoRoot,
   runBalanceSweepForProject,
+  runMissionPlaytestReport,
   runMissionSmoke,
   validateProjectDir
 } from "../cli/lib/project-loader.mjs";
 import { compileMapSource, compileMapSources, readMapSources, writeCompiledMaps, writeMapSource } from "../cli/lib/map-compiler.mjs";
+import { commitProjectAssetImport, planProjectAssetImport } from "../cli/lib/assets.mjs";
+import { exportProjectPack, inspectProjectPack } from "../cli/lib/project-pack.mjs";
 import { packageProject } from "../cli/lib/packaging.mjs";
 import { validateProjectSchemas } from "../cli/lib/project-schema.mjs";
+import { applyThemePack, listThemePacks, previewThemePack } from "../cli/lib/theme-packs.mjs";
+import { listProjectTree } from "../cli/lib/project-tree.mjs";
+import { resolveTowerScriptPath, restoreTowerScriptWrite, scriptFileRevision, writeTowerScriptAtomic } from "../cli/lib/project-scripts.mjs";
 import { findEntityReferences } from "../cli/lib/references.mjs";
 import { mergeValidationResults } from "../cli/lib/trace.mjs";
+import {
+  CONTENT_RECIPE_COLLECTIONS,
+  contentRecipeContext,
+  listContentRecipes,
+  materializeContentRecipe
+} from "../cli/lib/content-recipes.mjs";
+import { TOWERFORGE_AGENT_GUIDE_VERSION } from "./agent-instructions.mjs";
 
-const BALANCE_PATCH_KEYS = ["enemies", "towers", "waveSets", "missions", "abilities", "constants", "currencies", "defaultMissionId"];
+const BALANCE_PATCH_KEYS = [
+  "enemies", "towers", "waveSets", "missions", "abilities", "constants", "currencies", "defaultMissionId",
+  "defaultDifficultyId", "difficulties", "metaProgression"
+];
+const SCHEMA_DOMAINS = Object.freeze(["all", "combat", "missions", "progression", "scripts", "assets"]);
 
 // Maps an upsert_entity/delete_entity `collection` to (a) the balance.json key, (b) the shape
 // (a map keyed by id, or an array of {id,...} items — currencies only), and (c) the
@@ -39,6 +56,64 @@ const ENTITY_COLLECTIONS = {
   currencies: { balanceKey: "currencies", shape: "array", referenceKind: "currency" }
 };
 
+const READ_ENTITY_COLLECTIONS = Object.freeze([
+  "towers",
+  "enemies",
+  "missions",
+  "abilities",
+  "waveSets",
+  "currencies",
+  "maps",
+  "mapSources",
+  "visualSprites",
+  "audioSounds",
+  "musicTracks",
+  "storyComics",
+  "battleBackgrounds"
+]);
+
+function entityEntries(files, collection) {
+  if (!READ_ENTITY_COLLECTIONS.includes(collection)) {
+    throw new Error(`Unknown entity collection "${collection}". Expected one of ${READ_ENTITY_COLLECTIONS.join(", ")}.`);
+  }
+  if (collection === "maps") return Object.entries(files.maps ?? {});
+  if (collection === "mapSources") return Object.entries(files.mapSources ?? {});
+  if (collection === "storyComics") return Object.entries(files.storyComics?.comics ?? {});
+  if (collection === "battleBackgrounds") return Object.entries(files.battleBackgrounds?.definitions ?? {});
+  if (collection === "visualSprites") return Object.entries(files.visuals?.sprites ?? {});
+  if (collection === "audioSounds") return Object.entries(files.visuals?.audio?.sounds ?? {});
+  if (collection === "musicTracks") return Object.entries(files.visuals?.audio?.musicTracks ?? {});
+  const value = files.balance?.[collection];
+  if (collection === "currencies") {
+    return (Array.isArray(value) ? value : []).map((currency) => [currency.id, currency]);
+  }
+  return Object.entries(value ?? {});
+}
+
+function entityListItem(collection, id, value) {
+  if (collection === "towers") return { id, label: value.label ?? id, attackKind: value.attack?.kind ?? null, range: value.range ?? null, cost: value.cost ?? {} };
+  if (collection === "enemies") return { id, label: value.label ?? id, maxHp: value.maxHp ?? null, speed: value.speed ?? null, coreDamage: value.coreDamage ?? null, movementKind: value.movementKind ?? "path", targetClass: value.targetClass ?? "ground" };
+  if (collection === "missions") return { id, label: value.label ?? id, mapId: value.mapId ?? null, waveSetId: value.waveSetId ?? null, towerCount: value.buildTowerIds?.length ?? 0, abilityCount: value.abilityIds?.length ?? 0 };
+  if (collection === "abilities") return { id, label: value.label ?? id, preset: value.effects?.length ? null : id, effectKinds: (value.effects ?? []).map((effect) => effect.kind) };
+  if (collection === "waveSets") return { id, waveCount: Array.isArray(value) ? value.length : 0, groupCount: Array.isArray(value) ? value.reduce((count, wave) => count + (wave.groups?.length ?? 0), 0) : 0 };
+  if (collection === "currencies") return { id, label: value.label ?? id };
+  if (collection === "maps") return { id, width: value.width ?? null, height: value.height ?? null, routeIds: (value.pathRoutes ?? []).map((route) => route.id) };
+  if (collection === "storyComics") return { id, missionId: value.missionId ?? null, trigger: value.trigger ?? "beforeMission", panelCount: value.panels?.length ?? 0 };
+  if (collection === "battleBackgrounds") return { id, missionId: value.missionId ?? id, color: value.color ?? null, spriteId: value.spriteId ?? null };
+  if (collection === "visualSprites") return { id, src: value.src ?? null, atlas: value.atlas ?? null, frame: value.frame ?? null };
+  if (collection === "audioSounds") return { id, src: value.src ?? null };
+  if (collection === "musicTracks") return { id, src: value.src ?? null, volume: value.volume ?? 1 };
+  return { id, width: value.width ?? null, height: value.height ?? null, type: value.type ?? null };
+}
+
+function entityRevision(files, collection) {
+  if (["maps", "mapSources"].includes(collection)) return null;
+  if (["visualSprites", "audioSounds", "musicTracks"].includes(collection)) return computeRevision(files.visuals);
+  if (collection === "storyComics") return computeRevision(files.storyComics);
+  if (collection === "battleBackgrounds") return computeRevision(files.battleBackgrounds);
+  return computeRevision(files.balance);
+}
+
 // A small, hand-curated set of the highest-value validation codes (2.6): every issue already
 // carries an auto-derived `code` (see deriveValidationCode in validate.ts/project-schema.mjs) and,
 // where cheap, its own `hint`/`expected`/`got` — this map adds a runnable EXAMPLE snippet for the
@@ -49,7 +124,7 @@ const ENTITY_COLLECTIONS = {
 // below — still gets the constraint explanation, not just the example.
 const EXPLAIN_CURATED = {
   TOWER_ATTACK_KIND: {
-    hint: "attack.kind must be one of the engine-implemented kinds (single, pulse, sniper, antiair, splash, support, support_buff). Call describe_schema to see each kind's required fields.",
+    hint: "Use the universal pipeline kind for new targeting/delivery/effect combinations, or one of the supported legacy kinds. Call describe_schema to see each kind's required fields.",
     example: { attack: { kind: "single", fireRate: 1, damagePerStack: 1, startingStacks: 1, maxStacks: 3, upgradeCost: 5 } },
     seeAlso: "describe_schema"
   },
@@ -80,8 +155,38 @@ export const TOOLS = [
   {
     name: "describe_schema",
     description:
-      "Return the machine-readable content schema: every tower attack kind (a closed, engine-implemented set) with required fields; the 3 preset mission abilities (path_water/strike/freeze, usable with no extra fields); and the ability EFFECT vocabulary (damage, status) a CUSTOM ability id (any string) composes via its `effects` array — no engine code needed for a new ability, just declare effects. Also returns the currency-id rule. Call this BEFORE authoring a tower/enemy/ability so the shape is right on the first attempt instead of iterating against validate_project errors.",
-    inputSchema: { type: "object", properties: {} }
+      "Return versioned machine-readable authoring contracts by domain: universal combat pipeline and abilities, mission economy/objectives, difficulty/meta progression, deterministic TowerScript, or safe asset/theme workflows. Call this before creating a new shape; use domain to keep the response focused.",
+    inputSchema: {
+      type: "object",
+      properties: { domain: { type: "string", enum: SCHEMA_DOMAINS, description: "Focused contract to return; defaults to all." } },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "list_recipes",
+    description:
+      "List curated, production-oriented archetypes for enemies, towers, or missions. Recipes are shared with Studio's Add flow and are safer than inventing a raw entity shape from memory. Follow with get_recipe for a project-bound, runnable entity.",
+    inputSchema: {
+      type: "object",
+      properties: { collection: { type: "string", enum: CONTENT_RECIPE_COLLECTIONS } },
+      required: ["collection"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_recipe",
+    description:
+      "Materialize one curated enemy/tower/mission recipe against the current project. Mission references and support-tower targets are bound to real ids. Review the returned entity, choose a unique id, then write through upsert_entity with ifRevision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory. Defaults to the server's project." },
+        collection: { type: "string", enum: CONTENT_RECIPE_COLLECTIONS },
+        recipeId: { type: "string" }
+      },
+      required: ["collection", "recipeId"],
+      additionalProperties: false
+    }
   },
   {
     name: "explain_validation",
@@ -105,6 +210,45 @@ export const TOOLS = [
     }
   },
   {
+    name: "get_progression",
+    description:
+      "Read the complete effective defaultDifficultyId, difficulties, and metaProgression sections plus the balance revision. Call this before apply_progression_patch so unchanged multipliers, upgrades, and rewards are preserved.",
+    inputSchema: {
+      type: "object",
+      properties: { projectDir: { type: "string", description: "Path to the .tdproj directory. Defaults to the server's project." } },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "list_entities",
+    description:
+      "List compact summaries from one project collection (gameplay entities, maps, visual sprites, sounds, music tracks, story comics, or battle backgrounds). Use this before get_entity instead of guessing ids or requesting a broad project dump.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory. Defaults to the server's project." },
+        collection: { type: "string", enum: READ_ENTITY_COLLECTIONS }
+      },
+      required: ["collection"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_entity",
+    description:
+      "Read one effective normalized entity by collection and id. Returns the exact current values the engine sees plus the relevant revision for guarded writes. Prefer this after list_entities and before modifying an existing entity.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory. Defaults to the server's project." },
+        collection: { type: "string", enum: READ_ENTITY_COLLECTIONS },
+        id: { type: "string" }
+      },
+      required: ["collection", "id"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "list_missions",
     description: "List the missions defined in the project with their map, wave set, available towers, and availability.",
     inputSchema: {
@@ -122,6 +266,41 @@ export const TOOLS = [
     }
   },
   {
+    name: "release_readiness",
+    description:
+      "Run a read-only production-readiness audit over validation, map compilation, project identity, playable content, and build targets. Returns structured checks with stable ids and severities for Studio, CI, or an AI agent.",
+    inputSchema: {
+      type: "object",
+      properties: { projectDir: { type: "string", description: "Path to the .tdproj directory." } },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "inspect_project_pack",
+    description: "Verify a .tdpack previously exported into this project's .towerforge/exports directory. Checks container version, path allowlist, size limits, and every per-file SHA-256 without extracting it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the source .tdproj directory." },
+        fileName: { type: "string", description: "Basename such as my-game.tdpack; directories are rejected." }
+      },
+      required: ["fileName"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "export_project_pack",
+    description: "Validate and export the current project as one integrity-checked .tdpack under .towerforge/exports. The filename is confined to that directory; returns the archive SHA-256 for handoff or release notes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the source .tdproj directory." },
+        fileName: { type: "string", description: "Optional safe basename ending in .tdpack." }
+      },
+      additionalProperties: false
+    }
+  },
+  {
     name: "simulate_mission",
     description:
       "Run a deterministic headless smoke simulation of a mission (auto-places towers, starts waves) and return the outcome and event/wave statistics.",
@@ -132,6 +311,20 @@ export const TOOLS = [
         missionId: { type: "string", description: "Mission id to simulate. Defaults to the project's defaultMissionId." },
         duration: { type: "number", description: "Simulation duration in time units (default 180, capped at 3600 — the loop is synchronous)." }
       }
+    }
+  },
+  {
+    name: "playtest_report",
+    description:
+      "Run the deterministic auto-play smoke strategy and return a diagnosis with stable finding codes, compact metrics, per-enemy kill/leak pressure, evidence, recommendations, milestones, and the raw event/resource timeline. Prefer this over simulate_mission when deciding what to fix.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory. Defaults to the server's project." },
+        missionId: { type: "string", description: "Mission id to diagnose. Defaults to the project's defaultMissionId." },
+        duration: { type: "number", description: "Simulation duration in time units (default 180, capped at 3600)." }
+      },
+      additionalProperties: false
     }
   },
   {
@@ -171,6 +364,18 @@ export const TOOLS = [
       properties: {
         projectDir: { type: "string", description: "Path to the .tdproj directory." },
         targetId: { type: "string", description: "Build target id whose app metadata (appId/appName/version) to use. Defaults to the canonical web target." }
+      }
+    }
+  },
+  {
+    name: "package_web",
+    description:
+      "Create a portable, offline web release under <project>/web: a deterministic .zip, a file://-runnable index.single.html, the normal installable PWA build, and a zero-dependency loopback-only Node launcher. Does not upload or publish anything.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        targetId: { type: "string", description: "Optional web build target id." }
       }
     }
   },
@@ -218,7 +423,10 @@ export const TOOLS = [
             abilities: { type: "object" },
             constants: { type: "object" },
             currencies: { type: "array" },
-            defaultMissionId: { type: "string" }
+            defaultMissionId: { type: "string" },
+            defaultDifficultyId: { type: "string" },
+            difficulties: { type: "array" },
+            metaProgression: { type: "object" }
           }
         },
         ifRevision: IF_REVISION_PROPERTY
@@ -245,7 +453,10 @@ export const TOOLS = [
             abilities: { type: "object" },
             constants: { type: "object" },
             currencies: { type: "array" },
-            defaultMissionId: { type: "string" }
+            defaultMissionId: { type: "string" },
+            defaultDifficultyId: { type: "string" },
+            difficulties: { type: "array" },
+            metaProgression: { type: "object" }
           },
           additionalProperties: false
         }
@@ -272,13 +483,47 @@ export const TOOLS = [
             abilities: { type: "object" },
             constants: { type: "object" },
             currencies: { type: "array" },
-            defaultMissionId: { type: "string" }
+            defaultMissionId: { type: "string" },
+            defaultDifficultyId: { type: "string" },
+            difficulties: { type: "array" },
+            metaProgression: { type: "object" }
           },
           additionalProperties: false
         },
         ifRevision: IF_REVISION_PROPERTY
       },
       required: ["patch"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "dry_run_progression_patch",
+    description:
+      "Validate a candidate difficulty/meta-progression replacement in memory and return its leaf diff without writing. Read the complete source with get_progression first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        defaultDifficultyId: { type: "string" },
+        difficulties: { type: "array", description: "Complete difficulty definition list." },
+        metaProgression: { type: "object", description: "Complete currencies/upgrades/rewardsByMission object." }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "apply_progression_patch",
+    description:
+      "Apply only difficulty and persistent meta-progression sections. The complete candidate project is validated; writes use a balance revision guard, backup, and rollback. Call dry_run_progression_patch first, then pass its revision as ifRevision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        defaultDifficultyId: { type: "string" },
+        difficulties: { type: "array", description: "Complete difficulty definition list." },
+        metaProgression: { type: "object", description: "Complete currencies/upgrades/rewardsByMission object." },
+        ifRevision: IF_REVISION_PROPERTY
+      },
       additionalProperties: false
     }
   },
@@ -330,6 +575,77 @@ export const TOOLS = [
     }
   },
   {
+    name: "list_theme_packs",
+    description: "List bundled, locally stored visual theme packs and their renderer palettes. No project or network access is required.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "preview_theme_pack",
+    description: "Preview one bundled theme pack against the active project without writing. Returns affected files, missions, prior theme, and the revision required by apply_theme_pack.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        packId: { type: "string" }
+      },
+      required: ["packId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "list_project_tree",
+    description: "List the safe .tdproj tree. Build/cache directories, symlinks, credentials, private keys, and environment files are excluded. This tool never returns file contents.",
+    inputSchema: {
+      type: "object",
+      properties: { projectDir: { type: "string", description: "Path to the .tdproj directory." } },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_tower_script",
+    description: "Read one TowerScript definition by script id or project-relative scripts/**/*.tower.json path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        scriptId: { type: "string" },
+        path: { type: "string", description: "Project-relative .tower.json path." }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "upsert_tower_script",
+    description: "Dry-run or write one deterministic TowerScript under scripts/. Validates bindings, expressions, actions, references, and the complete project. Commits atomically with backup and rollback. Use dryRun:true first and pass the returned revision as ifRevision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        path: { type: "string", description: "Project-relative scripts/**/*.tower.json destination." },
+        script: { type: "object", description: "TowerScript definition with schemaVersion, id, bindings, and handlers." },
+        dryRun: { type: "boolean" },
+        ifRevision: { ...IF_REVISION_PROPERTY, description: "Optional revision of the complete scripts catalog." }
+      },
+      required: ["path", "script"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "apply_theme_pack",
+    description: "Apply one bundled theme pack after preview_theme_pack. The destination path is derived by TowerForge, every mission background is updated, the project is validated, and an invalid write is rolled back. Pass the preview revision as ifRevision; dryRun remains a compatibility alias for preview.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        packId: { type: "string", enum: ["verdant-frontier", "frostbound-citadel"] },
+        dryRun: { type: "boolean", description: "Return the exact files, missions, and prior theme without writing." },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["packId"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "bind_sprite",
     description: "Bind an existing sprite id to a tower, enemy, tile, or UI id in content/visuals.json and validate before writing.",
     inputSchema: {
@@ -342,6 +658,44 @@ export const TOOLS = [
         ifRevision: { ...IF_REVISION_PROPERTY, description: "Optional. The visuals revision (not the balance one) last read, to guard against a concurrent visuals.json edit." }
       },
       required: ["kind", "entityId", "spriteId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "bind_mission_music",
+    description:
+      "Preview, set, or remove the looping music track for one mission without replacing the audio catalog. Validates the mission and track, supports dry-run diff, guards visuals with ifRevision, and writes with backup and rollback.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        missionId: { type: "string", description: "Existing mission id." },
+        trackId: { type: "string", description: "Existing audio.musicTracks id. Empty string removes the mission binding." },
+        dryRun: { type: "boolean", description: "When true, validate and return the diff without writing." },
+        ifRevision: { ...IF_REVISION_PROPERTY, description: "Optional visuals revision from get_project_summary." }
+      },
+      required: ["missionId", "trackId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "import_asset",
+    description:
+      "Import a file that already exists inside the .tdproj directory into its confined assetsRoot and register it as a sprite, atlas, sound, or looping music track. Rejects absolute/external/traversal paths; validates before commit; guards visuals with ifRevision; backs up and rolls back both visuals.json and an overwritten destination file.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        sourcePath: { type: "string", description: "Project-relative source path, often imports/<file>." },
+        targetPath: { type: "string", description: "Path relative to assetsRoot." },
+        id: { type: "string", description: "Optional registry id; derived safely from the filename when omitted." },
+        kind: { type: "string", enum: ["sprite", "atlas", "sound", "music"] },
+        columns: { type: "integer", minimum: 1 },
+        rows: { type: "integer", minimum: 1 },
+        volume: { type: "number", minimum: 0, maximum: 1, description: "Initial per-track volume for kind=music." },
+        ifRevision: { ...IF_REVISION_PROPERTY, description: "Optional visuals revision from get_project_summary." }
+      },
+      required: ["sourcePath", "kind"],
       additionalProperties: false
     }
   },
@@ -360,6 +714,24 @@ export const TOOLS = [
         ifRevision: IF_REVISION_PROPERTY
       },
       required: ["collection", "id", "value"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "duplicate_entity",
+    description:
+      "Duplicate one existing tower, enemy, mission, ability, waveSet, or currency under a new id. Uses the authored source shape, optionally overrides its label, validates the complete project, and writes through the same backup/rollback and ifRevision guard as upsert_entity.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        collection: { type: "string", enum: ["towers", "enemies", "missions", "abilities", "waveSets", "currencies"] },
+        sourceId: { type: "string" },
+        targetId: { type: "string" },
+        label: { type: "string", description: "Optional label override. Defaults to '<source label> Copy' for labeled entities." },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["collection", "sourceId", "targetId"],
       additionalProperties: false
     }
   },
@@ -412,32 +784,90 @@ export const TOOLS = [
       required: ["mapId", "width", "height", "spawnCoord", "coreCoord", "pathCenterline"],
       additionalProperties: false
     }
+  },
+  {
+    name: "upsert_story_comic",
+    description:
+      "Preview or write one mission-linked story comic without replacing the whole story-comics.json file. Validates mission/sprite references and panel text, supports optimistic concurrency, and backs up + rolls back an invalid write. Call first with dryRun:true, then commit with the returned revision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        comicId: { type: "string" },
+        comic: { type: "object", description: "{missionId,title?,trigger?,replay?,panels:[{text,speaker?,spriteId?}]}" },
+        dryRun: { type: "boolean", description: "Validate and return the leaf diff without writing." },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["comicId", "comic"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "set_battle_background",
+    description:
+      "Preview, set, or remove one mission background without replacing the whole battle-backgrounds.json file. References an existing standalone sprite ID and/or a color, validates the project, and uses revision guard + backup/rollback.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string", description: "Path to the .tdproj directory." },
+        missionId: { type: "string" },
+        background: { type: "object", description: "{color?,spriteId?,opacity?}. The key is forced to missionId." },
+        remove: { type: "boolean", description: "Remove the mission's background definition." },
+        dryRun: { type: "boolean", description: "Validate and return the leaf diff without writing." },
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["missionId"],
+      additionalProperties: false
+    }
   }
 ];
 
 const TOOL_RISK = {
   describe_schema: { riskClass: "read_only", sideEffect: "none" },
+  list_recipes: { riskClass: "read_only", sideEffect: "none" },
+  get_recipe: { riskClass: "read_only", sideEffect: "none" },
   explain_validation: { riskClass: "read_only", sideEffect: "none" },
   get_project_summary: { riskClass: "read_only", sideEffect: "none" },
+  get_progression: { riskClass: "read_only", sideEffect: "none" },
+  list_entities: { riskClass: "read_only", sideEffect: "none" },
+  get_entity: { riskClass: "read_only", sideEffect: "none" },
   list_missions: { riskClass: "read_only", sideEffect: "none" },
+  list_theme_packs: { riskClass: "read_only", sideEffect: "none" },
+  preview_theme_pack: { riskClass: "compute_only", sideEffect: "none" },
+  list_project_tree: { riskClass: "read_only", sideEffect: "none" },
+  get_tower_script: { riskClass: "read_only", sideEffect: "none" },
+  upsert_tower_script: { riskClass: "write_local", sideEffect: "optionally writes one confined scripts/**/*.tower.json file with backup and rollback" },
+  apply_theme_pack: { riskClass: "write_local", sideEffect: "optionally writes a bundled background asset plus visuals and mission background catalogs with backup and rollback" },
   validate_project: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
+  release_readiness: { riskClass: "compute_only", sideEffect: "compiles maps in memory and builds engine dist if stale" },
+  inspect_project_pack: { riskClass: "read_only", sideEffect: "reads one confined .towerforge/exports archive" },
+  export_project_pack: { riskClass: "write_local", sideEffect: "writes one .tdpack under .towerforge/exports" },
   simulate_mission: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
+  playtest_report: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
   compile_maps_dry_run: { riskClass: "compute_only", sideEffect: "none" },
   compile_maps: { riskClass: "write_local", sideEffect: "writes maps/compiled/maps.json" },
   build_project: { riskClass: "write_local", sideEffect: "writes build output directory" },
   package_mobile: { riskClass: "write_local", sideEffect: "writes mobile scaffold" },
+  package_web: { riskClass: "write_local", sideEffect: "writes a portable web bundle and deterministic zip under the project" },
   package_desktop: { riskClass: "write_local", sideEffect: "writes desktop scaffold" },
   balance_report: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
   dry_run_balance_patch: { riskClass: "compute_only", sideEffect: "none" },
   apply_balance_patch: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
   apply_validated_patch: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
+  dry_run_progression_patch: { riskClass: "compute_only", sideEffect: "none" },
+  apply_progression_patch: { riskClass: "write_local", sideEffect: "optionally writes difficulty/meta-progression sections in content/balance.json with backup and rollback" },
   set_enemy_stat: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
   upsert_tower: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
   add_wave_group: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
   bind_sprite: { riskClass: "write_local", sideEffect: "writes content/visuals.json with backup and rollback" },
+  bind_mission_music: { riskClass: "write_local", sideEffect: "optionally writes one audio.musicByMission binding in content/visuals.json with backup and rollback" },
+  import_asset: { riskClass: "write_local", sideEffect: "copies one project-local asset and writes content/visuals.json with backup and rollback" },
   upsert_entity: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
+  duplicate_entity: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback" },
   delete_entity: { riskClass: "write_local", sideEffect: "writes content/balance.json with backup and rollback; refuses if referenced" },
-  write_map: { riskClass: "write_local", sideEffect: "writes maps/src/<mapId>.tmj and maps/compiled/maps.json" }
+  write_map: { riskClass: "write_local", sideEffect: "writes maps/src/<mapId>.tmj and maps/compiled/maps.json" },
+  upsert_story_comic: { riskClass: "write_local", sideEffect: "optionally writes content/story-comics.json with backup and rollback" },
+  set_battle_background: { riskClass: "write_local", sideEffect: "optionally writes content/battle-backgrounds.json with backup and rollback" }
 };
 
 for (const tool of TOOLS) Object.assign(tool, TOOL_RISK[tool.name] ?? { riskClass: "unknown", sideEffect: "unspecified" });
@@ -458,14 +888,58 @@ export async function callTool(name, args = {}, ctx = {}) {
   // Pure schema metadata — no project needed, so it runs before (and without) resolveDir.
   if (name === "describe_schema") {
     const engine = await loadEngine();
+    const domain = args.domain ?? "all";
+    if (!SCHEMA_DOMAINS.includes(domain)) throw new Error(`Unknown schema domain "${domain}".`);
+    const includes = (candidate) => domain === "all" || domain === candidate;
     return {
-      attackKinds: engine.ATTACK_KIND_SCHEMA,
-      abilityPresets: engine.ABILITY_SCHEMA,
-      abilityEffects: engine.ABILITY_EFFECT_SCHEMA,
-      abilityNote:
-        "Mission ability ids are open (any string). abilityPresets (path_water/strike/freeze) work with no extra fields. A CUSTOM ability id needs no engine code — declare `effects: AbilityEffect[]` composed from abilityEffects (e.g. [{kind:'damage', amount}, {kind:'status', status:{slow:{factor,duration}}}]).",
-      currencyRules: engine.CURRENCY_RULES
+      schemaVersion: 2,
+      agentGuideVersion: TOWERFORGE_AGENT_GUIDE_VERSION,
+      requestedDomain: domain,
+      availableDomains: SCHEMA_DOMAINS,
+      mechanismSelection: {
+        standardContent: "granular entity/map tools",
+        towerCombat: "universal pipeline preferred; legacy kinds remain for compatibility",
+        customLifecycle: "TowerScript",
+        campaignVariants: "difficulties and metaProgression",
+        visuals: "theme packs and confined asset/binding tools"
+      },
+      ...(includes("combat") ? {
+        attackKinds: engine.ATTACK_KIND_SCHEMA,
+        towerPipeline: engine.TOWER_PIPELINE_SCHEMA,
+        abilityPresets: engine.ABILITY_SCHEMA,
+        abilityEffects: engine.ABILITY_EFFECT_SCHEMA,
+        targetModes: engine.TARGET_MODE_SCHEMA,
+        abilityNote:
+          "Mission ability ids are open. Presets work without effects; a custom id composes damage/status effects without engine code."
+      } : {}),
+      ...(includes("missions") ? {
+        currencyRules: engine.CURRENCY_RULES,
+        missionEconomy: engine.MISSION_ECONOMY_SCHEMA,
+        missionObjectives: engine.MISSION_OBJECTIVES_SCHEMA,
+        simulationActions: ["startWave", "placeTower", "moveTower", "upgradeTower", "sellTower", "setTargetMode", "useAbility", "emitSignal"]
+      } : {}),
+      ...(includes("progression") ? {
+        difficulty: engine.DIFFICULTY_SCHEMA,
+        metaProgression: engine.META_PROGRESSION_SCHEMA
+      } : {}),
+      ...(includes("scripts") ? { towerScript: engine.TOWER_SCRIPT_SCHEMA } : {}),
+      ...(includes("assets") ? {
+        assetAuthoring: {
+          themePacks: "Call list_theme_packs, preview_theme_pack, then apply_theme_pack with ifRevision.",
+          imports: "Use import_asset for one project-local image/audio asset; never write arbitrary paths.",
+          bindings: ["bind_sprite", "bind_mission_music", "upsert_story_comic", "set_battle_background"],
+          pathRule: "Project-relative paths only; absolute paths, external URLs, traversal, and symlink escapes are rejected."
+        }
+      } : {})
     };
+  }
+
+  if (name === "list_recipes") {
+    return { collection: args.collection, recipes: listContentRecipes(args.collection) };
+  }
+
+  if (name === "list_theme_packs") {
+    return { packs: listThemePacks() };
   }
 
   if (name === "explain_validation") {
@@ -502,6 +976,13 @@ export async function callTool(name, args = {}, ctx = {}) {
         manifest: summary.manifest,
         constants: summary.constants,
         defaultMissionId: summary.defaultMissionId,
+        progression: {
+          defaultDifficultyId: summary.defaultDifficultyId,
+          difficulties: (summary.difficulties ?? []).map((difficulty) => ({ id: difficulty.id, label: difficulty.label })),
+          metaCurrencies: (summary.metaProgression?.currencies ?? []).map((currency) => ({ id: currency.id, label: currency.label })),
+          metaUpgrades: Object.values(summary.metaProgression?.upgrades ?? {}).map((upgrade) => ({ id: upgrade.id, label: upgrade.label, maxLevel: upgrade.maxLevel, effectKinds: (upgrade.effects ?? []).map((effect) => effect.kind) })),
+          rewardMissionIds: Object.keys(summary.metaProgression?.rewardsByMission ?? {})
+        },
         appliedMigrations: summary.appliedMigrations,
         counts: {
           missions: Object.keys(summary.missions ?? {}).length,
@@ -509,15 +990,150 @@ export async function callTool(name, args = {}, ctx = {}) {
           towers: Object.keys(summary.towers ?? {}).length,
           waveSets: Object.keys(summary.waveSets ?? {}).length,
           maps: Object.keys(summary.maps ?? {}).length,
-          mapSources: Object.keys(summary.mapSources ?? {}).length
+          mapSources: Object.keys(summary.mapSources ?? {}).length,
+          visualSprites: Object.keys(summary.visuals?.sprites ?? {}).length,
+          audioSounds: Object.keys(summary.visuals?.audio?.sounds ?? {}).length,
+          musicTracks: Object.keys(summary.visuals?.audio?.musicTracks ?? {}).length,
+          storyComics: Object.keys(summary.storyComics?.comics ?? {}).length,
+          battleBackgrounds: Object.keys(summary.battleBackgrounds?.definitions ?? {}).length,
+          scripts: Object.keys(summary.scripts ?? {}).length
         },
         availableMaps: summary.availableMaps,
         mapRoutes: summary.mapRoutes,
         // Content-hash revisions for optimistic-concurrency writes (upsert_entity, apply_validated_patch,
         // bind_sprite, ...): pass the relevant one back as `ifRevision` to reject a write if the file
         // changed underneath the agent (e.g. a human editing the same project live in Studio).
-        revisions: { balance: computeRevision(files.balance), visuals: computeRevision(files.visuals) }
+        revisions: {
+          balance: computeRevision(files.balance),
+          visuals: computeRevision(files.visuals),
+          storyComics: computeRevision(files.storyComics),
+          battleBackgrounds: computeRevision(files.battleBackgrounds),
+          scripts: computeRevision(files.scripts)
+        }
       };
+    }
+
+    case "get_progression": {
+      const files = loadProjectFiles(projectDir);
+      return {
+        projectDir,
+        defaultDifficultyId: files.balance.defaultDifficultyId,
+        difficulties: files.balance.difficulties,
+        metaProgression: files.balance.metaProgression,
+        revision: computeRevision(files.balance),
+        nextValidActions: ["describe_schema with domain progression", "dry_run_progression_patch", "apply_progression_patch with ifRevision"]
+      };
+    }
+
+    case "list_project_tree":
+      return { projectDir, ...listProjectTree(projectDir) };
+
+    case "get_tower_script": {
+      const files = loadProjectFiles(projectDir);
+      let entry;
+      if (typeof args.path === "string") entry = files.scriptFiles?.[args.path];
+      else if (typeof args.scriptId === "string") entry = Object.values(files.scriptFiles ?? {}).find((file) => file.definition?.id === args.scriptId);
+      else throw new Error("get_tower_script requires scriptId or path.");
+      if (!entry) throw new Error("TowerScript was not found.");
+      return { projectDir, path: entry.path, source: entry.source, script: entry.definition, error: entry.error, revision: computeRevision(entry.definition ?? entry.source) };
+    }
+
+    case "upsert_tower_script":
+      return upsertTowerScript(projectDir, args);
+
+    case "list_entities": {
+      const files = loadProjectFiles(projectDir);
+      return {
+        projectDir,
+        collection: args.collection,
+        entities: entityEntries(files, args.collection).map(([id, value]) => entityListItem(args.collection, id, value)),
+        revision: entityRevision(files, args.collection)
+      };
+    }
+
+    case "get_entity": {
+      const files = loadProjectFiles(projectDir);
+      const entries = entityEntries(files, args.collection);
+      const found = entries.find(([id]) => id === args.id);
+      if (!found) throw new Error(`get_entity: ${args.collection} entity "${args.id}" was not found.`);
+      return {
+        projectDir,
+        collection: args.collection,
+        id: args.id,
+        entity: found[1],
+        source: "normalized_effective",
+        revision: entityRevision(files, args.collection)
+      };
+    }
+    case "get_recipe": {
+      const files = loadProjectFiles(projectDir);
+      return {
+        projectDir,
+        collection: args.collection,
+        recipe: materializeContentRecipe(args.collection, args.recipeId, contentRecipeContext(files)),
+        revision: computeRevision(files.balance),
+        nextValidActions: ["review and set a unique entity.id", "upsert_entity with ifRevision", "validate_project"]
+      };
+    }
+    case "release_readiness": {
+      const files = loadProjectFiles(projectDir);
+      const { result: validation } = await validateProjectDir(projectDir);
+      const mapCompile = compileMapSources(files.mapSources ?? {});
+      const targets = Object.values(files.buildTargets?.targets ?? {});
+      const checks = [
+        {
+          id: "validation",
+          label: "Project validation",
+          severity: validation.ok ? "ok" : "error",
+          message: validation.ok ? "No validation errors." : `${validation.errorCount ?? validation.issues?.filter((issue) => issue.severity === "error").length ?? 0} validation error(s).`
+        },
+        {
+          id: "maps",
+          label: "Map compilation",
+          severity: mapCompile.ok ? "ok" : "error",
+          message: mapCompile.ok ? `${Object.keys(mapCompile.maps ?? {}).length} map(s) compile in memory.` : `${mapCompile.issues?.length ?? 0} map issue(s).`
+        },
+        {
+          id: "identity",
+          label: "Project identity",
+          severity: files.manifest?.name && files.manifest?.engineVersion ? "ok" : "error",
+          message: files.manifest?.name && files.manifest?.engineVersion ? `${files.manifest.name} · engine ${files.manifest.engineVersion}` : "project.json needs name and engineVersion."
+        },
+        {
+          id: "content",
+          label: "Playable content",
+          severity: Object.keys(files.balance?.missions ?? {}).length && Object.keys(files.balance?.towers ?? {}).length && Object.keys(files.balance?.enemies ?? {}).length ? "ok" : "error",
+          message: `${Object.keys(files.balance?.missions ?? {}).length} missions · ${Object.keys(files.balance?.towers ?? {}).length} towers · ${Object.keys(files.balance?.enemies ?? {}).length} enemies`
+        },
+        {
+          id: "build_targets",
+          label: "Build targets",
+          severity: targets.length ? "ok" : "warning",
+          message: targets.length ? `${targets.length} configured target(s): ${targets.map((target) => target.id).join(", ")}` : "No build target is configured."
+        }
+      ];
+      return {
+        projectDir,
+        ok: checks.every((check) => check.severity !== "error"),
+        checks,
+        validation,
+        mapIssues: mapCompile.issues ?? [],
+        revisions: { balance: computeRevision(files.balance) }
+      };
+    }
+
+    case "inspect_project_pack": {
+      const packPath = confinedPackPath(projectDir, args.fileName);
+      const { entries, ...report } = inspectProjectPack(packPath);
+      return { projectDir, fileName: args.fileName, ...report, files: entries.map(({ path: filePath, size, sha256: hash }) => ({ path: filePath, size, sha256: hash })) };
+    }
+
+    case "export_project_pack": {
+      const defaultName = `${path.basename(projectDir, ".tdproj").replace(/[^A-Za-z0-9_-]+/g, "-") || "project"}.tdpack`;
+      const fileName = args.fileName ?? defaultName;
+      const outputPath = confinedPackPath(projectDir, fileName);
+      const result = await exportProjectPack(projectDir, outputPath);
+      return { projectDir, ...result, fileName, relativePath: path.relative(projectDir, outputPath).split(path.sep).join("/") };
     }
 
     case "list_missions": {
@@ -546,7 +1162,12 @@ export async function callTool(name, args = {}, ctx = {}) {
         errorCount: result.issues.filter((issue) => issue.severity === "error").length,
         warningCount: result.issues.filter((issue) => issue.severity === "warning").length,
         issues: result.issues,
-        revisions: { balance: computeRevision(files.balance), visuals: computeRevision(files.visuals) }
+        revisions: {
+          balance: computeRevision(files.balance),
+          visuals: computeRevision(files.visuals),
+          storyComics: computeRevision(files.storyComics),
+          battleBackgrounds: computeRevision(files.battleBackgrounds)
+        }
       };
     }
 
@@ -557,6 +1178,17 @@ export async function callTool(name, args = {}, ctx = {}) {
       const duration = Number.isFinite(args.duration) && args.duration > 0 ? Math.min(args.duration, 3600) : 180;
       return runMissionSmoke(projectDir, args.missionId, duration);
     }
+
+    case "playtest_report": {
+      const duration = Number.isFinite(args.duration) && args.duration > 0 ? Math.min(args.duration, 3600) : 180;
+      return runMissionPlaytestReport(projectDir, args.missionId, duration);
+    }
+
+    case "duplicate_entity":
+      return duplicateEntity(projectDir, args);
+
+    case "import_asset":
+      return importAsset(projectDir, args);
 
     case "compile_maps": {
       assertProjectDir(projectDir);
@@ -601,6 +1233,9 @@ export async function callTool(name, args = {}, ctx = {}) {
     case "package_mobile":
       return packageProject(projectDir, { kind: "mobile", targetId: typeof args.targetId === "string" ? args.targetId : null });
 
+    case "package_web":
+      return packageProject(projectDir, { kind: "web", targetId: typeof args.targetId === "string" ? args.targetId : null });
+
     case "package_desktop":
       return packageProject(projectDir, { kind: "desktop", targetId: typeof args.targetId === "string" ? args.targetId : null });
 
@@ -612,6 +1247,12 @@ export async function callTool(name, args = {}, ctx = {}) {
 
     case "apply_validated_patch":
       return applyValidatedBalancePatch(projectDir, args.patch, { ifRevision: args.ifRevision });
+
+    case "dry_run_progression_patch":
+      return toWire(await dryRunBalancePatch(projectDir, progressionPatchFromArgs(args)));
+
+    case "apply_progression_patch":
+      return applyValidatedBalancePatch(projectDir, progressionPatchFromArgs(args), { ifRevision: args.ifRevision });
 
     case "set_enemy_stat":
       return setEnemyStat(projectDir, args);
@@ -625,6 +1266,17 @@ export async function callTool(name, args = {}, ctx = {}) {
     case "bind_sprite":
       return bindSprite(projectDir, args);
 
+    case "apply_theme_pack":
+      return args.dryRun
+        ? previewThemePack(projectDir, args.packId)
+        : applyThemePack(projectDir, args.packId, { ifRevision: args.ifRevision });
+
+    case "preview_theme_pack":
+      return previewThemePack(projectDir, args.packId);
+
+    case "bind_mission_music":
+      return bindMissionMusic(projectDir, args);
+
     case "upsert_entity":
       return upsertEntity(projectDir, args);
 
@@ -633,6 +1285,12 @@ export async function callTool(name, args = {}, ctx = {}) {
 
     case "write_map":
       return writeMap(projectDir, args);
+
+    case "upsert_story_comic":
+      return writeNarrativeEntry(projectDir, "storyComics", args.comicId, args.comic, args);
+
+    case "set_battle_background":
+      return writeNarrativeEntry(projectDir, "battleBackgrounds", args.missionId, args.remove ? null : (args.background ?? {}), args);
 
     default:
       throw new Error(`Unhandled tool: ${name}`);
@@ -709,6 +1367,49 @@ async function dryRunBalancePatch(projectDir, patch) {
     diff: computeDiff(files.balance, candidateFiles.balance, applied),
     validation: validationSummary(result)
   };
+}
+
+async function upsertTowerScript(projectDir, args) {
+  const files = loadProjectFiles(projectDir);
+  const revision = computeRevision(files.scripts);
+  if (args.ifRevision !== undefined && args.ifRevision !== revision) {
+    return { projectDir, ok: false, conflict: true, expectedRevision: args.ifRevision, actualRevision: revision, written: false };
+  }
+  if (typeof args.path !== "string") throw new Error("upsert_tower_script requires a project-relative path.");
+  if (!args.script || typeof args.script !== "object" || Array.isArray(args.script)) throw new Error("upsert_tower_script requires a script object.");
+  const scriptPath = resolveTowerScriptPath(projectDir, args.path);
+  const sourceRevision = scriptFileRevision(scriptPath);
+  const scripts = structuredCloneCompat(files.scripts ?? {});
+  const previousId = files.scriptFiles?.[args.path]?.definition?.id;
+  if (previousId) delete scripts[previousId];
+  const duplicate = Object.entries(files.scriptFiles ?? {}).find(([filePath, file]) => filePath !== args.path && file.definition?.id === args.script.id);
+  if (duplicate) {
+    return { projectDir, ok: false, dryRun: Boolean(args.dryRun), written: false, revision, validation: { ok: false, errorCount: 1, warningCount: 0, issues: [{ severity: "error", entityKind: "script", entityId: args.script.id, fieldPath: "id", code: "SCRIPT_ID", message: `Script id "${args.script.id}" is already declared by ${duplicate[0]}.` }] } };
+  }
+  scripts[args.script.id] = structuredCloneCompat(args.script);
+  const candidateFiles = { ...files, scripts };
+  const validation = await validateCandidateFiles(candidateFiles);
+  const summary = validationSummary(validation);
+  if (args.dryRun || !validation.ok) {
+    return { projectDir, ok: validation.ok, dryRun: true, written: false, path: args.path, scriptId: args.script.id, revision, validation: summary };
+  }
+
+  const latestRevision = computeRevision(loadProjectFiles(projectDir).scripts);
+  if (latestRevision !== revision) return { projectDir, ok: false, conflict: true, expectedRevision: revision, actualRevision: latestRevision, written: false };
+  const write = writeTowerScriptAtomic(projectDir, args.path, `${JSON.stringify(args.script, null, 2)}\n`, { ifRevision: sourceRevision });
+  if (!write.ok) return { projectDir, ok: false, conflict: true, expectedFileRevision: sourceRevision, actualFileRevision: write.revision, written: false };
+  try {
+    const post = await validateProjectDir(projectDir);
+    if (!post.result.ok) {
+      restoreTowerScriptWrite(projectDir, args.path, write.backup);
+      return { projectDir, ok: false, written: false, rolledBack: true, path: args.path, revision, validation: validationSummary(post.result) };
+    }
+    const finalFiles = loadProjectFiles(projectDir);
+    return { projectDir, ok: true, written: true, dryRun: false, path: args.path, scriptId: args.script.id, backupCreated: Boolean(write.backup), revision: computeRevision(finalFiles.scripts), validation: validationSummary(post.result) };
+  } catch (error) {
+    restoreTowerScriptWrite(projectDir, args.path, write.backup);
+    throw error;
+  }
 }
 
 /** Strip internal plumbing (the full merged balance objects) from a dry-run result before it goes
@@ -898,11 +1599,218 @@ async function bindSprite(projectDir, args) {
   return { projectDir, ok: true, written: true, backupPath, revision: computeRevision(postFiles.visuals), binding: { kind, entityId, spriteId }, validation: validationSummary(post) };
 }
 
+async function bindMissionMusic(projectDir, args) {
+  assertProjectDir(projectDir);
+  const { missionId, trackId, dryRun = false, ifRevision } = args;
+  if (typeof missionId !== "string" || !missionId.trim()) throw new Error("bind_mission_music requires missionId.");
+  if (typeof trackId !== "string") throw new Error("bind_mission_music requires trackId (empty removes the binding).");
+
+  const raw = readRawProjectFiles(projectDir);
+  const files = normalizeProjectFiles(raw);
+  if (!files.balance.missions?.[missionId]) throw new Error(`Mission "${missionId}" not found.`);
+  if (trackId && !files.visuals.audio?.musicTracks?.[trackId]) throw new Error(`Music track "${trackId}" not found.`);
+
+  const revision = computeRevision(files.visuals);
+  if (ifRevision && revision !== ifRevision) {
+    return { projectDir, ok: false, written: false, conflict: true, expectedRevision: ifRevision, actualRevision: revision };
+  }
+
+  const visuals = structuredCloneCompat(raw.visuals ?? {});
+  visuals.audio ??= {};
+  visuals.audio.musicByMission ??= {};
+  if (trackId) visuals.audio.musicByMission[missionId] = trackId;
+  else delete visuals.audio.musicByMission[missionId];
+
+  const candidate = normalizeProjectFiles({ ...raw, visuals });
+  const result = await validateCandidateFiles(candidate);
+  const diff = computeDiff({ visuals: files.visuals }, { visuals: candidate.visuals }, ["visuals"]);
+  const validation = validationSummary(result);
+  if (!result.ok) {
+    return { projectDir, ok: false, written: false, dryRun: Boolean(dryRun), revision, diff, validation, nextValidActions: ["explain_validation"] };
+  }
+  if (dryRun) {
+    return {
+      projectDir,
+      ok: true,
+      written: false,
+      dryRun: true,
+      revision,
+      binding: { missionId, trackId },
+      diff,
+      validation,
+      nextValidActions: ["retry bind_mission_music with dryRun:false and ifRevision"]
+    };
+  }
+
+  // Candidate validation loads the engine asynchronously. Recheck after that yield so a Studio
+  // save becomes a conflict instead of being overwritten by this older candidate.
+  const currentRevision = computeRevision(loadProjectFiles(projectDir).visuals);
+  if (currentRevision !== revision) {
+    return { projectDir, ok: false, written: false, conflict: true, expectedRevision: revision, actualRevision: currentRevision };
+  }
+
+  const visualsPath = path.join(projectDir, "content", "visuals.json");
+  const originalText = fs.existsSync(visualsPath) ? fs.readFileSync(visualsPath, "utf8") : null;
+  const backupPath = backupFile(projectDir, visualsPath);
+  writeJsonAtomic(visualsPath, visuals);
+  const { result: postResult } = await validateProjectDir(projectDir);
+  const postValidation = validationSummary(postResult);
+  if (!postResult.ok) {
+    if (originalText === null) fs.rmSync(visualsPath, { force: true });
+    else writeTextAtomic(visualsPath, originalText);
+    return { projectDir, ok: false, written: false, rolledBack: true, backupPath, diff, validation: postValidation };
+  }
+
+  const finalFiles = loadProjectFiles(projectDir);
+  return {
+    projectDir,
+    ok: true,
+    written: true,
+    rolledBack: false,
+    backupPath,
+    revision: computeRevision(finalFiles.visuals),
+    binding: { missionId, trackId },
+    diff,
+    validation: postValidation,
+    nextValidActions: ["validate_project", "build_project"]
+  };
+}
+
+async function writeNarrativeEntry(projectDir, sectionName, id, value, options = {}) {
+  assertProjectDir(projectDir);
+  if (typeof id !== "string" || !id.trim()) throw new Error(`${sectionName} write requires a non-empty id.`);
+  if (value !== null && (!value || typeof value !== "object" || Array.isArray(value))) {
+    throw new Error(`${sectionName} write requires an object value, or remove:true where supported.`);
+  }
+
+  const spec = sectionName === "storyComics"
+    ? { recordKey: "comics", fileName: "story-comics.json" }
+    : { recordKey: "definitions", fileName: "battle-backgrounds.json" };
+  const raw = readRawProjectFiles(projectDir);
+  const files = normalizeProjectFiles(raw);
+  const revision = computeRevision(files[sectionName]);
+  if (options.ifRevision && revision !== options.ifRevision) {
+    return { projectDir, ok: false, written: false, conflict: true, expectedRevision: options.ifRevision, actualRevision: revision };
+  }
+
+  const nextSection = structuredCloneCompat(raw[sectionName] ?? files[sectionName]);
+  nextSection[spec.recordKey] ??= {};
+  if (value === null) delete nextSection[spec.recordKey][id];
+  else nextSection[spec.recordKey][id] = structuredCloneCompat(value);
+  const candidate = normalizeProjectFiles({ ...raw, [sectionName]: nextSection });
+  const result = await validateCandidateFiles(candidate);
+  const diff = computeDiff(
+    { [sectionName]: files[sectionName] },
+    { [sectionName]: candidate[sectionName] },
+    [sectionName]
+  );
+  const validation = validationSummary(result);
+  if (!result.ok) {
+    return { projectDir, ok: false, written: false, dryRun: Boolean(options.dryRun), revision, diff, validation, nextValidActions: ["explain_validation", "list_entities"] };
+  }
+  if (options.dryRun) {
+    return { projectDir, ok: true, written: false, dryRun: true, revision, diff, validation, nextValidActions: [`retry ${sectionName === "storyComics" ? "upsert_story_comic" : "set_battle_background"} with ifRevision`] };
+  }
+
+  // Validation loads the engine asynchronously. Re-read after that yield so a concurrent Studio
+  // save cannot be overwritten by a candidate based on stale narrative content.
+  const currentRevision = computeRevision(loadProjectFiles(projectDir)[sectionName]);
+  if (currentRevision !== revision) {
+    return { projectDir, ok: false, written: false, conflict: true, expectedRevision: revision, actualRevision: currentRevision };
+  }
+
+  const filePath = path.join(projectDir, "content", spec.fileName);
+  const originalText = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : null;
+  const backupPath = backupFile(projectDir, filePath);
+  writeJsonAtomic(filePath, nextSection);
+  const { result: postResult } = await validateProjectDir(projectDir);
+  const postValidation = validationSummary(postResult);
+  if (!postResult.ok) {
+    if (originalText === null) fs.rmSync(filePath, { force: true });
+    else writeTextAtomic(filePath, originalText);
+    return { projectDir, ok: false, written: false, rolledBack: true, backupPath, diff, validation: postValidation };
+  }
+  const finalFiles = loadProjectFiles(projectDir);
+  return {
+    projectDir,
+    ok: true,
+    written: true,
+    rolledBack: false,
+    backupPath,
+    revision: computeRevision(finalFiles[sectionName]),
+    diff,
+    validation: postValidation,
+    nextValidActions: ["validate_project", "build_project"]
+  };
+}
+
+async function importAsset(projectDir, args) {
+  assertProjectDir(projectDir);
+  const raw = readRawProjectFiles(projectDir);
+  const files = normalizeProjectFiles(raw);
+  const beforeRevision = computeRevision(files.visuals);
+  if (args.ifRevision && beforeRevision !== args.ifRevision) {
+    return { projectDir, ok: false, written: false, conflict: true, expectedRevision: args.ifRevision, actualRevision: beforeRevision };
+  }
+
+  const plan = planProjectAssetImport(projectDir, raw.visuals ?? files.visuals, args);
+  const candidate = normalizeProjectFiles({ ...raw, visuals: plan.visuals });
+  const validation = await validateCandidateFiles(candidate);
+  if (!validation.ok) {
+    return { projectDir, ok: false, written: false, validation: validationSummary(validation), nextValidActions: ["explain_validation"] };
+  }
+
+  // Recheck after async engine validation so a concurrent Studio/agent edit cannot be clobbered.
+  const currentRevision = computeRevision(loadProjectFiles(projectDir).visuals);
+  if (currentRevision !== beforeRevision) {
+    return { projectDir, ok: false, written: false, conflict: true, expectedRevision: beforeRevision, actualRevision: currentRevision };
+  }
+
+  const visualsPath = path.join(projectDir, "content", "visuals.json");
+  const originalVisuals = fs.existsSync(visualsPath) ? fs.readFileSync(visualsPath, "utf8") : null;
+  const visualsBackupPath = backupFile(projectDir, visualsPath);
+  const assetExisted = plan.copyRequired && fs.existsSync(plan.destPath);
+  const assetBackupPath = assetExisted ? backupFile(projectDir, plan.destPath) : null;
+  try {
+    commitProjectAssetImport(plan);
+    writeJsonAtomic(visualsPath, plan.visuals);
+    const postFiles = loadProjectFiles(projectDir);
+    const post = await validateCandidateFiles(postFiles);
+    if (!post.ok) throw new Error("Imported asset made the project invalid after commit.");
+    return {
+      projectDir,
+      ok: true,
+      written: true,
+      asset: plan.asset,
+      backupPath: visualsBackupPath,
+      assetBackupPath,
+      revision: computeRevision(postFiles.visuals),
+      diff: computeDiff({ visuals: files.visuals }, { visuals: postFiles.visuals }, ["visuals"]),
+      validation: validationSummary(post)
+    };
+  } catch (error) {
+    if (originalVisuals === null) fs.rmSync(visualsPath, { force: true });
+    else writeTextAtomic(visualsPath, originalVisuals);
+    if (plan.copyRequired) {
+      if (assetExisted && assetBackupPath) fs.copyFileSync(assetBackupPath, plan.destPath);
+      else fs.rmSync(plan.destPath, { force: true });
+    }
+    return { projectDir, ok: false, written: false, rolledBack: true, error: error.message, backupPath: visualsBackupPath, assetBackupPath };
+  }
+}
+
 // Prototype-safe ENTITY_COLLECTIONS lookup: a bare bracket read would resolve inherited
 // Object.prototype members (collection: "constructor" → the inherited Function), skating past the
 // `!spec` check into a confusing downstream error — the same gap the EXPLAIN_CURATED lookup closed.
 function entityCollectionSpec(collection) {
   return Object.prototype.hasOwnProperty.call(ENTITY_COLLECTIONS, collection) ? ENTITY_COLLECTIONS[collection] : undefined;
+}
+
+function confinedPackPath(projectDir, fileName) {
+  if (typeof fileName !== "string" || !/^[A-Za-z0-9._-]+\.tdpack$/i.test(fileName) || path.basename(fileName) !== fileName) {
+    throw new Error("Project pack fileName must be a basename ending in .tdpack.");
+  }
+  return path.join(projectDir, ".towerforge", "exports", fileName);
 }
 
 async function upsertEntity(projectDir, args) {
@@ -935,6 +1843,39 @@ async function upsertEntity(projectDir, args) {
   const nextItem = { ...(merge && index !== -1 ? list[index] : {}), ...value, id };
   const nextList = index === -1 ? [...list, nextItem] : list.map((item, i) => (i === index ? nextItem : item));
   return applyValidatedBalancePatch(projectDir, { [spec.balanceKey]: nextList }, { ifRevision });
+}
+
+async function duplicateEntity(projectDir, args) {
+  const { collection, sourceId, targetId, label, ifRevision } = args;
+  const spec = entityCollectionSpec(collection);
+  if (!spec) throw new Error(`duplicate_entity: unknown collection "${collection}". Expected one of ${Object.keys(ENTITY_COLLECTIONS).join(", ")}.`);
+  if (typeof sourceId !== "string" || !sourceId || typeof targetId !== "string" || !targetId) {
+    throw new Error("duplicate_entity requires non-empty sourceId and targetId.");
+  }
+  if (sourceId === targetId) throw new Error("duplicate_entity targetId must differ from sourceId.");
+
+  const raw = readRawProjectFiles(projectDir);
+  const normalized = normalizeProjectFiles(raw);
+  let source;
+  if (spec.shape === "map") {
+    if (normalized.balance[spec.balanceKey]?.[targetId]) throw new Error(`${collection} "${targetId}" already exists.`);
+    source = raw.balance[spec.balanceKey]?.[sourceId] ?? normalized.balance[spec.balanceKey]?.[sourceId];
+  } else {
+    const existing = normalized.balance[spec.balanceKey] ?? [];
+    if (existing.some((item) => item?.id === targetId)) throw new Error(`${collection} "${targetId}" already exists.`);
+    source = (raw.balance[spec.balanceKey] ?? []).find((item) => item?.id === sourceId)
+      ?? existing.find((item) => item?.id === sourceId);
+  }
+  if (source === undefined) throw new Error(`${collection} "${sourceId}" not found.`);
+
+  const value = structuredCloneCompat(source);
+  if (!Array.isArray(value) && collection !== "waveSets") {
+    value.id = targetId;
+    if (label !== undefined) value.label = label;
+    else if (typeof value.label === "string" && value.label) value.label = `${value.label} Copy`;
+  }
+  const result = await upsertEntity(projectDir, { collection, id: targetId, value, ifRevision });
+  return { ...result, duplicated: { collection, sourceId, targetId } };
 }
 
 async function deleteEntity(projectDir, args) {
@@ -1042,12 +1983,19 @@ function mergeBalancePatch(inputBalance, patch) {
   return { balance, applied };
 }
 
+function progressionPatchFromArgs(args) {
+  return Object.fromEntries(["defaultDifficultyId", "difficulties", "metaProgression"]
+    .filter((key) => args[key] !== undefined)
+    .map((key) => [key, args[key]]));
+}
+
 async function validateCandidateFiles(files) {
   const engine = await loadEngine();
   const content = engine.createGameContentRegistry({
     balance: files.balance,
     maps: files.maps,
     worldMap: files.worldMap,
+    scripts: files.scripts,
     visuals: files.visuals,
     storyComics: files.storyComics,
     battleBackgrounds: files.battleBackgrounds

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { copyVisualAssets, importProjectAsset } from "./assets.mjs";
+import { copyVisualAssets, importProjectAsset, planProjectAssetImport } from "./assets.mjs";
 
 let projectDir;
 
@@ -12,6 +12,7 @@ beforeEach(() => {
   fs.writeFileSync(path.join(projectDir, "imports", "tower.png"), "png", "utf8");
   fs.writeFileSync(path.join(projectDir, "imports", "герой.png"), "hero", "utf8");
   fs.writeFileSync(path.join(projectDir, "imports", "враг.png"), "enemy", "utf8");
+  fs.writeFileSync(path.join(projectDir, "imports", "frontier.ogg"), "music", "utf8");
 });
 
 afterEach(() => {
@@ -30,6 +31,26 @@ describe("asset catalog helpers", () => {
     expect(result.asset).toEqual({ id: "tower", kind: "sprite", path: "assets/sprites/tower.png" });
     expect(result.visuals.sprites.tower.src).toBe("assets/sprites/tower.png");
     expect(fs.existsSync(path.join(projectDir, "assets", "sprites", "tower.png"))).toBe(true);
+  });
+
+  it("can plan an import without touching the destination", () => {
+    const plan = planProjectAssetImport(projectDir, { assetsRoot: "assets", sprites: {} }, {
+      sourcePath: "imports/tower.png", targetPath: "planned/tower.png", id: "planned", kind: "sprite"
+    });
+    expect(plan.visuals.sprites.planned.src).toBe("assets/planned/tower.png");
+    expect(fs.existsSync(plan.destPath)).toBe(false);
+  });
+
+  it("registers a looping music track with a clamped author volume", () => {
+    const result = importProjectAsset(projectDir, { assetsRoot: "assets", atlases: {}, sprites: {}, bindings: {} }, {
+      sourcePath: "imports/frontier.ogg",
+      targetPath: "music/frontier.ogg",
+      id: "frontier",
+      kind: "music",
+      volume: 2
+    });
+    expect(result.asset).toEqual({ id: "frontier", kind: "music", path: "assets/music/frontier.ogg" });
+    expect(result.visuals.audio.musicTracks.frontier).toEqual({ src: "assets/music/frontier.ogg", volume: 1 });
   });
 
   it("uniquifies auto-derived ids so two non-ASCII filenames don't overwrite each other", () => {

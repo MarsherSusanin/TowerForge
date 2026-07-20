@@ -18,6 +18,7 @@ export class TowerForgeCanvasRenderer {
     this.images = new Map();
     this.prevEnemyPos = new Map();
     this.lastDrawTime = null;
+    this.focusCoord = null;
     this.theme = {
       bg: "#101410",
       buildable: "#1d2a1d",
@@ -77,6 +78,7 @@ export class TowerForgeCanvasRenderer {
       const p = this.center(tile, geom);
       this.drawHex(p.x, p.y, geom.r * 0.74, "rgba(66,123,136,.58)");
     }
+    if (this.focusCoord) this.drawFocusHex(this.focusCoord, geom);
     for (const tower of snapshot.towers ?? []) this.drawTower(tower, geom);
     for (const enemy of snapshot.enemies ?? []) this.drawEnemy(enemy, snapshot, geom);
     this.drawEffects(geom);
@@ -84,6 +86,28 @@ export class TowerForgeCanvasRenderer {
     this.ctx.restore();
     this.drawOutcomeOverlay(snapshot);
     this.prevEnemyPos = positions;
+  }
+
+  setFocusCoord(coord) {
+    this.focusCoord = coord && Number.isFinite(coord.q) && Number.isFinite(coord.r) ? { q: coord.q, r: coord.r } : null;
+  }
+
+  drawFocusHex(coord, geom) {
+    const p = this.center(coord, geom);
+    this.ctx.save();
+    this.ctx.strokeStyle = this.theme.towerStroke;
+    this.ctx.lineWidth = Math.max(2, geom.r * 0.12);
+    this.ctx.setLineDash([Math.max(3, geom.r * 0.22), Math.max(2, geom.r * 0.12)]);
+    this.ctx.beginPath();
+    for (let i = 0; i < 6; i += 1) {
+      const angle = Math.PI / 6 + i * Math.PI / 3;
+      const x = p.x + Math.cos(angle) * geom.r * 0.78;
+      const y = p.y + Math.sin(angle) * geom.r * 0.78;
+      if (i === 0) this.ctx.moveTo(x, y); else this.ctx.lineTo(x, y);
+    }
+    this.ctx.closePath();
+    this.ctx.stroke();
+    this.ctx.restore();
   }
 
   // ── juice / effects ────────────────────────────────────────────────────────
@@ -189,7 +213,7 @@ export class TowerForgeCanvasRenderer {
       img = new globalThis.Image();
       // Encode each path segment so filenames with spaces/unicode/reserved chars resolve (the
       // studio /project-file/ route decodeURIComponent's the path).
-      img.src = this.assetBase + String(src).split("/").map(encodeURIComponent).join("/");
+      img.src = assetUrl(this.assetBase, src);
       this.images.set(src, img);
     }
     return img && img.complete && img.naturalWidth ? img : null;
@@ -371,4 +395,10 @@ export class TowerForgeCanvasRenderer {
     const value = this.content.enemies?.[id]?.color ?? 0xaaaaaa;
     return "#" + Number(value).toString(16).padStart(6, "0");
   }
+}
+
+function assetUrl(assetBase, src) {
+  const value = String(src ?? "");
+  if (/^(?:data:|blob:|https?:)/i.test(value)) return value;
+  return assetBase + value.split("/").map(encodeURIComponent).join("/");
 }

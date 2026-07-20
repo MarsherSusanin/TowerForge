@@ -1,5 +1,5 @@
-// package.mjs — Wrap a built web bundle into a native app project (Capacitor mobile or Tauri desktop).
-// Usage: node package.mjs [--project <path>] [--kind mobile|desktop] [--target <targetId>] [--out <dir>] [--json]
+// package.mjs — Wrap a built web bundle for portable web, Capacitor mobile, or Tauri desktop.
+// Usage: node package.mjs [--project <path>] [--kind web|mobile|desktop] [--target <targetId>] [--out <dir>] [--json]
 import process from "node:process";
 import { resolveProjectDir } from "./lib/project-loader.mjs";
 import { packageProject } from "./lib/packaging.mjs";
@@ -19,8 +19,8 @@ function parseArgs() {
 }
 
 const args = parseArgs();
-if (args.kind !== "mobile" && args.kind !== "desktop") {
-  console.error(`Unknown --kind "${args.kind}". Use "mobile" (Capacitor) or "desktop" (Tauri).`);
+if (!["web", "mobile", "desktop"].includes(args.kind)) {
+  console.error(`Unknown --kind "${args.kind}". Use "web", "mobile" (Capacitor), or "desktop" (Tauri).`);
   process.exit(1);
 }
 const projectDir = resolveProjectDir(args.projectDir, []);
@@ -35,12 +35,13 @@ try {
     console.error(`  ✗ ${result.error}`);
     process.exit(1);
   }
-  const label = result.kind === "desktop" ? "desktop (Tauri)" : "mobile (Capacitor)";
+  const label = result.kind === "desktop" ? "desktop (Tauri)" : (result.kind === "web" ? "portable web" : "mobile (Capacitor)");
   console.log(`  ✓ Packaged ${result.app.appName} for ${label} → ${result.outDir}`);
   console.log(`    App id: ${result.app.appId}   version ${result.app.version}`);
   console.log(`\n  Next steps:`);
   for (const step of result.nextSteps) console.log(`    ${step}`);
-  console.log(`\n  See ${result.outDir}/README.md for the full store/distribution checklist.`);
+  if (result.archive?.outputPath) console.log(`\n  Archive: ${result.archive.outputPath}`);
+  console.log(`\n  See ${result.outDir}/README.md for details.`);
 } catch (error) {
   if (args.json) printJson({ ok: false, error: error.message });
   else console.error(`  ✗ ${error.message}`);

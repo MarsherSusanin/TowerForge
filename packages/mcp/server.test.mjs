@@ -50,6 +50,8 @@ describe("mcp server JSON-RPC protocol (review fix #7)", () => {
 
     const init = frames.find((f) => f.id === 1);
     expect(init.result.protocolVersion).toBe("2024-11-05"); // negotiated, not echoed
+    expect(init.result.instructions).toContain("universal pipeline");
+    expect(init.result.instructions).toContain("TowerScript");
 
     const nullIdErrors = frames.filter((f) => f.id === null);
     expect(nullIdErrors.some((f) => f.error?.code === -32700)).toBe(true); // parse error

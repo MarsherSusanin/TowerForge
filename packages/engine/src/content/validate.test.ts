@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createGameContentRegistry, type GameContentInput } from "./registry.js";
+import { createGameContentRegistry, type GameContentInput, type GameContentRegistry } from "./registry.js";
 import { validateGameContentRegistry } from "./validate.js";
 
 describe("validateGameContentRegistry", () => {
@@ -265,6 +265,38 @@ describe("validateGameContentRegistry", () => {
     expect(result.issues.some((i) => i.entityId === "strike" && i.fieldPath === "damage")).toBe(true);
   });
 
+  it("validates mission economy currency bags and refund bounds", () => {
+    const content = abilityValidationContent({});
+    content.missions.m!.economy = {
+      passivePerTimeUnit: { undeclared: 1 },
+      interestRate: -0.1,
+      sellRefundRatio: 1.2
+    };
+    const result = validateGameContentRegistry(content);
+    expect(result.issues.some((issue) => issue.fieldPath === "economy.passivePerTimeUnit.undeclared")).toBe(true);
+    expect(result.issues.some((issue) => issue.fieldPath === "economy.interestRate")).toBe(true);
+    expect(result.issues.some((issue) => issue.fieldPath === "economy.sellRefundRatio")).toBe(true);
+  });
+
+  it("validates objective ids, target references, and numeric thresholds", () => {
+    const content = abilityValidationContent({});
+    content.missions.m!.objectives = {
+      victory: [
+        { id: "goal", kind: "killCount", count: 0, enemyTypeId: "missing" },
+        { id: "goal", kind: "accumulateResource", resourceId: "gems", amount: 10 }
+      ],
+      failure: [{ id: "limit", kind: "timeLimit", seconds: 0 }],
+      stars: [{ id: "star", label: "", kind: "resourceAtLeast", resourceId: "gems", amount: 1 }]
+    };
+    const result = validateGameContentRegistry(content);
+    expect(result.ok).toBe(false);
+    expect(result.issues.some((issue) => issue.message.includes("duplicated"))).toBe(true);
+    expect(result.issues.some((issue) => issue.fieldPath.endsWith("enemyTypeId"))).toBe(true);
+    expect(result.issues.filter((issue) => issue.message.includes("Unknown currency"))).toHaveLength(2);
+    expect(result.issues.some((issue) => issue.fieldPath.endsWith("seconds"))).toBe(true);
+    expect(result.issues.some((issue) => issue.fieldPath.endsWith("label"))).toBe(true);
+  });
+
   // 2.6: structured, coded validation errors
   it("gives every issue a stable, machine-branchable code derived from entityKind+fieldPath", () => {
     const content = abilityValidationContent({
@@ -299,6 +331,84 @@ describe("validateGameContentRegistry", () => {
     expect(issue?.hint).toMatch(/strictly less than 1/);
     expect(issue?.expected).toBe("0 < slowFactor < 1");
     expect(issue?.got).toBe("1.5");
+  });
+
+  it("rejects unknown or empty author-defined target-class filters", () => {
+    const content = abilityValidationContent({});
+    (content.towers ??= {}).mortar = {
+      id: "mortar", label: "Mortar", cost: {}, footprintRadius: 0, range: 3,
+      attack: {
+        kind: "splash", interval: 1, damage: 1, splashDamage: 1, armoredChipDamage: 0,
+        splashRadius: 1, slowFactor: 0.5, slowDuration: 1, affectsClasses: ["space"]
+      }
+    } as unknown as GameContentInput["balance"]["towers"][string];
+    const result = validateGameContentRegistry(content);
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      entityId: "mortar", fieldPath: "attack.affectsClasses", code: "TOWER_ATTACK_AFFECTSCLASSES"
+    }));
+  });
+
+  it("reports malformed pipeline effect entries without throwing", () => {
+    const content = abilityValidationContent({});
+    (content.towers ??= {}).pipeline = {
+      id: "pipeline", label: "Pipeline", cost: {}, footprintRadius: 0, range: 3,
+      attack: {
+        kind: "pipeline", interval: 1, delivery: { kind: "single" },
+        effects: [null, { kind: "damage", amount: 1, armorPiercing: "yes" }]
+      }
+    } as unknown as GameContentInput["balance"]["towers"][string];
+    expect(() => validateGameContentRegistry(content)).not.toThrow();
+    const result = validateGameContentRegistry(content);
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityId: "pipeline", fieldPath: "attack.effects[0]" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityId: "pipeline", fieldPath: "attack.effects[1].armorPiercing" }));
+  });
+
+  it("reports malformed difficulty and meta-progression containers without throwing", () => {
+    const content = abilityValidationContent({});
+    content.difficulties = "normal" as unknown as GameContentRegistry["difficulties"];
+    content.metaProgression = {
+      currencies: { shards: true },
+      upgrades: { broken: null },
+      rewardsByMission: { m: null }
+    } as unknown as GameContentRegistry["metaProgression"];
+
+    expect(() => validateGameContentRegistry(content)).not.toThrow();
+    const result = validateGameContentRegistry(content);
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "difficulty", fieldPath: "difficulties" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "metaProgression", fieldPath: "currencies" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "metaUpgrade", entityId: "broken", fieldPath: "root" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "metaReward", entityId: "m", fieldPath: "root" }));
+  });
+
+  it("validates TowerScript bindings, expressions, and referenced actions", () => {
+    const content = abilityValidationContent({});
+    content.scripts = {
+      broken_rules: {
+        schemaVersion: 1,
+        id: "broken_rules",
+        bindings: [{ scope: "tower", ids: ["missing_tower"] }, { scope: "wave", ids: ["missing_wave_set"] }],
+        handlers: {
+          tick: [{
+            every: 0,
+            when: { $get: "event.__proto__.value" },
+            actions: [
+              { action: "grantResource", resourceId: "missing_currency", amount: 1 },
+              { action: "spawnEnemy", enemyTypeId: "missing_enemy" },
+              { action: "applyStatus", target: "allTowers", status: { slow: { factor: 2, duration: 0 } } }
+            ]
+          }]
+        }
+      }
+    };
+    const result = validateGameContentRegistry(content);
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "script", entityId: "broken_rules", fieldPath: "bindings[0].ids" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "script", entityId: "broken_rules", fieldPath: "bindings[1].ids" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "script", entityId: "broken_rules", fieldPath: "handlers.tick[0].every" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "script", entityId: "broken_rules", fieldPath: "handlers.tick[0].when.$get" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "script", entityId: "broken_rules", fieldPath: "handlers.tick[0].actions[0].resourceId" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "script", entityId: "broken_rules", fieldPath: "handlers.tick[0].actions[2].target" }));
+    expect(result.issues).toContainEqual(expect.objectContaining({ entityKind: "script", entityId: "broken_rules", fieldPath: "handlers.tick[0].actions[2].status.slow.factor" }));
   });
 
   // Regression: agent-authored JSON that omits `attack` entirely (or sets it to null/an array) used

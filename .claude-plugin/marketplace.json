@@ -5,7 +5,7 @@
     {
       "name": "towerforge",
       "source": "./",
-      "description": "Author, validate, simulate, balance, build, and package tower-defense games (.tdproj) through validated MCP tools with dry-run diffs, revision tokens, and rollback. Includes the /towerforge authoring-loop command. Requires `npm install` in the plugin checkout once (the engine builds itself on first tool call)."
+      "description": "Author tower-defense games through universal effects, deterministic TowerScript, progression, maps, themes, assets, simulation, and balance. Validated MCP writes use dry-run diffs, revision tokens, backups, and rollback. Includes the /towerforge authoring guide. Requires `npm install` in the plugin checkout once."
     }
   ]
 }

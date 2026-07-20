@@ -16,7 +16,9 @@ export function defaultVisuals() {
     },
     audio: {
       sounds: {},
-      events: {}
+      events: {},
+      musicTracks: {},
+      musicByMission: {}
     }
   };
 }
@@ -61,9 +63,16 @@ export function normalizeVisuals(input) {
   visuals.audio = visuals.audio && typeof visuals.audio === "object" ? visuals.audio : {};
   visuals.audio.sounds ??= {};
   visuals.audio.events ??= {};
+  visuals.audio.musicTracks ??= {};
+  visuals.audio.musicByMission ??= {};
   for (const sound of Object.values(visuals.audio.sounds)) {
     if (sound && typeof sound === "object" && typeof sound.src === "string") {
       sound.src = normalizeRelativeAssetPath(sound.src, visuals.assetsRoot);
+    }
+  }
+  for (const track of Object.values(visuals.audio.musicTracks)) {
+    if (track && typeof track === "object" && typeof track.src === "string") {
+      track.src = normalizeRelativeAssetPath(track.src, visuals.assetsRoot);
     }
   }
   return visuals;
@@ -95,15 +104,110 @@ export function validateProjectSchemas(files) {
   }
 
   validateMaps(files.maps, err, warn);
+  for (const issue of files.scriptIssues ?? []) {
+    err("scriptFile", issue.path ?? "scripts", "source", issue.message ?? "Invalid TowerScript file.");
+  }
   validateMapSources(files.mapSources ?? {}, err, warn);
   issues.push(...compileMapSources(files.mapSources ?? {}).issues);
-  validateVisuals(files.visuals, err, warn);
+  validateVisuals(files.visuals, err, warn, files.balance);
+  validateNarrative(files, err, warn);
   validateBuildTargets(files.buildTargets, err);
 
   return {
     ok: issues.filter((i) => i.severity === "error").length === 0,
     issues
   };
+}
+
+function validateNarrative(files, err, warn) {
+  const story = files.storyComics;
+  if (story === undefined) {
+    // Backward-compatible partial schema callers and legacy projects get the loader defaults.
+  } else if (!story || typeof story !== "object" || Array.isArray(story)) {
+    err("story", "content/story-comics.json", "root", "story-comics.json must be an object.");
+  } else {
+    if (typeof story.seenStoragePrefix !== "string" || story.seenStoragePrefix.trim() === "") {
+      err("story", "content/story-comics.json", "seenStoragePrefix", "seenStoragePrefix must be a non-empty string.");
+    }
+    if (!story.comics || typeof story.comics !== "object" || Array.isArray(story.comics)) {
+      err("story", "content/story-comics.json", "comics", "comics must be an object keyed by comic ID.");
+    } else {
+      for (const [comicId, comic] of Object.entries(story.comics)) {
+        const base = `comics.${comicId}`;
+        if (!comic || typeof comic !== "object" || Array.isArray(comic)) {
+          err("story", comicId, base, `Comic "${comicId}" must be an object.`);
+          continue;
+        }
+        if (typeof comic.missionId !== "string" || !files.balance?.missions?.[comic.missionId]) {
+          err("story", comicId, `${base}.missionId`, `Comic "${comicId}" must reference an existing mission.`);
+        }
+        if (comic.trigger !== undefined && !["beforeMission", "afterVictory"].includes(comic.trigger)) {
+          err("story", comicId, `${base}.trigger`, "trigger must be beforeMission or afterVictory.");
+        }
+        if (comic.replay !== undefined && !["once", "always"].includes(comic.replay)) {
+          err("story", comicId, `${base}.replay`, "replay must be once or always.");
+        }
+        if (!Array.isArray(comic.panels) || comic.panels.length === 0) {
+          err("story", comicId, `${base}.panels`, `Comic "${comicId}" must contain at least one panel.`);
+          continue;
+        }
+        comic.panels.forEach((panel, index) => {
+          const panelPath = `${base}.panels.${index}`;
+          if (!panel || typeof panel !== "object" || Array.isArray(panel)) {
+            err("story", comicId, panelPath, "Story panel must be an object.");
+            return;
+          }
+          if (typeof panel.text !== "string" || panel.text.trim() === "") {
+            err("story", comicId, `${panelPath}.text`, "Story panel text must be a non-empty string.");
+          }
+          if (panel.spriteId !== undefined && !files.visuals?.sprites?.[panel.spriteId]) {
+            err("story", comicId, `${panelPath}.spriteId`, `Story panel references unknown sprite "${panel.spriteId}".`);
+          }
+        });
+      }
+    }
+  }
+
+  const backgrounds = files.battleBackgrounds;
+  if (backgrounds === undefined) return;
+  if (!backgrounds || typeof backgrounds !== "object" || Array.isArray(backgrounds)) {
+    err("battleBackground", "content/battle-backgrounds.json", "root", "battle-backgrounds.json must be an object.");
+    return;
+  }
+  if (!backgrounds.definitions || typeof backgrounds.definitions !== "object" || Array.isArray(backgrounds.definitions)) {
+    err("battleBackground", "content/battle-backgrounds.json", "definitions", "definitions must be an object keyed by mission ID.");
+    return;
+  }
+  if (backgrounds.fallbackMissionId && !backgrounds.definitions[backgrounds.fallbackMissionId]) {
+    warn("battleBackground", "content/battle-backgrounds.json", "fallbackMissionId", "fallbackMissionId has no matching background definition.");
+  }
+  if (!Array.isArray(backgrounds.placeholderMissionIds)) {
+    err("battleBackground", "content/battle-backgrounds.json", "placeholderMissionIds", "placeholderMissionIds must be an array.");
+  } else {
+    for (const missionId of backgrounds.placeholderMissionIds) {
+      if (!files.balance?.missions?.[missionId]) warn("battleBackground", missionId, "placeholderMissionIds", `Placeholder references unknown mission "${missionId}".`);
+    }
+  }
+  for (const [definitionId, definition] of Object.entries(backgrounds.definitions)) {
+    const base = `definitions.${definitionId}`;
+    if (!definition || typeof definition !== "object" || Array.isArray(definition)) {
+      err("battleBackground", definitionId, base, `Background "${definitionId}" must be an object.`);
+      continue;
+    }
+    const missionId = definition.missionId ?? definitionId;
+    if (!files.balance?.missions?.[missionId]) {
+      err("battleBackground", definitionId, `${base}.missionId`, `Background "${definitionId}" must reference an existing mission.`);
+    }
+    if (definition.color !== undefined && !/^#[0-9a-f]{6}$/i.test(definition.color)) {
+      err("battleBackground", definitionId, `${base}.color`, "color must use six-digit hex notation, for example #101410.");
+    }
+    if (definition.opacity !== undefined && (!Number.isFinite(definition.opacity) || definition.opacity < 0 || definition.opacity > 1)) {
+      err("battleBackground", definitionId, `${base}.opacity`, "opacity must be a number from 0 to 1.");
+    }
+    if (definition.spriteId !== undefined && !files.visuals?.sprites?.[definition.spriteId]) {
+      err("battleBackground", definitionId, `${base}.spriteId`, `Background references unknown sprite "${definition.spriteId}".`);
+    }
+  }
 }
 
 export function validateSafeAssetPath(assetPath, fieldPath = "asset") {
@@ -141,16 +245,38 @@ export function listVisualAssetPaths(visuals) {
   for (const [soundId, sound] of Object.entries(visuals?.audio?.sounds ?? {})) {
     if (typeof sound?.src === "string") add({ kind: "sound", id: soundId, path: sound.src });
   }
+  for (const [trackId, track] of Object.entries(visuals?.audio?.musicTracks ?? {})) {
+    if (typeof track?.src === "string") add({ kind: "music", id: trackId, path: track.src });
+  }
   return paths;
 }
 
-function validateVisuals(visuals, err, warn) {
+function validateVisuals(visuals, err, warn, balance) {
   if (!visuals || typeof visuals !== "object") {
     err("visuals", "content/visuals.json", "root", "visuals.json must be an object.");
     return;
   }
   const assetsRootIssue = validateSafeAssetPath(visuals.assetsRoot ?? "assets", "assetsRoot");
   if (assetsRootIssue) err("visuals", "content/visuals.json", "assetsRoot", assetsRootIssue);
+
+  if (visuals.theme !== undefined) {
+    if (!visuals.theme || typeof visuals.theme !== "object" || Array.isArray(visuals.theme)) {
+      err("visuals", "content/visuals.json", "theme", "theme must be an object.");
+    } else {
+      for (const groupName of ["ui", "renderer"]) {
+        const group = visuals.theme[groupName];
+        if (!group || typeof group !== "object" || Array.isArray(group)) {
+          err("visuals", "content/visuals.json", `theme.${groupName}`, `theme.${groupName} must be a color palette object.`);
+          continue;
+        }
+        for (const [key, color] of Object.entries(group)) {
+          if (!/^[a-z][a-z0-9-]*$/i.test(key) || !/^#[0-9a-f]{6}$/i.test(color)) {
+            err("visuals", "content/visuals.json", `theme.${groupName}.${key}`, `Theme color "${key}" must use a safe CSS variable name and six-digit hex value.`);
+          }
+        }
+      }
+    }
+  }
 
   for (const [atlasId, atlas] of Object.entries(visuals.atlases ?? {})) {
     if (!atlas || typeof atlas !== "object") {
@@ -216,6 +342,27 @@ function validateVisuals(visuals, err, warn) {
     if (soundId && !sounds[soundId]) {
       warn("visuals", event, `audio.events.${event}`, `Action "${event}" is bound to unknown sound "${soundId}".`);
     }
+  }
+  const tracks = visuals.audio?.musicTracks ?? {};
+  for (const [trackId, track] of Object.entries(tracks)) {
+    if (!track || typeof track !== "object") {
+      err("visuals", trackId, `audio.musicTracks.${trackId}`, `Music track "${trackId}" must be an object.`);
+      continue;
+    }
+    if (track.src !== undefined) {
+      const safeIssue = validateSafeAssetPath(track.src, `audio.musicTracks.${trackId}.src`);
+      if (safeIssue) err("visuals", trackId, `audio.musicTracks.${trackId}.src`, safeIssue);
+    }
+    if (track.volume !== undefined && (!Number.isFinite(track.volume) || track.volume < 0 || track.volume > 1)) {
+      err("visuals", trackId, `audio.musicTracks.${trackId}.volume`, `Music track volume must be between 0 and 1.`);
+    }
+  }
+  const musicByMission = visuals.audio?.musicByMission ?? {};
+  if (!musicByMission || typeof musicByMission !== "object" || Array.isArray(musicByMission)) {
+    err("visuals", "content/visuals.json", "audio.musicByMission", "audio.musicByMission must be an object keyed by mission id.");
+  } else for (const [missionId, trackId] of Object.entries(musicByMission)) {
+    if (trackId && !tracks[trackId]) warn("visuals", missionId, `audio.musicByMission.${missionId}`, `Mission "${missionId}" is bound to unknown music track "${trackId}".`);
+    if (trackId && balance?.missions && !balance.missions[missionId]) warn("visuals", missionId, `audio.musicByMission.${missionId}`, `Music is bound to unknown mission "${missionId}".`);
   }
 }
 

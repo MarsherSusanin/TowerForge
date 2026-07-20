@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">TowerForge application icon</title>
+  <desc id="desc">A modular tower inside a hexagonal tile on a dark app icon.</desc>
+  <rect x="72" y="72" width="880" height="880" rx="208" fill="#111411"/>
+  <rect x="90" y="90" width="844" height="844" rx="190" fill="none" stroke="#273129" stroke-width="12"/>
+  <g transform="translate(192 192) scale(10)">
+    <path fill="#151a16" stroke="#7eb87e" stroke-width="3" stroke-linejoin="round" d="M32 4 56 18v28L32 60 8 46V18L32 4Z"/>
+    <path fill="none" stroke="#6ea8d8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".72" d="m8 18 24 14 24-14M32 32v28"/>
+    <path fill="#e8e8e8" d="M19 18h7v5h4v-5h4v5h4v-5h7v11h-4v16.5L32 51l-9-5.5V29h-4V18Z"/>
+    <path fill="#7eb87e" d="M28 31h8v13l-4 2.5-4-2.5V31Z"/>
+    <path fill="#e8a44a" d="m47.5 8 1.5 3.5 3.5 1.5-3.5 1.5-1.5 3.5-1.5-3.5-3.5-1.5 3.5-1.5L47.5 8Z"/>
+  </g>
+</svg>

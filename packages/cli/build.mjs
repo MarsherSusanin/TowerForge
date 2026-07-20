@@ -17,7 +17,7 @@ import { parseJsonFlag, printJson } from "./lib/trace.mjs";
 
 function parseArgs() {
   const raw = process.argv.slice(2);
-  const result = { projectDir: null, targetId: null, outDir: null, json: parseJsonFlag(raw) };
+  const result = { projectDir: null, targetId: null, outDir: null, json: parseJsonFlag(raw), singleFile: false };
   let i = 0;
   while (i < raw.length) {
     if (raw[i] === "--project" && raw[i + 1]) {
@@ -30,6 +30,9 @@ function parseArgs() {
       result.outDir = raw[i + 1];
       i += 2;
     } else if (raw[i] === "--json") {
+      i += 1;
+    } else if (raw[i] === "--single-file") {
+      result.singleFile = true;
       i += 1;
     } else {
       // A bare positional (not a flag or a flag's value) is the project path, matching
@@ -90,11 +93,15 @@ try {
     balance: files.balance,
     worldMap: files.worldMap,
     maps: files.maps,
+    scripts: files.scripts,
     visuals: files.visuals,
+    storyComics: files.storyComics,
+    battleBackgrounds: files.battleBackgrounds,
     buildTarget: target
   });
   fs.writeFileSync(path.join(outDir, "index.html"), htmlTemplate(files.manifest, target, renderer), "utf8");
   fs.writeFileSync(path.join(outDir, "styles.css"), cssTemplate(target), "utf8");
+  fs.writeFileSync(path.join(outDir, "boot.js"), bootRecoveryTemplate(), "utf8");
   fs.writeFileSync(path.join(outDir, "player.mjs"), renderer === "phaser" ? phaserPlayerTemplate() : playerTemplate(), "utf8");
   fs.writeFileSync(path.join(outDir, "manifest.webmanifest"), JSON.stringify(webManifest(files.manifest, target), null, 2) + "\n", "utf8");
 
@@ -112,6 +119,23 @@ try {
   }
   const cacheVersion = versionHash.digest("hex").slice(0, 16);
   fs.writeFileSync(path.join(outDir, "offline-sw.js"), serviceWorkerTemplate(precacheAssets, cacheVersion), "utf8");
+
+  let singleFilePath = null;
+  if (args.singleFile) {
+    singleFilePath = path.join(outDir, "index.single.html");
+    const embeddedProject = {
+      manifest: files.manifest,
+      balance: files.balance,
+      worldMap: files.worldMap,
+      maps: files.maps,
+      scripts: files.scripts,
+      visuals: embedVisualAssets(PROJECT_DIR, files.visuals),
+      storyComics: files.storyComics,
+      battleBackgrounds: files.battleBackgrounds,
+      buildTarget: target
+    };
+    fs.writeFileSync(singleFilePath, singleFileHtml(outDir, files.manifest, target, renderer, embeddedProject), "utf8");
+  }
 
   // The phaser player renders flat shapes only — it does not consume visuals.bindings/sprites yet.
   // Warn honestly at build time (instead of silently dropping the art) so an author using custom
@@ -133,6 +157,7 @@ try {
     copiedAssets: assetCopy.copied,
     missingAssets: assetCopy.missing,
     invalidAssets: assetCopy.invalid,
+    singleFilePath,
     warnings
   };
   if (args.json) {
@@ -143,7 +168,8 @@ try {
       console.warn(`  ! ${assetCopy.missing.length} visual asset(s) were referenced but not found.`);
     }
     for (const warning of warnings) console.warn(`  ! ${warning}`);
-    console.log(`  Serve ${outDir} with any static server, then open index.html.`);
+    if (singleFilePath) console.log(`  Open ${singleFilePath} directly, or serve ${outDir} and open index.html.`);
+    else console.log(`  Serve ${outDir} with any static server, then open index.html.`);
   }
 } catch (error) {
   if (args.json) printJson({ ok: false, error: error.message, issues: error.issues ?? [] });
@@ -200,6 +226,72 @@ function writeJsonModule(filePath, data) {
   fs.writeFileSync(filePath, `export default ${JSON.stringify(data, null, 2)};\n`, "utf8");
 }
 
+function embedVisualAssets(projectDir, visuals) {
+  const embedded = JSON.parse(JSON.stringify(visuals ?? {}));
+  const groups = [embedded.atlases, embedded.sprites, embedded.audio?.sounds, embedded.audio?.musicTracks];
+  for (const group of groups) {
+    for (const entry of Object.values(group ?? {})) {
+      if (!entry?.src || /^(?:data:|blob:|https?:)/i.test(entry.src)) continue;
+      const absolute = path.resolve(projectDir, entry.src);
+      const relative = path.relative(projectDir, absolute);
+      if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || !fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) continue;
+      entry.src = `data:${mimeType(absolute)};base64,${fs.readFileSync(absolute).toString("base64")}`;
+    }
+  }
+  return embedded;
+}
+
+function mimeType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  return ({
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif",
+    ".svg": "image/svg+xml", ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav", ".m4a": "audio/mp4"
+  })[ext] ?? "application/octet-stream";
+}
+
+function singleFileHtml(outDir, manifest, target, renderer, projectData) {
+  const virtual = new Map([
+    [path.resolve(outDir, "project-data.js"), `export default ${JSON.stringify(projectData)};\n`]
+  ]);
+  const entryPath = path.resolve(outDir, "player.mjs");
+  const entry = rewriteModuleImports(entryPath, outDir, virtual, new Map(), []);
+  let html = htmlTemplate(manifest, target, renderer);
+  html = html.replace(/\s*<link rel="manifest"[^>]*>/, "");
+  html = html.replace('  <link rel="stylesheet" href="./styles.css">', `  <style>${escapeInlineStyle(cssTemplate(target))}</style>`);
+  if (renderer === "phaser") {
+    const phaser = fs.readFileSync(path.join(outDir, "vendor", "phaser.min.js"), "utf8");
+    html = html.replace('  <script src="./vendor/phaser.min.js"></script>', `  <script>${escapeInlineScript(phaser)}</script>`);
+  }
+  html = html.replace('  <script src="./boot.js"></script>', `  <script>${escapeInlineScript(bootRecoveryTemplate())}</script>`);
+  html = html.replace('  <script type="module" src="./player.mjs"></script>', `  <script type="module">${escapeInlineScript(entry)}</script>`);
+  return html;
+}
+
+function rewriteModuleImports(filePath, moduleRoot, virtual, memo, stack) {
+  const absolute = path.resolve(filePath);
+  if (stack.includes(absolute)) throw new Error(`Single-file module graph contains a cycle: ${[...stack, absolute].map((item) => path.relative(moduleRoot, item)).join(" -> ")}`);
+  let source = virtual.get(absolute) ?? fs.readFileSync(absolute, "utf8");
+  const nextStack = [...stack, absolute];
+  const importPattern = /\b(?:import|export)\s+(?:[^"']*?\s+from\s+)?(["'])([^"']+)\1/g;
+  source = source.replace(importPattern, (statement, quote, specifier) => {
+    if (!specifier.startsWith(".")) return statement;
+    const dependency = path.resolve(path.dirname(absolute), specifier);
+    const relative = path.relative(moduleRoot, dependency);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`Single-file module escapes build output: ${specifier}`);
+    let url = memo.get(dependency);
+    if (!url) {
+      const rewritten = rewriteModuleImports(dependency, moduleRoot, virtual, memo, nextStack);
+      url = `data:text/javascript;base64,${Buffer.from(rewritten, "utf8").toString("base64")}`;
+      memo.set(dependency, url);
+    }
+    return statement.replace(`${quote}${specifier}${quote}`, `${quote}${url}${quote}`);
+  });
+  return source;
+}
+
+function escapeInlineScript(value) { return String(value).replace(/<\/script/gi, "<\\/script"); }
+function escapeInlineStyle(value) { return String(value).replace(/<\/style/gi, "<\\/style"); }
+
 function webManifest(manifest, target) {
   return {
     name: target.manifest?.name ?? target.appTitle ?? manifest.name ?? "TowerForge TD",
@@ -214,7 +306,9 @@ function webManifest(manifest, target) {
 
 function htmlTemplate(manifest, target, renderer = "canvas") {
   const title = esc(target.appTitle ?? manifest.name ?? "TowerForge TD");
-  const playfield = renderer === "phaser" ? `<div id="playfield"></div>` : `<canvas id="playfield"></canvas>`;
+  const playfield = renderer === "phaser"
+    ? `<div id="playfield" tabindex="0" role="application" aria-label="Hex battlefield. Use arrow keys to move the tile cursor and Enter to act."></div>`
+    : `<canvas id="playfield" tabindex="0" role="application" aria-label="Hex battlefield. Use arrow keys to move the tile cursor and Enter to act."></canvas>`;
   const phaserScript = renderer === "phaser" ? `\n  <script src="./vendor/phaser.min.js"></script>` : "";
   return `<!doctype html>
 <html lang="en">
@@ -238,8 +332,11 @@ function htmlTemplate(manifest, target, renderer = "canvas") {
       </div>
       <div class="controls">
         <label>Mission <select id="mission-select"></select></label>
+        <label>Difficulty <select id="difficulty-select"></select></label>
         <label>Tower <select id="tower-select"></select></label>
         <button id="start-wave">Start wave</button>
+        <button id="pause-run" aria-pressed="false" title="Pause or resume (Space)">Pause</button>
+        <button id="sell-mode" aria-pressed="false" title="Sell a tower">Sell</button>
         <button id="reset-run">Reset</button>
         <button id="reset-progress" title="Clear saved campaign progress">Reset progress</button>
       </div>
@@ -247,23 +344,85 @@ function htmlTemplate(manifest, target, renderer = "canvas") {
     <section class="play-shell">
       ${playfield}
       <aside class="panel">
-        <div class="stat"><span>Outcome</span><strong id="stat-outcome">playing</strong></div>
+        <div class="stat"><span>Outcome</span><strong id="stat-outcome" aria-live="polite">playing</strong></div>
         <div class="stat"><span>Core</span><strong id="stat-core">-</strong></div>
         <div class="stat"><span>Resources</span><strong id="stat-resources">-</strong></div>
         <div class="stat"><span>Wave</span><strong id="stat-wave">-</strong></div>
         <div class="stat"><span>Enemies</span><strong id="stat-enemies">-</strong></div>
         <div class="stat"><span>Towers</span><strong id="stat-towers">-</strong></div>
+        <div class="stat"><span>Objectives</span><strong id="stat-objectives">-</strong></div>
+        <label class="targeting">Target priority <select id="target-mode" disabled>
+          <option value="first">First</option><option value="last">Last</option><option value="closest">Closest</option>
+          <option value="furthest">Furthest</option><option value="strongest">Strongest</option><option value="weakest">Weakest</option>
+        </select></label>
         <label class="speed">Speed <input id="speed" type="range" min="0" max="4" step="0.25" value="1"><span id="speed-label">1x</span></label>
         <label class="speed">Sound <input id="snd" type="checkbox" checked style="width:auto;justify-self:start"></label>
+        <label class="speed">SFX <input id="sfx-volume" type="range" min="0" max="1" step="0.05" value="0.5"><span id="sfx-volume-label">50%</span></label>
+        <label class="speed">Music <input id="music-volume" type="range" min="0" max="1" step="0.05" value="0.35"><span id="music-volume-label">35%</span></label>
         <div id="ability-bar" class="ability-bar"></div>
-        <p id="message"></p>
+        <section id="meta-panel" class="meta-panel" aria-label="Permanent upgrades" hidden>
+          <div class="meta-title">Forge upgrades <span id="meta-resources"></span></div>
+          <div id="meta-upgrades" class="meta-upgrades"></div>
+        </section>
+        <p id="message" role="status" aria-live="polite"></p>
       </aside>
     </section>
-  </main>${phaserScript}
+  </main>
+  <section id="boot-error" class="boot-error" role="alertdialog" aria-modal="true" aria-labelledby="boot-error-title" hidden>
+    <div class="boot-error-panel">
+      <h2 id="boot-error-title">The game could not start</h2>
+      <p id="boot-error-message">Reload the game. If the problem continues, reset local progress.</p>
+      <div class="boot-error-actions">
+        <button type="button" id="boot-reload">Reload</button>
+        <button type="button" id="boot-reset">Reset local progress</button>
+      </div>
+    </div>
+  </section>
+  <section id="story-overlay" class="story-overlay" role="dialog" aria-modal="true" aria-labelledby="story-title" hidden>
+    <div class="story-panel">
+      <div id="story-art" class="story-art" hidden></div>
+      <div class="story-copy">
+        <h2 id="story-title"></h2>
+        <p id="story-speaker" class="story-speaker"></p>
+        <p id="story-text" class="story-text"></p>
+        <div class="story-actions">
+          <button type="button" id="story-skip">Skip</button>
+          <button type="button" id="story-next">Next</button>
+        </div>
+      </div>
+    </div>
+  </section>
+  <script src="./boot.js"></script>${phaserScript}
   <script type="module" src="./player.mjs"></script>
 </body>
 </html>
 `;
+}
+
+function bootRecoveryTemplate() {
+  return `(() => {
+  const reveal = (reason) => {
+    const overlay = document.getElementById("boot-error");
+    if (!overlay || window.__towerforgeBootOk) return;
+    const message = document.getElementById("boot-error-message");
+    if (message && reason) message.textContent = String(reason);
+    overlay.hidden = false;
+    document.getElementById("boot-reload").onclick = () => location.reload();
+    document.getElementById("boot-reset").onclick = () => {
+      try {
+        for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+          const key = localStorage.key(i) || "";
+          if (key.startsWith("towerforge:progress:") || key.startsWith("story_seen_")) localStorage.removeItem(key);
+        }
+      } catch {}
+      location.reload();
+    };
+    document.getElementById("boot-reload").focus();
+  };
+  window.addEventListener("error", (event) => reveal(event.error?.message || event.message));
+  window.addEventListener("unhandledrejection", (event) => reveal(event.reason?.message || event.reason || "The game failed while starting."));
+  setTimeout(() => reveal("The game did not finish starting."), 5000);
+})();\n`;
 }
 
 function cssTemplate(target) {
@@ -275,7 +434,7 @@ function cssTemplate(target) {
 body{overflow:hidden;overscroll-behavior:none;touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
 .hud{padding-top:calc(12px + env(safe-area-inset-top))}
 .panel{padding-bottom:calc(14px + env(safe-area-inset-bottom))}
-button,select,input{font:inherit}button,select{border:1px solid var(--border);border-radius:6px;background:#111611;color:var(--text);padding:8px 10px}button{cursor:pointer}button:hover{border-color:var(--accent)}#app{height:100%;display:flex;flex-direction:column}.hud{display:flex;gap:18px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface)}h1{font-size:18px;line-height:1.1;margin:0;color:var(--accent);letter-spacing:0}p{margin:4px 0 0;color:var(--muted)}.controls{margin-left:auto;display:flex;gap:10px;align-items:end;flex-wrap:wrap}.controls label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}.play-shell{min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,1fr) 260px}#playfield{width:100%;height:100%;display:block;background:#101410;overflow:hidden}#playfield canvas{display:block}.panel{border-left:1px solid var(--border);background:var(--panel);padding:14px;display:flex;flex-direction:column;gap:10px}.stat{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}.stat span{color:var(--muted)}.stat strong{font-variant-numeric:tabular-nums}.speed{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;color:var(--muted);margin-top:8px}#message{min-height:42px;padding:10px;border:1px solid var(--border);border-radius:6px;background:#161a16;color:var(--text)}.ability-bar{display:flex;flex-wrap:wrap;gap:6px}.ability-bar:empty{display:none}.ability-bar button{padding:6px 9px;font-size:12px}.ability-bar button.armed{border-color:var(--accent);color:var(--accent)}.ability-bar button:disabled{opacity:.45;cursor:default}@media(max-width:820px){body{overflow:auto}.hud{align-items:flex-start;flex-direction:column}.controls{margin-left:0}.play-shell{grid-template-columns:1fr;grid-template-rows:65vh auto}.panel{border-left:0;border-top:1px solid var(--border)}}`;
+button,select,input{font:inherit}button,select{border:1px solid var(--border);border-radius:6px;background:#111611;color:var(--text);padding:8px 10px}button{cursor:pointer}button:hover{border-color:var(--accent)}button:focus-visible,select:focus-visible,input:focus-visible,#playfield:focus-visible{outline:2px solid var(--accent);outline-offset:2px}button[aria-pressed="true"]{border-color:var(--danger);color:var(--danger)}#app{height:100%;display:flex;flex-direction:column}.hud{display:flex;gap:18px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface)}h1{font-size:18px;line-height:1.1;margin:0;color:var(--accent);letter-spacing:0}p{margin:4px 0 0;color:var(--muted)}.controls{margin-left:auto;display:flex;gap:10px;align-items:end;flex-wrap:wrap}.controls label{display:flex;flex-direction:column;gap:4px;color:var(--muted);font-size:12px}.play-shell{min-height:0;flex:1;display:grid;grid-template-columns:minmax(0,1fr) 280px}#playfield{width:100%;height:100%;display:block;background:#101410;overflow:hidden;background-position:center;background-size:cover;background-repeat:no-repeat}#playfield canvas{display:block}.panel{border-left:1px solid var(--border);background:var(--panel);padding:14px;display:flex;flex-direction:column;gap:10px;overflow:auto}.stat{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}.stat span{color:var(--muted)}.stat strong{font-variant-numeric:tabular-nums}.targeting{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px;align-items:center;color:var(--muted);font-size:13px}.targeting select{min-width:0}.speed{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;color:var(--muted);margin-top:8px}#message{min-height:42px;padding:10px;border:1px solid var(--border);border-radius:6px;background:#161a16;color:var(--text)}.ability-bar{display:flex;flex-wrap:wrap;gap:6px}.ability-bar:empty{display:none}.ability-bar button{padding:6px 9px;font-size:12px}.ability-bar button.armed{border-color:var(--accent);color:var(--accent)}.ability-bar button:disabled{opacity:.45;cursor:default}.meta-panel{border-top:1px solid var(--border);padding-top:10px}.meta-title{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:12px;text-transform:uppercase}.meta-upgrades{display:grid;gap:6px;margin-top:8px}.meta-upgrade{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:center;padding:7px;border:1px solid var(--border);border-radius:6px;background:#161a16}.meta-upgrade span{min-width:0;font-size:12px}.meta-upgrade button{padding:5px 7px;font-size:11px}.boot-error,.story-overlay{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:24px;background:#0b0e0bdd}.boot-error[hidden],.story-overlay[hidden]{display:none}.boot-error-panel{width:min(460px,100%);padding:22px;border:1px solid var(--danger);border-radius:6px;background:var(--surface);box-shadow:0 20px 60px #0009}.boot-error-panel h2{margin:0 0 8px;font-size:20px}.boot-error-actions,.story-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}.story-panel{width:min(820px,100%);max-height:min(680px,90vh);display:grid;grid-template-columns:minmax(0,1.2fr) minmax(280px,.8fr);overflow:hidden;border:1px solid var(--border);border-radius:6px;background:var(--surface);box-shadow:0 20px 60px #0009}.story-art{min-height:360px;background-position:center;background-size:cover;background-repeat:no-repeat;background-color:#101410}.story-copy{padding:24px;align-self:end}.story-copy h2{margin:0 0 18px;font-size:24px}.story-speaker{min-height:18px;color:var(--accent);font-weight:700}.story-text{color:var(--text);font-size:16px;line-height:1.55;white-space:pre-wrap}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}@media(max-width:820px){body{overflow:auto}.hud{align-items:flex-start;flex-direction:column}.controls{margin-left:0}.play-shell{grid-template-columns:1fr;grid-template-rows:65vh auto}.panel{border-left:0;border-top:1px solid var(--border)}.story-panel{grid-template-columns:1fr}.story-art{min-height:220px}.story-copy{padding:18px}}`;
 }
 
 function playerTemplate() {
@@ -288,24 +447,40 @@ const content = createGameContentRegistry({
   balance: project.balance,
   maps: project.maps,
   worldMap: project.worldMap,
-  visuals: project.visuals
+  scripts: project.scripts,
+  visuals: project.visuals,
+  storyComics: project.storyComics,
+  battleBackgrounds: project.battleBackgrounds
 });
 
 const $ = (id) => document.getElementById(id);
+applyProjectTheme();
 const audio = createAudioPlayer({ audio: project.visuals && project.visuals.audio });
 const canvas = $("playfield");
+const PROGRESS_KEY = "towerforge:progress:" + ((project.buildTarget && project.buildTarget.appId) || (project.manifest && project.manifest.name) || "game");
+const PROGRESS_VERSION = 2;
+let progress = loadProgress();
+let cleared = new Set(progress.clearedMissionIds);
 let missionId = content.defaultMissionId || Object.keys(content.missions)[0];
+let difficultyId = content.difficulties.some((item) => item.id === progress.selectedDifficultyId) ? progress.selectedDifficultyId : content.defaultDifficultyId;
 let towerId = content.missions[missionId]?.buildTowerIds?.[0] || Object.keys(content.towers)[0];
 let game = createGame();
-const renderer = createCanvasRenderer({ canvas, content });
+const renderer = createCanvasRenderer({ canvas, content, theme: content.visuals?.theme?.renderer });
 let lastFrame = performance.now();
 let message = "Choose a tower, click a buildable tile, then start the wave.";
 let armedAbility = null;
-const PROGRESS_KEY = "towerforge:progress:" + ((project.buildTarget && project.buildTarget.appId) || (project.manifest && project.manifest.name) || "game");
-let cleared = loadProgress();
+let sellMode = false;
+let selectedTowerId = null;
+let keyboardCoord = null;
+let lastRunningSpeed = 1;
+let activeStory = null;
+let storyWasRunning = false;
+let victoryRewarded = false;
+const shownStories = new Set();
 
 initSelectors();
 initAbilityBar();
+renderMetaPanel();
 resize();
 requestAnimationFrame(loop);
 window.addEventListener("resize", resize);
@@ -320,21 +495,130 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("./offline-sw.js").catch(() => {}));
 }
 $("start-wave").addEventListener("click", () => { audio.resume(); report(game.startNextWave()); });
-$("reset-run").addEventListener("click", () => { game = createGame(); initAbilityBar(); message = "Run reset."; });
-$("reset-progress")?.addEventListener("click", () => { cleared = new Set(); saveProgress(); refreshMissionOptions(); message = "Campaign progress reset."; });
-$("speed").addEventListener("input", () => $("speed-label").textContent = $("speed").value + "x");
-$("snd").addEventListener("change", () => { if ($("snd").checked) audio.resume(); });
+$("pause-run").addEventListener("click", () => setPaused(Number($("speed").value) > 0));
+$("sell-mode").addEventListener("click", () => setSellMode(!sellMode));
+$("reset-run").addEventListener("click", () => { game = createGame(); victoryRewarded = false; selectedTowerId = null; initAbilityBar(); setSellMode(false); message = "Run reset."; });
+$("reset-progress")?.addEventListener("click", () => { progress = emptyProgress(); cleared = new Set(); difficultyId = content.defaultDifficultyId; saveProgress(); refreshMissionOptions(); initDifficultySelector(); renderMetaPanel(); game = createGame(); victoryRewarded = false; message = "Campaign progress reset."; });
+$("speed").addEventListener("input", syncSpeedUi);
+$("snd").addEventListener("change", () => { syncAudioSettings(); if ($("snd").checked) audio.resume(); });
+$("sfx-volume").addEventListener("input", () => { syncAudioSettings(); if ($("snd").checked) audio.resume(); });
+$("music-volume").addEventListener("input", () => { syncAudioSettings(); if ($("snd").checked) audio.resume(); });
+$("target-mode").addEventListener("change", () => {
+  if (!selectedTowerId) return;
+  report(game.setTowerTargetMode(selectedTowerId, $("target-mode").value));
+});
+$("story-next").addEventListener("click", advanceStory);
+$("story-skip").addEventListener("click", finishStory);
+document.addEventListener("keydown", (event) => {
+  const tag = event.target?.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || event.target?.isContentEditable) return;
+  if (event.code === "Space") { event.preventDefault(); setPaused(Number($("speed").value) > 0); return; }
+  if (document.activeElement !== canvas) return;
+  const moves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  if (moves[event.key]) { event.preventDefault(); moveKeyboardCursor(moves[event.key][0], moves[event.key][1]); }
+  else if (event.key === "Enter") { event.preventDefault(); actAtCoord(ensureKeyboardCoord()); }
+  else if (event.key === "Escape") { event.preventDefault(); setArmed(null); setSellMode(false); message = "Build action cancelled."; }
+});
+syncSpeedUi();
+syncAudioSettings();
+applyBattleBackground();
+selectMissionMusic();
+showStoryForMission("beforeMission");
+window.__towerforgeBootOk = true;
+canvas.addEventListener("focus", () => syncKeyboardCursor(ensureKeyboardCoord()));
 canvas.addEventListener("click", (event) => {
   audio.resume();
   const coord = pickTile(event);
   if (!coord) return;
-  if (armedAbility) { report(game.useAbility(armedAbility, coord)); setArmed(null); return; }
-  if (!towerId) return;
-  report(game.placeTower(towerId, coord));
+  syncKeyboardCursor(coord);
+  actAtCoord(coord);
 });
 
+function actAtCoord(coord) {
+  if (!coord) return;
+  if (sellMode) {
+    const towerAt = game.getTowerIdAt(coord);
+    report(towerAt ? game.sellTower(towerAt) : { ok: false, reason: "Choose a tower tile." });
+    if (towerAt === selectedTowerId) selectedTowerId = null;
+    setSellMode(false);
+    return;
+  }
+  if (armedAbility) { report(game.useAbility(armedAbility, coord)); setArmed(null); return; }
+  const towerAt = game.getTowerIdAt(coord);
+  if (towerAt) { selectedTowerId = towerAt; message = "Tower selected."; return; }
+  if (!towerId) return;
+  const result = game.placeTower(towerId, coord);
+  report(result);
+  if (result.ok) selectedTowerId = game.getTowerIdAt(coord);
+}
+
+function ensureKeyboardCoord() {
+  const tiles = game.getSnapshot().tiles;
+  if (keyboardCoord && tiles.some((tile) => tile.q === keyboardCoord.q && tile.r === keyboardCoord.r)) return keyboardCoord;
+  const tile = tiles.find((item) => item.terrain === "buildable") || tiles[0];
+  keyboardCoord = tile ? { q: tile.q, r: tile.r } : null;
+  return keyboardCoord;
+}
+
+function syncKeyboardCursor(coord) {
+  keyboardCoord = coord ? { q: coord.q, r: coord.r } : null;
+  renderer.setFocusCoord(keyboardCoord);
+  const tile = keyboardCoord && game.getSnapshot().tiles.find((item) => item.q === keyboardCoord.q && item.r === keyboardCoord.r);
+  canvas.setAttribute("aria-label", tile ? "Hex battlefield. Selected tile q " + tile.q + ", r " + tile.r + ", " + tile.terrain + ". Arrow keys move; Enter acts; Escape cancels." : "Hex battlefield.");
+}
+
+function moveKeyboardCursor(dq, dr) {
+  const current = ensureKeyboardCoord();
+  if (!current) return;
+  const tiles = game.getSnapshot().tiles;
+  const targetQ = current.q + dq, targetR = current.r + dr;
+  const target = tiles.find((tile) => tile.q === targetQ && tile.r === targetR);
+  if (target) syncKeyboardCursor(target);
+}
+
 function createGame() {
-  return new TowerDefenseGame({ missionId, content });
+  return new TowerDefenseGame({ missionId, content, difficultyId, metaUpgradeLevels: progress.upgradeLevels });
+}
+
+function setSellMode(active) {
+  sellMode = Boolean(active);
+  $("sell-mode").setAttribute("aria-pressed", String(sellMode));
+  if (sellMode) { setArmed(null); message = "Click a tower to sell it."; }
+}
+
+function setPaused(paused) {
+  const speed = $("speed");
+  const current = Number(speed.value) || 0;
+  if (paused) {
+    if (current > 0) lastRunningSpeed = current;
+    speed.value = "0";
+  } else {
+    speed.value = String(lastRunningSpeed > 0 ? lastRunningSpeed : 1);
+  }
+  syncSpeedUi();
+}
+
+function syncSpeedUi() {
+  const speed = Number($("speed").value) || 0;
+  if (speed > 0) lastRunningSpeed = speed;
+  $("speed-label").textContent = speed + "x";
+  $("pause-run").textContent = speed > 0 ? "Pause" : "Resume";
+  $("pause-run").setAttribute("aria-pressed", String(speed === 0));
+}
+
+function syncAudioSettings() {
+  const enabled = $("snd").checked;
+  const sfxVolume = Number($("sfx-volume").value);
+  const musicVolume = Number($("music-volume").value);
+  audio.setVolumes(sfxVolume, musicVolume);
+  audio.setEnabled(enabled);
+  $("sfx-volume-label").textContent = Math.round(sfxVolume * 100) + "%";
+  $("music-volume-label").textContent = Math.round(musicVolume * 100) + "%";
+  $("music-volume").disabled = Object.keys(project.visuals?.audio?.musicTracks || {}).length === 0;
+}
+
+function selectMissionMusic() {
+  audio.selectMusic(project.visuals?.audio?.musicByMission?.[missionId] || "");
 }
 
 function initSelectors() {
@@ -342,15 +626,39 @@ function initSelectors() {
   // Start on an unlocked mission (the default may be gated behind unlockRequiresMissionIds).
   if (!isUnlocked(missionId)) { const first = Object.keys(content.missions).find(isUnlocked); if (first) { missionId = first; game = createGame(); } }
   refreshMissionOptions();
+  initDifficultySelector();
   missionSelect.addEventListener("change", () => {
     if (!isUnlocked(missionSelect.value)) { missionSelect.value = missionId; return; } // locked
     missionId = missionSelect.value;
     towerId = content.missions[missionId]?.buildTowerIds?.[0] || Object.keys(content.towers)[0];
     game = createGame();
+    victoryRewarded = false;
+    selectedTowerId = null;
+    setSellMode(false);
     initTowerSelector();
     initAbilityBar();
+    applyBattleBackground();
+    selectMissionMusic();
+    showStoryForMission("beforeMission");
   });
   initTowerSelector();
+}
+
+function initDifficultySelector() {
+  const select = $("difficulty-select");
+  if (!select) return;
+  select.innerHTML = content.difficulties.map((item) => \`<option value="\${escapeHtml(item.id)}">\${escapeHtml(item.label || item.id)}</option>\`).join("");
+  select.value = difficultyId;
+  select.onchange = () => {
+    difficultyId = select.value;
+    progress.selectedDifficultyId = difficultyId;
+    saveProgress();
+    game = createGame();
+    victoryRewarded = false;
+    selectedTowerId = null;
+    initAbilityBar();
+    message = "Difficulty changed to " + (content.difficulties.find((item) => item.id === difficultyId)?.label || difficultyId) + ".";
+  };
 }
 
 function initTowerSelector() {
@@ -394,11 +702,90 @@ function updateAbilityBar(snap) {
 }
 
 // ── Campaign progress (persisted per app in localStorage) ──────────────────────
-function loadProgress() { try { return new Set(JSON.parse(localStorage.getItem(PROGRESS_KEY) || "[]")); } catch (e) { return new Set(); } }
-function saveProgress() { try { localStorage.setItem(PROGRESS_KEY, JSON.stringify([...cleared])); } catch (e) { /* storage unavailable */ } }
+function emptyProgress() {
+  return { version: PROGRESS_VERSION, clearedMissionIds: [], starsByMission: {}, metaResources: {}, upgradeLevels: {}, selectedDifficultyId: content.defaultDifficultyId };
+}
+function loadProgress() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PROGRESS_KEY) || "null");
+    const base = emptyProgress();
+    if (Array.isArray(saved)) base.clearedMissionIds = saved;
+    else if (saved && typeof saved === "object") Object.assign(base, saved);
+    base.version = PROGRESS_VERSION;
+    base.clearedMissionIds = (Array.isArray(base.clearedMissionIds) ? base.clearedMissionIds : []).filter((id) => typeof id === "string" && content.missions[id]);
+    base.starsByMission = base.starsByMission && typeof base.starsByMission === "object" ? base.starsByMission : {};
+    base.metaResources = normalizeMetaBag(base.metaResources);
+    base.upgradeLevels = normalizeUpgradeLevels(base.upgradeLevels);
+    return base;
+  } catch (e) { return emptyProgress(); }
+}
+function saveProgress() {
+  progress.clearedMissionIds = [...cleared];
+  progress.version = PROGRESS_VERSION;
+  try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress)); }
+  catch (e) { /* storage unavailable */ }
+}
+function normalizeMetaBag(input) {
+  const bag = {};
+  for (const currency of content.metaProgression.currencies || []) bag[currency.id] = Math.max(0, Number(input?.[currency.id]) || 0);
+  return bag;
+}
+function normalizeUpgradeLevels(input) {
+  const levels = {};
+  for (const [id, upgrade] of Object.entries(content.metaProgression.upgrades || {})) levels[id] = Math.max(0, Math.min(upgrade.maxLevel || 0, Math.floor(Number(input?.[id]) || 0)));
+  return levels;
+}
+function addMetaResources(bag, multiplier = 1) {
+  for (const currency of content.metaProgression.currencies || []) progress.metaResources[currency.id] = (progress.metaResources[currency.id] || 0) + (Number(bag?.[currency.id]) || 0) * multiplier;
+}
+function metaCostText(cost) {
+  return Object.entries(cost || {}).map(([id, amount]) => amount + " " + ((content.metaProgression.currencies || []).find((item) => item.id === id)?.label || id)).join(" · ");
+}
+function canAffordMeta(cost) { return Object.entries(cost || {}).every(([id, amount]) => (progress.metaResources[id] || 0) >= Number(amount || 0)); }
+function buyMetaUpgrade(id) {
+  const upgrade = content.metaProgression.upgrades?.[id];
+  if (!upgrade) return;
+  const level = progress.upgradeLevels[id] || 0;
+  const cost = upgrade.costs?.[level];
+  if (!cost || !canAffordMeta(cost)) { message = cost ? "Not enough permanent currency." : "Upgrade is at max level."; return; }
+  for (const [currencyId, amount] of Object.entries(cost)) progress.metaResources[currencyId] = (progress.metaResources[currencyId] || 0) - Number(amount || 0);
+  progress.upgradeLevels[id] = level + 1;
+  saveProgress();
+  game = createGame();
+  victoryRewarded = false;
+  selectedTowerId = null;
+  renderMetaPanel();
+  message = upgrade.label + " upgraded to level " + (level + 1) + ".";
+}
+function renderMetaPanel() {
+  const panel = $("meta-panel");
+  const upgrades = Object.values(content.metaProgression.upgrades || {});
+  const currencies = content.metaProgression.currencies || [];
+  if (!panel) return;
+  panel.hidden = upgrades.length === 0 && currencies.length === 0;
+  $("meta-resources").textContent = currencies.map((item) => (progress.metaResources[item.id] || 0) + " " + item.label).join(" · ");
+  $("meta-upgrades").innerHTML = upgrades.map((upgrade) => {
+    const level = progress.upgradeLevels[upgrade.id] || 0;
+    const cost = upgrade.costs?.[level];
+    return \`<div class="meta-upgrade"><span><b>\${escapeHtml(upgrade.label || upgrade.id)}</b><br>Lv \${level}/\${upgrade.maxLevel}</span><button type="button" data-meta-upgrade="\${escapeHtml(upgrade.id)}"\${cost && canAffordMeta(cost) ? "" : " disabled"}>\${cost ? escapeHtml(metaCostText(cost)) : "Max"}</button></div>\`;
+  }).join("");
+  for (const button of document.querySelectorAll("[data-meta-upgrade]")) button.onclick = () => buyMetaUpgrade(button.dataset.metaUpgrade);
+}
 function unlockReqs(id) { const n = ((content.worldMap && content.worldMap.missionNodes) || []).find((x) => x.missionId === id); return (n && n.unlockRequiresMissionIds) || []; }
 function isUnlocked(id) { return unlockReqs(id).every((r) => cleared.has(r)); }
-function markCleared(id) { if (cleared.has(id)) return false; cleared.add(id); saveProgress(); return true; }
+function rewardMissionClear(id, stars) {
+  const firstClear = !cleared.has(id);
+  cleared.add(id);
+  const reward = content.metaProgression.rewardsByMission?.[id] || {};
+  addMetaResources(firstClear ? reward.firstClear : reward.repeatClear);
+  const previousStars = Math.max(0, Number(progress.starsByMission[id]) || 0);
+  const earnedStars = Math.max(previousStars, stars);
+  addMetaResources(reward.perStar, earnedStars - previousStars);
+  progress.starsByMission[id] = earnedStars;
+  saveProgress();
+  renderMetaPanel();
+  return firstClear;
+}
 function newlyUnlockedBy(id) { return Object.keys(content.missions).filter((mid) => !cleared.has(mid) && unlockReqs(mid).includes(id) && isUnlocked(mid)).map((mid) => (content.missions[mid] && content.missions[mid].label) || mid); }
 function refreshMissionOptions() {
   const sel = $("mission-select");
@@ -409,6 +796,76 @@ function refreshMissionOptions() {
     return \`<option value="\${escapeHtml(mission.id)}"\${unlocked ? "" : " disabled"}>\${mark}\${escapeHtml(mission.label || mission.id)}</option>\`;
   }).join("");
   sel.value = missionId;
+}
+
+function resolveStandaloneSprite(spriteId) {
+  const src = content.visuals?.sprites?.[spriteId]?.src;
+  if (typeof src !== "string" || !src) return "";
+  if (/^(?:data:|blob:|https?:)/i.test(src)) return src;
+  return "./" + src.split("/").map(encodeURIComponent).join("/");
+}
+
+function applyBattleBackground() {
+  const fallback = content.battleBackgroundFallbackMissionId;
+  const definition = content.battleBackgrounds?.[missionId] || (fallback ? content.battleBackgrounds?.[fallback] : null) || {};
+  const playfield = $("playfield");
+  playfield.style.backgroundColor = definition.color || "#101410";
+  const src = resolveStandaloneSprite(definition.spriteId);
+  const opacity = Math.max(0, Math.min(1, Number(definition.opacity ?? 1)));
+  const color = /^#[0-9a-f]{6}$/i.test(definition.color || "") ? definition.color : "#101410";
+  const rgb = [1, 3, 5].map((offset) => parseInt(color.slice(offset, offset + 2), 16)).join(",");
+  const tint = opacity < 1 ? "linear-gradient(rgba(" + rgb + "," + (1 - opacity) + "),rgba(" + rgb + "," + (1 - opacity) + "))," : "";
+  playfield.style.backgroundImage = src ? tint + "url(" + JSON.stringify(src) + ")" : "none";
+}
+
+function showStoryForMission(trigger) {
+  const entry = Object.entries(content.storyComics || {}).find(([, comic]) => comic?.missionId === missionId && (comic.trigger || "beforeMission") === trigger);
+  if (!entry) return;
+  const [comicId, comic] = entry;
+  const runKey = trigger + ":" + comicId;
+  if (shownStories.has(runKey)) return;
+  const seenKey = content.storySeenStoragePrefix + PROGRESS_KEY.slice("towerforge:progress:".length) + ":" + comicId;
+  if (comic.replay !== "always") {
+    try { if (localStorage.getItem(seenKey) === "1") return; } catch {}
+  }
+  shownStories.add(runKey);
+  storyWasRunning = Number($("speed").value) > 0;
+  setPaused(true);
+  activeStory = { comicId, comic, panelIndex: 0, seenKey };
+  $("story-overlay").hidden = false;
+  renderStoryPanel();
+  $("story-next").focus();
+}
+
+function renderStoryPanel() {
+  if (!activeStory) return;
+  const { comic, panelIndex } = activeStory;
+  const panel = comic.panels[panelIndex];
+  $("story-title").textContent = comic.title || content.missions[comic.missionId]?.label || comic.missionId;
+  $("story-speaker").textContent = panel.speaker || "";
+  $("story-text").textContent = panel.text;
+  const art = $("story-art");
+  const src = resolveStandaloneSprite(panel.spriteId);
+  art.hidden = !src;
+  art.style.backgroundImage = src ? "url(" + JSON.stringify(src) + ")" : "none";
+  $("story-next").textContent = panelIndex >= comic.panels.length - 1 ? "Continue" : "Next";
+}
+
+function advanceStory() {
+  if (!activeStory) return;
+  if (activeStory.panelIndex < activeStory.comic.panels.length - 1) {
+    activeStory.panelIndex += 1;
+    renderStoryPanel();
+  } else finishStory();
+}
+
+function finishStory() {
+  if (!activeStory) return;
+  try { localStorage.setItem(activeStory.seenKey, "1"); } catch {}
+  activeStory = null;
+  $("story-overlay").hidden = true;
+  if (storyWasRunning) setPaused(false);
+  $("start-wave").focus();
 }
 
 function loop(now) {
@@ -446,10 +903,14 @@ function draw(snap, events) {
 
 function updateHud(snap) {
   updateAbilityBar(snap);
-  if (snap.outcome === "victory" && markCleared(missionId)) {
-    const unlocked = newlyUnlockedBy(missionId);
-    message = "Mission cleared!" + (unlocked.length ? " Unlocked: " + unlocked.join(", ") : "");
+  updateTargetMode(snap);
+  if (snap.outcome === "victory" && !victoryRewarded) {
+    victoryRewarded = true;
+    const firstClear = rewardMissionClear(missionId, (snap.stars || []).filter((item) => item.achieved).length);
+    const unlocked = firstClear ? newlyUnlockedBy(missionId) : [];
+    message = (firstClear ? "Mission cleared!" : "Mission cleared again!") + (unlocked.length ? " Unlocked: " + unlocked.join(", ") : "");
     refreshMissionOptions();
+    showStoryForMission("afterVictory");
   }
   $("mission-caption").textContent = content.missions[missionId]?.description || content.missions[missionId]?.label || missionId;
   $("stat-outcome").textContent = snap.outcome;
@@ -458,7 +919,19 @@ function updateHud(snap) {
   $("stat-wave").textContent = \`\${snap.startedWaveCount}/\${snap.totalWaves} \${snap.waveState}\`;
   $("stat-enemies").textContent = String(snap.enemies.length);
   $("stat-towers").textContent = String(snap.towers.length);
+  const objectives = snap.objectiveProgress || [];
+  const stars = snap.stars || [];
+  $("stat-objectives").textContent = objectives.filter((item) => item.complete).length + "/" + objectives.length
+    + (stars.length ? " | " + stars.filter((item) => item.achieved).length + "/" + stars.length + " stars" : "");
   $("message").textContent = message;
+}
+
+function updateTargetMode(snap) {
+  const select = $("target-mode");
+  const tower = selectedTowerId ? snap.towers.find((item) => item.id === selectedTowerId) : null;
+  if (!tower) selectedTowerId = null;
+  select.disabled = !tower || !tower.targetMode;
+  if (tower && tower.targetMode) select.value = tower.targetMode === "largest_hp" ? "strongest" : tower.targetMode === "fastest_ahead" ? "first" : tower.targetMode;
 }
 
 function report(result) {
@@ -478,6 +951,15 @@ function escapeHtml(value) {
     "'": "&#39;"
   }[char]));
 }
+
+function applyProjectTheme() {
+  const palette = content.visuals?.theme?.ui ?? {};
+  for (const [key, value] of Object.entries(palette)) {
+    if (/^[a-z][a-z0-9-]*$/i.test(key) && /^#[0-9a-f]{6}$/i.test(value)) {
+      document.documentElement.style.setProperty(\`--\${key}\`, value);
+    }
+  }
+}
 `;
 }
 
@@ -490,30 +972,161 @@ const content = createGameContentRegistry({
   balance: project.balance,
   maps: project.maps,
   worldMap: project.worldMap,
-  visuals: project.visuals
+  scripts: project.scripts,
+  visuals: project.visuals,
+  storyComics: project.storyComics,
+  battleBackgrounds: project.battleBackgrounds
 });
 
 const $ = (id) => document.getElementById(id);
+applyProjectTheme();
 const audio = createAudioPlayer({ audio: project.visuals && project.visuals.audio });
+const PROGRESS_KEY = "towerforge:progress:" + ((project.buildTarget && project.buildTarget.appId) || (project.manifest && project.manifest.name) || "game");
+const PROGRESS_VERSION = 2;
+let progress = loadProgress();
+let cleared = new Set(progress.clearedMissionIds);
 let missionId = content.defaultMissionId || Object.keys(content.missions)[0];
+let difficultyId = content.difficulties.some((item) => item.id === progress.selectedDifficultyId) ? progress.selectedDifficultyId : content.defaultDifficultyId;
 let towerId = content.missions[missionId]?.buildTowerIds?.[0] || Object.keys(content.towers)[0];
 let game = createGame();
 let message = "Choose a tower, click a buildable tile, then start the wave.";
 let armedAbility = null;
-const PROGRESS_KEY = "towerforge:progress:" + ((project.buildTarget && project.buildTarget.appId) || (project.manifest && project.manifest.name) || "game");
-let cleared = loadProgress();
+let sellMode = false;
+let selectedTowerId = null;
+let keyboardCoord = null;
+let lastRunningSpeed = 1;
+let activeStory = null;
+let storyWasRunning = false;
+let victoryRewarded = false;
+const shownStories = new Set();
 
-const TERRAIN_COLORS = { buildable: 0x1d2a1d, path: 0x6b5540, water: 0x427b88, blocked: 0x252820, spawn: 0x735e2c, core: 0x3f6f43 };
+const rendererTheme = content.visuals?.theme?.renderer ?? {};
+const TERRAIN_COLORS = {
+  buildable: colorNumber(rendererTheme.buildable, 0x1d2a1d),
+  path: colorNumber(rendererTheme.path, 0x6b5540),
+  water: colorNumber(rendererTheme.water, 0x427b88),
+  blocked: colorNumber(rendererTheme.blocked, 0x252820),
+  spawn: colorNumber(rendererTheme.spawn, 0x735e2c),
+  core: colorNumber(rendererTheme.core, 0x3f6f43)
+};
 
 initSelectors();
 initAbilityBar();
+renderMetaPanel();
 $("start-wave").addEventListener("click", () => { audio.resume(); report(game.startNextWave()); });
-$("reset-run").addEventListener("click", () => { game = createGame(); initAbilityBar(); message = "Run reset."; });
-$("reset-progress")?.addEventListener("click", () => { cleared = new Set(); saveProgress(); refreshMissionOptions(); message = "Campaign progress reset."; });
-$("speed").addEventListener("input", () => $("speed-label").textContent = $("speed").value + "x");
-$("snd").addEventListener("change", () => { if ($("snd").checked) audio.resume(); });
+$("pause-run").addEventListener("click", () => setPaused(Number($("speed").value) > 0));
+$("sell-mode").addEventListener("click", () => setSellMode(!sellMode));
+$("reset-run").addEventListener("click", () => { game = createGame(); victoryRewarded = false; selectedTowerId = null; initAbilityBar(); setSellMode(false); message = "Run reset."; });
+$("reset-progress")?.addEventListener("click", () => { progress = emptyProgress(); cleared = new Set(); difficultyId = content.defaultDifficultyId; saveProgress(); refreshMissionOptions(); initDifficultySelector(); renderMetaPanel(); game = createGame(); victoryRewarded = false; message = "Campaign progress reset."; });
+$("speed").addEventListener("input", syncSpeedUi);
+$("snd").addEventListener("change", () => { syncAudioSettings(); if ($("snd").checked) audio.resume(); });
+$("sfx-volume").addEventListener("input", () => { syncAudioSettings(); if ($("snd").checked) audio.resume(); });
+$("music-volume").addEventListener("input", () => { syncAudioSettings(); if ($("snd").checked) audio.resume(); });
+$("target-mode").addEventListener("change", () => {
+  if (!selectedTowerId) return;
+  report(game.setTowerTargetMode(selectedTowerId, $("target-mode").value));
+});
+$("story-next").addEventListener("click", advanceStory);
+$("story-skip").addEventListener("click", finishStory);
+document.addEventListener("keydown", (event) => {
+  const tag = event.target?.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || event.target?.isContentEditable) return;
+  if (event.code === "Space") { event.preventDefault(); setPaused(Number($("speed").value) > 0); return; }
+  if (document.activeElement !== $("playfield")) return;
+  const moves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  if (moves[event.key]) { event.preventDefault(); moveKeyboardCursor(moves[event.key][0], moves[event.key][1]); }
+  else if (event.key === "Enter") { event.preventDefault(); actAtCoord(ensureKeyboardCoord()); }
+  else if (event.key === "Escape") { event.preventDefault(); setArmed(null); setSellMode(false); message = "Build action cancelled."; }
+});
+syncSpeedUi();
+syncAudioSettings();
+applyBattleBackground();
+selectMissionMusic();
+showStoryForMission("beforeMission");
+$("playfield").addEventListener("focus", () => syncKeyboardCursor(ensureKeyboardCoord()));
 
-function createGame() { return new TowerDefenseGame({ missionId, content }); }
+function createGame() { return new TowerDefenseGame({ missionId, content, difficultyId, metaUpgradeLevels: progress.upgradeLevels }); }
+
+function actAtCoord(coord) {
+  if (!coord) return;
+  if (sellMode) {
+    const towerAt = game.getTowerIdAt(coord);
+    report(towerAt ? game.sellTower(towerAt) : { ok: false, reason: "Choose a tower tile." });
+    if (towerAt === selectedTowerId) selectedTowerId = null;
+    setSellMode(false);
+    return;
+  }
+  if (armedAbility) { report(game.useAbility(armedAbility, coord)); setArmed(null); return; }
+  const towerAt = game.getTowerIdAt(coord);
+  if (towerAt) { selectedTowerId = towerAt; message = "Tower selected."; return; }
+  if (!towerId) return;
+  const result = game.placeTower(towerId, coord);
+  report(result);
+  if (result.ok) selectedTowerId = game.getTowerIdAt(coord);
+}
+
+function ensureKeyboardCoord() {
+  const tiles = game.getSnapshot().tiles;
+  if (keyboardCoord && tiles.some((tile) => tile.q === keyboardCoord.q && tile.r === keyboardCoord.r)) return keyboardCoord;
+  const tile = tiles.find((item) => item.terrain === "buildable") || tiles[0];
+  keyboardCoord = tile ? { q: tile.q, r: tile.r } : null;
+  return keyboardCoord;
+}
+
+function syncKeyboardCursor(coord) {
+  keyboardCoord = coord ? { q: coord.q, r: coord.r } : null;
+  const tile = keyboardCoord && game.getSnapshot().tiles.find((item) => item.q === keyboardCoord.q && item.r === keyboardCoord.r);
+  $("playfield").setAttribute("aria-label", tile ? "Hex battlefield. Selected tile q " + tile.q + ", r " + tile.r + ", " + tile.terrain + ". Arrow keys move; Enter acts; Escape cancels." : "Hex battlefield.");
+}
+
+function moveKeyboardCursor(dq, dr) {
+  const current = ensureKeyboardCoord();
+  if (!current) return;
+  const tiles = game.getSnapshot().tiles;
+  const target = tiles.find((tile) => tile.q === current.q + dq && tile.r === current.r + dr);
+  if (target) syncKeyboardCursor(target);
+}
+
+function setSellMode(active) {
+  sellMode = Boolean(active);
+  $("sell-mode").setAttribute("aria-pressed", String(sellMode));
+  if (sellMode) { setArmed(null); message = "Click a tower to sell it."; }
+}
+
+function setPaused(paused) {
+  const speed = $("speed");
+  const current = Number(speed.value) || 0;
+  if (paused) {
+    if (current > 0) lastRunningSpeed = current;
+    speed.value = "0";
+  } else {
+    speed.value = String(lastRunningSpeed > 0 ? lastRunningSpeed : 1);
+  }
+  syncSpeedUi();
+}
+
+function syncSpeedUi() {
+  const speed = Number($("speed").value) || 0;
+  if (speed > 0) lastRunningSpeed = speed;
+  $("speed-label").textContent = speed + "x";
+  $("pause-run").textContent = speed > 0 ? "Pause" : "Resume";
+  $("pause-run").setAttribute("aria-pressed", String(speed === 0));
+}
+
+function syncAudioSettings() {
+  const enabled = $("snd").checked;
+  const sfxVolume = Number($("sfx-volume").value);
+  const musicVolume = Number($("music-volume").value);
+  audio.setVolumes(sfxVolume, musicVolume);
+  audio.setEnabled(enabled);
+  $("sfx-volume-label").textContent = Math.round(sfxVolume * 100) + "%";
+  $("music-volume-label").textContent = Math.round(musicVolume * 100) + "%";
+  $("music-volume").disabled = Object.keys(project.visuals?.audio?.musicTracks || {}).length === 0;
+}
+
+function selectMissionMusic() {
+  audio.selectMusic(project.visuals?.audio?.musicByMission?.[missionId] || "");
+}
 
 class PlayScene extends Phaser.Scene {
   create() {
@@ -525,8 +1138,8 @@ class PlayScene extends Phaser.Scene {
       audio.resume();
       const coord = this.pickTile(p.worldX, p.worldY);
       if (!coord) return;
-      if (armedAbility) { report(game.useAbility(armedAbility, coord)); setArmed(null); return; }
-      if (towerId) report(game.placeTower(towerId, coord));
+      syncKeyboardCursor(coord);
+      actAtCoord(coord);
     });
   }
   geometry(tiles) {
@@ -580,6 +1193,11 @@ class PlayScene extends Phaser.Scene {
     this.tileG.clear();
     for (const t of snap.tiles) { const p = this.center(t, g); this.hex(this.tileG, p.x, p.y, g.r * 0.86, TERRAIN_COLORS[t.terrain] ?? TERRAIN_COLORS.buildable); }
     for (const w of snap.temporaryWaterTiles) { const p = this.center(w, g); this.hex(this.tileG, p.x, p.y, g.r * 0.74, 0x427b88, 0.55); }
+    if (keyboardCoord) {
+      const p = this.center(keyboardCoord, g);
+      this.tileG.lineStyle(Math.max(2, g.r * 0.12), 0xe8f4db, 1);
+      this.tileG.strokeCircle(p.x, p.y, g.r * 0.64);
+    }
 
     this.fxG.clear();
     for (const ev of events) {
@@ -646,7 +1264,7 @@ class PlayScene extends Phaser.Scene {
 new Phaser.Game({
   type: Phaser.AUTO,
   parent: "playfield",
-  backgroundColor: "#101410",
+  transparent: true,
   // Low-end-Android render hardening (ported from a shipped Capacitor game): no MSAA (fill-rate is
   // the #1 killer on cheap GPUs), request the high-performance GPU, and a low-latency canvas.
   // panicMax bounds delta catch-up so a background stall can't trigger a spiral-of-death on resume.
@@ -655,6 +1273,7 @@ new Phaser.Game({
   scale: { mode: Phaser.Scale.RESIZE, width: "100%", height: "100%" },
   scene: PlayScene
 });
+window.__towerforgeBootOk = true;
 
 // Free the audio hardware while the app is backgrounded (the scene's update() already bails on
 // document.hidden). Saves battery in a wrapped APK; no-op on desktop.
@@ -674,15 +1293,39 @@ function initSelectors() {
   // Start on an unlocked mission (the default may be gated behind unlockRequiresMissionIds).
   if (!isUnlocked(missionId)) { const first = Object.keys(content.missions).find(isUnlocked); if (first) { missionId = first; game = createGame(); } }
   refreshMissionOptions();
+  initDifficultySelector();
   missionSelect.addEventListener("change", () => {
     if (!isUnlocked(missionSelect.value)) { missionSelect.value = missionId; return; } // locked
     missionId = missionSelect.value;
     towerId = content.missions[missionId]?.buildTowerIds?.[0] || Object.keys(content.towers)[0];
     game = createGame();
+    victoryRewarded = false;
+    selectedTowerId = null;
+    setSellMode(false);
     initTowerSelector();
     initAbilityBar();
+    applyBattleBackground();
+    selectMissionMusic();
+    showStoryForMission("beforeMission");
   });
   initTowerSelector();
+}
+
+function initDifficultySelector() {
+  const select = $("difficulty-select");
+  if (!select) return;
+  select.innerHTML = content.difficulties.map((item) => \`<option value="\${escapeHtml(item.id)}">\${escapeHtml(item.label || item.id)}</option>\`).join("");
+  select.value = difficultyId;
+  select.onchange = () => {
+    difficultyId = select.value;
+    progress.selectedDifficultyId = difficultyId;
+    saveProgress();
+    game = createGame();
+    victoryRewarded = false;
+    selectedTowerId = null;
+    initAbilityBar();
+    message = "Difficulty changed to " + (content.difficulties.find((item) => item.id === difficultyId)?.label || difficultyId) + ".";
+  };
 }
 
 function initTowerSelector() {
@@ -725,11 +1368,90 @@ function updateAbilityBar(snap) {
 }
 
 // ── Campaign progress (persisted per app in localStorage) ──────────────────────
-function loadProgress() { try { return new Set(JSON.parse(localStorage.getItem(PROGRESS_KEY) || "[]")); } catch (e) { return new Set(); } }
-function saveProgress() { try { localStorage.setItem(PROGRESS_KEY, JSON.stringify([...cleared])); } catch (e) { /* storage unavailable */ } }
+function emptyProgress() {
+  return { version: PROGRESS_VERSION, clearedMissionIds: [], starsByMission: {}, metaResources: {}, upgradeLevels: {}, selectedDifficultyId: content.defaultDifficultyId };
+}
+function loadProgress() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PROGRESS_KEY) || "null");
+    const base = emptyProgress();
+    if (Array.isArray(saved)) base.clearedMissionIds = saved;
+    else if (saved && typeof saved === "object") Object.assign(base, saved);
+    base.version = PROGRESS_VERSION;
+    base.clearedMissionIds = (Array.isArray(base.clearedMissionIds) ? base.clearedMissionIds : []).filter((id) => typeof id === "string" && content.missions[id]);
+    base.starsByMission = base.starsByMission && typeof base.starsByMission === "object" ? base.starsByMission : {};
+    base.metaResources = normalizeMetaBag(base.metaResources);
+    base.upgradeLevels = normalizeUpgradeLevels(base.upgradeLevels);
+    return base;
+  } catch (e) { return emptyProgress(); }
+}
+function saveProgress() {
+  progress.clearedMissionIds = [...cleared];
+  progress.version = PROGRESS_VERSION;
+  try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress)); }
+  catch (e) { /* storage unavailable */ }
+}
+function normalizeMetaBag(input) {
+  const bag = {};
+  for (const currency of content.metaProgression.currencies || []) bag[currency.id] = Math.max(0, Number(input?.[currency.id]) || 0);
+  return bag;
+}
+function normalizeUpgradeLevels(input) {
+  const levels = {};
+  for (const [id, upgrade] of Object.entries(content.metaProgression.upgrades || {})) levels[id] = Math.max(0, Math.min(upgrade.maxLevel || 0, Math.floor(Number(input?.[id]) || 0)));
+  return levels;
+}
+function addMetaResources(bag, multiplier = 1) {
+  for (const currency of content.metaProgression.currencies || []) progress.metaResources[currency.id] = (progress.metaResources[currency.id] || 0) + (Number(bag?.[currency.id]) || 0) * multiplier;
+}
+function metaCostText(cost) {
+  return Object.entries(cost || {}).map(([id, amount]) => amount + " " + ((content.metaProgression.currencies || []).find((item) => item.id === id)?.label || id)).join(" · ");
+}
+function canAffordMeta(cost) { return Object.entries(cost || {}).every(([id, amount]) => (progress.metaResources[id] || 0) >= Number(amount || 0)); }
+function buyMetaUpgrade(id) {
+  const upgrade = content.metaProgression.upgrades?.[id];
+  if (!upgrade) return;
+  const level = progress.upgradeLevels[id] || 0;
+  const cost = upgrade.costs?.[level];
+  if (!cost || !canAffordMeta(cost)) { message = cost ? "Not enough permanent currency." : "Upgrade is at max level."; return; }
+  for (const [currencyId, amount] of Object.entries(cost)) progress.metaResources[currencyId] = (progress.metaResources[currencyId] || 0) - Number(amount || 0);
+  progress.upgradeLevels[id] = level + 1;
+  saveProgress();
+  game = createGame();
+  victoryRewarded = false;
+  selectedTowerId = null;
+  renderMetaPanel();
+  message = upgrade.label + " upgraded to level " + (level + 1) + ".";
+}
+function renderMetaPanel() {
+  const panel = $("meta-panel");
+  const upgrades = Object.values(content.metaProgression.upgrades || {});
+  const currencies = content.metaProgression.currencies || [];
+  if (!panel) return;
+  panel.hidden = upgrades.length === 0 && currencies.length === 0;
+  $("meta-resources").textContent = currencies.map((item) => (progress.metaResources[item.id] || 0) + " " + item.label).join(" · ");
+  $("meta-upgrades").innerHTML = upgrades.map((upgrade) => {
+    const level = progress.upgradeLevels[upgrade.id] || 0;
+    const cost = upgrade.costs?.[level];
+    return \`<div class="meta-upgrade"><span><b>\${escapeHtml(upgrade.label || upgrade.id)}</b><br>Lv \${level}/\${upgrade.maxLevel}</span><button type="button" data-meta-upgrade="\${escapeHtml(upgrade.id)}"\${cost && canAffordMeta(cost) ? "" : " disabled"}>\${cost ? escapeHtml(metaCostText(cost)) : "Max"}</button></div>\`;
+  }).join("");
+  for (const button of document.querySelectorAll("[data-meta-upgrade]")) button.onclick = () => buyMetaUpgrade(button.dataset.metaUpgrade);
+}
 function unlockReqs(id) { const n = ((content.worldMap && content.worldMap.missionNodes) || []).find((x) => x.missionId === id); return (n && n.unlockRequiresMissionIds) || []; }
 function isUnlocked(id) { return unlockReqs(id).every((r) => cleared.has(r)); }
-function markCleared(id) { if (cleared.has(id)) return false; cleared.add(id); saveProgress(); return true; }
+function rewardMissionClear(id, stars) {
+  const firstClear = !cleared.has(id);
+  cleared.add(id);
+  const reward = content.metaProgression.rewardsByMission?.[id] || {};
+  addMetaResources(firstClear ? reward.firstClear : reward.repeatClear);
+  const previousStars = Math.max(0, Number(progress.starsByMission[id]) || 0);
+  const earnedStars = Math.max(previousStars, stars);
+  addMetaResources(reward.perStar, earnedStars - previousStars);
+  progress.starsByMission[id] = earnedStars;
+  saveProgress();
+  renderMetaPanel();
+  return firstClear;
+}
 function newlyUnlockedBy(id) { return Object.keys(content.missions).filter((mid) => !cleared.has(mid) && unlockReqs(mid).includes(id) && isUnlocked(mid)).map((mid) => (content.missions[mid] && content.missions[mid].label) || mid); }
 function refreshMissionOptions() {
   const sel = $("mission-select");
@@ -742,12 +1464,86 @@ function refreshMissionOptions() {
   sel.value = missionId;
 }
 
+function resolveStandaloneSprite(spriteId) {
+  const src = content.visuals?.sprites?.[spriteId]?.src;
+  if (typeof src !== "string" || !src) return "";
+  if (/^(?:data:|blob:|https?:)/i.test(src)) return src;
+  return "./" + src.split("/").map(encodeURIComponent).join("/");
+}
+
+function applyBattleBackground() {
+  const fallback = content.battleBackgroundFallbackMissionId;
+  const definition = content.battleBackgrounds?.[missionId] || (fallback ? content.battleBackgrounds?.[fallback] : null) || {};
+  const playfield = $("playfield");
+  playfield.style.backgroundColor = definition.color || "#101410";
+  const src = resolveStandaloneSprite(definition.spriteId);
+  const opacity = Math.max(0, Math.min(1, Number(definition.opacity ?? 1)));
+  const color = /^#[0-9a-f]{6}$/i.test(definition.color || "") ? definition.color : "#101410";
+  const rgb = [1, 3, 5].map((offset) => parseInt(color.slice(offset, offset + 2), 16)).join(",");
+  const tint = opacity < 1 ? "linear-gradient(rgba(" + rgb + "," + (1 - opacity) + "),rgba(" + rgb + "," + (1 - opacity) + "))," : "";
+  playfield.style.backgroundImage = src ? tint + "url(" + JSON.stringify(src) + ")" : "none";
+}
+
+function showStoryForMission(trigger) {
+  const entry = Object.entries(content.storyComics || {}).find(([, comic]) => comic?.missionId === missionId && (comic.trigger || "beforeMission") === trigger);
+  if (!entry) return;
+  const [comicId, comic] = entry;
+  const runKey = trigger + ":" + comicId;
+  if (shownStories.has(runKey)) return;
+  const seenKey = content.storySeenStoragePrefix + PROGRESS_KEY.slice("towerforge:progress:".length) + ":" + comicId;
+  if (comic.replay !== "always") {
+    try { if (localStorage.getItem(seenKey) === "1") return; } catch {}
+  }
+  shownStories.add(runKey);
+  storyWasRunning = Number($("speed").value) > 0;
+  setPaused(true);
+  activeStory = { comicId, comic, panelIndex: 0, seenKey };
+  $("story-overlay").hidden = false;
+  renderStoryPanel();
+  $("story-next").focus();
+}
+
+function renderStoryPanel() {
+  if (!activeStory) return;
+  const { comic, panelIndex } = activeStory;
+  const panel = comic.panels[panelIndex];
+  $("story-title").textContent = comic.title || content.missions[comic.missionId]?.label || comic.missionId;
+  $("story-speaker").textContent = panel.speaker || "";
+  $("story-text").textContent = panel.text;
+  const art = $("story-art");
+  const src = resolveStandaloneSprite(panel.spriteId);
+  art.hidden = !src;
+  art.style.backgroundImage = src ? "url(" + JSON.stringify(src) + ")" : "none";
+  $("story-next").textContent = panelIndex >= comic.panels.length - 1 ? "Continue" : "Next";
+}
+
+function advanceStory() {
+  if (!activeStory) return;
+  if (activeStory.panelIndex < activeStory.comic.panels.length - 1) {
+    activeStory.panelIndex += 1;
+    renderStoryPanel();
+  } else finishStory();
+}
+
+function finishStory() {
+  if (!activeStory) return;
+  try { localStorage.setItem(activeStory.seenKey, "1"); } catch {}
+  activeStory = null;
+  $("story-overlay").hidden = true;
+  if (storyWasRunning) setPaused(false);
+  $("start-wave").focus();
+}
+
 function updateHud(snap) {
   updateAbilityBar(snap);
-  if (snap.outcome === "victory" && markCleared(missionId)) {
-    const unlocked = newlyUnlockedBy(missionId);
-    message = "Mission cleared!" + (unlocked.length ? " Unlocked: " + unlocked.join(", ") : "");
+  updateTargetMode(snap);
+  if (snap.outcome === "victory" && !victoryRewarded) {
+    victoryRewarded = true;
+    const firstClear = rewardMissionClear(missionId, (snap.stars || []).filter((item) => item.achieved).length);
+    const unlocked = firstClear ? newlyUnlockedBy(missionId) : [];
+    message = (firstClear ? "Mission cleared!" : "Mission cleared again!") + (unlocked.length ? " Unlocked: " + unlocked.join(", ") : "");
     refreshMissionOptions();
+    showStoryForMission("afterVictory");
   }
   $("mission-caption").textContent = content.missions[missionId]?.description || content.missions[missionId]?.label || missionId;
   $("stat-outcome").textContent = snap.outcome;
@@ -756,7 +1552,19 @@ function updateHud(snap) {
   $("stat-wave").textContent = \`\${snap.startedWaveCount}/\${snap.totalWaves} \${snap.waveState}\`;
   $("stat-enemies").textContent = String(snap.enemies.length);
   $("stat-towers").textContent = String(snap.towers.length);
+  const objectives = snap.objectiveProgress || [];
+  const stars = snap.stars || [];
+  $("stat-objectives").textContent = objectives.filter((item) => item.complete).length + "/" + objectives.length
+    + (stars.length ? " | " + stars.filter((item) => item.achieved).length + "/" + stars.length + " stars" : "");
   $("message").textContent = message;
+}
+
+function updateTargetMode(snap) {
+  const select = $("target-mode");
+  const tower = selectedTowerId ? snap.towers.find((item) => item.id === selectedTowerId) : null;
+  if (!tower) selectedTowerId = null;
+  select.disabled = !tower || !tower.targetMode;
+  if (tower && tower.targetMode) select.value = tower.targetMode === "largest_hp" ? "strongest" : tower.targetMode === "fastest_ahead" ? "first" : tower.targetMode;
 }
 
 function report(result) { message = result.ok ? "Action accepted." : (result.reason || "Action rejected."); }
@@ -769,6 +1577,19 @@ function escapeHtml(value) {
     '"': "&quot;",
     "'": "&#39;"
   }[char]));
+}
+
+function colorNumber(value, fallback) {
+  return /^#[0-9a-f]{6}$/i.test(value ?? "") ? Number.parseInt(value.slice(1), 16) : fallback;
+}
+
+function applyProjectTheme() {
+  const palette = content.visuals?.theme?.ui ?? {};
+  for (const [key, value] of Object.entries(palette)) {
+    if (/^[a-z][a-z0-9-]*$/i.test(key) && /^#[0-9a-f]{6}$/i.test(value)) {
+      document.documentElement.style.setProperty(\`--\${key}\`, value);
+    }
+  }
 }
 `;
 }

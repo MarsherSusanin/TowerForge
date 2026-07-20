@@ -38,6 +38,7 @@
     ],
     "externalBin": ["binaries/node"],
     "resources": ["runtime"],
+    "copyright": "© 2026 Lindforge Studios",
     "shortDescription": "TowerForge Studio",
     "longDescription": "Local-first constructor for 2D hex tower-defense games.",
     "category": "DeveloperTool",

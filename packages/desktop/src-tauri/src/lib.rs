@@ -53,6 +53,12 @@ struct StudioUiState {
     can_undo: bool,
     can_redo: bool,
     active_tab: String,
+    #[serde(default = "default_language")]
+    language: String,
+}
+
+fn default_language() -> String {
+    "ru".to_string()
 }
 
 impl Default for StudioUiState {
@@ -62,7 +68,8 @@ impl Default for StudioUiState {
             dirty: false,
             can_undo: false,
             can_redo: false,
-            active_tab: "waves".to_string(),
+            active_tab: "home".to_string(),
+            language: default_language(),
         }
     }
 }
@@ -328,6 +335,14 @@ fn item(
     builder.build(app)
 }
 
+fn localized(language: &str, english: &'static str, russian: &'static str) -> &'static str {
+    if language == "ru" {
+        russian
+    } else {
+        english
+    }
+}
+
 fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let ui = app
         .state::<DesktopRuntimeState>()
@@ -335,27 +350,49 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         .lock()
         .expect("desktop state lock poisoned")
         .clone();
-    let new_project = item(app, "file.new", "New Project...", true, Some("CmdOrCtrl+N"))?;
+    let language = ui.language.as_str();
+    let new_project = item(
+        app,
+        "file.new",
+        localized(language, "New Project...", "Новый проект…"),
+        true,
+        Some("CmdOrCtrl+N"),
+    )?;
     let open_project = item(
         app,
         "file.open",
-        "Open Project...",
+        localized(language, "Open Project...", "Открыть проект…"),
         true,
         Some("CmdOrCtrl+O"),
     )?;
-    let save = item(app, "file.save", "Save", ui.dirty, Some("CmdOrCtrl+S"))?;
+    let save = item(
+        app,
+        "file.save",
+        localized(language, "Save", "Сохранить"),
+        ui.dirty,
+        Some("CmdOrCtrl+S"),
+    )?;
     let close = item(
         app,
         "lifecycle.close",
-        "Close Window",
+        localized(language, "Close Window", "Закрыть окно"),
         true,
         Some("CmdOrCtrl+W"),
     )?;
     #[cfg(not(target_os = "macos"))]
-    let exit = item(app, "lifecycle.quit", "Exit TowerForge", true, None)?;
+    let exit = item(
+        app,
+        "lifecycle.quit",
+        localized(language, "Exit TowerForge", "Выйти из TowerForge"),
+        true,
+        None,
+    )?;
 
     let recent = recent_projects(app);
-    let mut recent_builder = tauri::menu::SubmenuBuilder::new(app, "Open Recent");
+    let mut recent_builder = tauri::menu::SubmenuBuilder::new(
+        app,
+        localized(language, "Open Recent", "Недавние проекты"),
+    );
     for (index, project_dir) in recent.iter().enumerate() {
         let recent_item = item(
             app,
@@ -372,13 +409,13 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let clear_recent = item(
         app,
         "file.clear_recent",
-        "Clear Recent",
+        localized(language, "Clear Recent", "Очистить список"),
         !recent.is_empty(),
         None,
     )?;
     let recent_menu = recent_builder.item(&clear_recent).build()?;
 
-    let file_builder = tauri::menu::SubmenuBuilder::new(app, "File")
+    let file_builder = tauri::menu::SubmenuBuilder::new(app, localized(language, "File", "Файл"))
         .items(&[&new_project, &open_project, &recent_menu])
         .separator()
         .item(&save)
@@ -388,15 +425,21 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let file_builder = file_builder.separator().item(&exit);
     let file_menu = file_builder.build()?;
 
-    let undo = item(app, "edit.undo", "Undo", ui.can_undo, Some("CmdOrCtrl+Z"))?;
+    let undo = item(
+        app,
+        "edit.undo",
+        localized(language, "Undo", "Отменить"),
+        ui.can_undo,
+        Some("CmdOrCtrl+Z"),
+    )?;
     let redo = item(
         app,
         "edit.redo",
-        "Redo",
+        localized(language, "Redo", "Повторить"),
         ui.can_redo,
         Some("CmdOrCtrl+Shift+Z"),
     )?;
-    let edit_menu = tauri::menu::SubmenuBuilder::new(app, "Edit")
+    let edit_menu = tauri::menu::SubmenuBuilder::new(app, localized(language, "Edit", "Правка"))
         .items(&[&undo, &redo])
         .separator()
         .cut()
@@ -408,26 +451,32 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let command_palette = item(
         app,
         "view.command_palette",
-        "Command Palette...",
+        localized(language, "Command Palette...", "Палитра команд…"),
         true,
         Some("CmdOrCtrl+K"),
     )?;
     let tab_specs = [
-        ("waves", "Waves"),
-        ("enemies", "Enemies"),
-        ("towers", "Towers"),
-        ("missions", "Missions"),
-        ("worldmap", "World Map"),
-        ("maps", "Maps"),
-        ("playtest", "Playtest"),
-        ("balance", "Balance"),
-        ("ai", "AI Designer"),
-        ("assets", "Assets"),
-        ("settings", "Settings"),
-        ("buildtargets", "Build Targets"),
+        ("home", localized(language, "Home", "Главная")),
+        ("waves", localized(language, "Waves", "Волны")),
+        ("enemies", localized(language, "Enemies", "Враги")),
+        ("towers", localized(language, "Towers", "Башни")),
+        ("missions", localized(language, "Missions", "Миссии")),
+        ("worldmap", localized(language, "World Map", "Карта мира")),
+        ("maps", localized(language, "Maps", "Карты")),
+        ("playtest", localized(language, "Playtest", "Тестирование")),
+        ("balance", localized(language, "Balance", "Баланс")),
+        ("ai", localized(language, "AI Chat", "Чат с ИИ")),
+        ("scripts", localized(language, "Scripts", "Скрипты")),
+        ("assets", localized(language, "Assets", "Ресурсы")),
+        ("settings", localized(language, "Settings", "Настройки")),
+        (
+            "buildtargets",
+            localized(language, "Build Targets", "Цели сборки"),
+        ),
     ];
     let mut tab_items = Vec::new();
-    let mut navigate_builder = tauri::menu::SubmenuBuilder::new(app, "Navigate");
+    let mut navigate_builder =
+        tauri::menu::SubmenuBuilder::new(app, localized(language, "Navigate", "Навигация"));
     for (tab, label) in tab_specs {
         let menu_item = CheckMenuItemBuilder::with_id(format!("navigate.{tab}"), label)
             .checked(ui.active_tab == tab)
@@ -436,13 +485,31 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         tab_items.push((tab.to_string(), menu_item));
     }
     let navigate_menu = navigate_builder.build()?;
-    let toggle_theme = item(app, "view.toggle_theme", "Toggle Theme", true, None)?;
-    let zoom_in = item(app, "view.zoom_in", "Zoom In", true, Some("CmdOrCtrl++"))?;
-    let zoom_out = item(app, "view.zoom_out", "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+    let toggle_theme = item(
+        app,
+        "view.toggle_theme",
+        localized(language, "Toggle Theme", "Сменить тему"),
+        true,
+        None,
+    )?;
+    let zoom_in = item(
+        app,
+        "view.zoom_in",
+        localized(language, "Zoom In", "Увеличить"),
+        true,
+        Some("CmdOrCtrl++"),
+    )?;
+    let zoom_out = item(
+        app,
+        "view.zoom_out",
+        localized(language, "Zoom Out", "Уменьшить"),
+        true,
+        Some("CmdOrCtrl+-"),
+    )?;
     let zoom_reset = item(
         app,
         "view.zoom_reset",
-        "Actual Size",
+        localized(language, "Actual Size", "Фактический размер"),
         true,
         Some("CmdOrCtrl+0"),
     )?;
@@ -453,11 +520,11 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let fullscreen = item(
         app,
         "view.fullscreen",
-        "Toggle Full Screen",
+        localized(language, "Toggle Full Screen", "Полноэкранный режим"),
         true,
         Some(fullscreen_accelerator),
     )?;
-    let view_menu = tauri::menu::SubmenuBuilder::new(app, "View")
+    let view_menu = tauri::menu::SubmenuBuilder::new(app, localized(language, "View", "Вид"))
         .items(&[&command_palette, &navigate_menu])
         .separator()
         .item(&toggle_theme)
@@ -470,27 +537,62 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let validate = item(
         app,
         "project.validate",
-        "Validate Project",
+        localized(language, "Validate Project", "Проверить проект"),
         true,
         Some("CmdOrCtrl+Shift+V"),
     )?;
     let simulate = item(
         app,
         "project.simulate",
-        "Simulate Selected Mission",
+        localized(
+            language,
+            "Simulate Selected Mission",
+            "Симулировать выбранную миссию",
+        ),
         true,
         None,
     )?;
-    let compile_maps = item(app, "project.compile_maps", "Compile Maps", true, None)?;
-    let balance = item(app, "project.balance", "Run Balance Analysis", true, None)?;
-    let playtest = item(app, "project.playtest", "Playtest", true, None)?;
-    let build_targets = item(app, "project.build_targets", "Build Targets", true, None)?;
-    let ai_designer = item(app, "project.ai_designer", "AI Designer", true, None)?;
-    let project_menu = tauri::menu::SubmenuBuilder::new(app, "Project")
-        .items(&[&validate, &simulate, &compile_maps, &balance])
-        .separator()
-        .items(&[&playtest, &build_targets, &ai_designer])
-        .build()?;
+    let compile_maps = item(
+        app,
+        "project.compile_maps",
+        localized(language, "Compile Maps", "Скомпилировать карты"),
+        true,
+        None,
+    )?;
+    let balance = item(
+        app,
+        "project.balance",
+        localized(language, "Run Balance Analysis", "Анализ баланса"),
+        true,
+        None,
+    )?;
+    let playtest = item(
+        app,
+        "project.playtest",
+        localized(language, "Playtest", "Тестирование"),
+        true,
+        None,
+    )?;
+    let build_targets = item(
+        app,
+        "project.build_targets",
+        localized(language, "Build Targets", "Цели сборки"),
+        true,
+        None,
+    )?;
+    let ai_designer = item(
+        app,
+        "project.ai_designer",
+        localized(language, "AI Chat", "Чат с ИИ"),
+        true,
+        None,
+    )?;
+    let project_menu =
+        tauri::menu::SubmenuBuilder::new(app, localized(language, "Project", "Проект"))
+            .items(&[&validate, &simulate, &compile_maps, &balance])
+            .separator()
+            .items(&[&playtest, &build_targets, &ai_designer])
+            .build()?;
 
     #[cfg(target_os = "macos")]
     let minimize_accelerator = Some("Cmd+M");
@@ -499,17 +601,30 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let minimize = item(
         app,
         "window.minimize",
-        "Minimize",
+        localized(language, "Minimize", "Свернуть"),
         true,
         minimize_accelerator,
     )?;
-    let maximize = item(app, "window.maximize", "Maximize", true, None)?;
-    let window_fullscreen = item(app, "window.fullscreen", "Toggle Full Screen", true, None)?;
-    let mut window_builder = tauri::menu::SubmenuBuilder::new(app, "Window").items(&[
-        &minimize,
-        &maximize,
-        &window_fullscreen,
-    ]);
+    let maximize = item(
+        app,
+        "window.maximize",
+        localized(language, "Maximize", "Развернуть"),
+        true,
+        None,
+    )?;
+    let window_fullscreen = item(
+        app,
+        "window.fullscreen",
+        localized(language, "Toggle Full Screen", "Полноэкранный режим"),
+        true,
+        None,
+    )?;
+    let mut window_builder =
+        tauri::menu::SubmenuBuilder::new(app, localized(language, "Window", "Окно")).items(&[
+            &minimize,
+            &maximize,
+            &window_fullscreen,
+        ]);
     #[cfg(target_os = "macos")]
     {
         let bring_all = PredefinedMenuItem::bring_all_to_front(app, None)?;
@@ -517,19 +632,32 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     }
     let window_menu = window_builder.build()?;
 
-    let getting_started = item(app, "help.getting_started", "TowerForge Help", true, None)?;
+    let getting_started = item(
+        app,
+        "help.getting_started",
+        localized(language, "TowerForge Help", "Справка TowerForge"),
+        true,
+        None,
+    )?;
     let shortcuts = item(
         app,
         "help.keyboard_shortcuts",
-        "Keyboard Shortcuts",
+        localized(language, "Keyboard Shortcuts", "Горячие клавиши"),
         true,
         None,
     )?;
     let help_builder =
-        tauri::menu::SubmenuBuilder::new(app, "Help").items(&[&getting_started, &shortcuts]);
+        tauri::menu::SubmenuBuilder::new(app, localized(language, "Help", "Справка"))
+            .items(&[&getting_started, &shortcuts]);
     #[cfg(not(target_os = "macos"))]
     let help_builder = {
-        let about = item(app, "help.about", "About TowerForge", true, None)?;
+        let about = item(
+            app,
+            "help.about",
+            localized(language, "About TowerForge", "О TowerForge"),
+            true,
+            None,
+        )?;
         help_builder.separator().item(&about)
     };
     let help_menu = help_builder.build()?;
@@ -538,7 +666,13 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     {
         let about = PredefinedMenuItem::about(app, None, None)?;
-        let settings = item(app, "app.settings", "Settings...", true, Some("Cmd+,"))?;
+        let settings = item(
+            app,
+            "app.settings",
+            localized(language, "Settings...", "Настройки…"),
+            true,
+            Some("Cmd+,"),
+        )?;
         let services = PredefinedMenuItem::services(app, None)?;
         let hide = PredefinedMenuItem::hide(app, None)?;
         let hide_others = PredefinedMenuItem::hide_others(app, None)?;
@@ -546,7 +680,7 @@ fn install_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         let quit = item(
             app,
             "lifecycle.quit",
-            "Quit TowerForge",
+            localized(language, "Quit TowerForge", "Выйти из TowerForge"),
             true,
             Some("Cmd+Q"),
         )?;
@@ -703,12 +837,21 @@ fn desktop_sync_ui_state(
     payload: StudioUiState,
     runtime: tauri::State<'_, DesktopRuntimeState>,
 ) -> Result<(), String> {
-    *runtime.ui.lock().expect("desktop state lock poisoned") = payload.clone();
+    let language_changed = {
+        let mut current = runtime.ui.lock().expect("desktop state lock poisoned");
+        let changed = current.language != payload.language;
+        *current = payload.clone();
+        changed
+    };
     runtime.ui_ready.store(true, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window("main") {
         window
             .set_title(&format_window_title(&payload.project_name, payload.dirty))
             .map_err(|error| error.to_string())?;
+    }
+    if language_changed {
+        install_menu(&app).map_err(|error| error.to_string())?;
+        return Ok(());
     }
     if let Some(handles) = app
         .state::<MenuHandles>()
@@ -859,13 +1002,11 @@ fn is_allowed_external_url(value: &str) -> bool {
 }
 
 #[tauri::command]
-fn desktop_open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+fn desktop_open_external(url: String) -> Result<(), String> {
     if !is_allowed_external_url(&url) {
         return Err("That external link is not allowed.".to_string());
     }
-    app.shell()
-        .open(url, None)
-        .map_err(|error| error.to_string())
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

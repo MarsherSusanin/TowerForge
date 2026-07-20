@@ -20,6 +20,10 @@ function fieldValue(field: FieldConstraint): unknown {
       return [];
     case "resourceBagArray":
       return [];
+    case "pipelineDelivery":
+      return { kind: "single" };
+    case "towerEffectArray":
+      return [{ kind: "damage", amount: 1 }];
     case "string":
       return "x";
   }

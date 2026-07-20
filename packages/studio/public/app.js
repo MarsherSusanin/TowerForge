@@ -1,5 +1,8 @@
 import { createCanvasRenderer } from "/renderer/index.mjs";
 import { AUDIO_EVENTS } from "/renderer/audio.mjs";
+import { LANGUAGES, getLanguage, initI18n, setLanguage } from "/i18n.js";
+
+initI18n();
 
 // ── SVG Icons ─────────────────────────────────────────────────────────────────
 const ICO = {
@@ -18,8 +21,10 @@ const ICO = {
 const S = {
   project:              null,   // loaded project data
   dirty:                false,
+  projectDirty:         false,
+  scriptDirty:          false,
   contentHash:          null,
-  activeTab:            "waves",
+  activeTab:            "home",
   // Per-tab selections
   waveMissionId:        null,   // selected mission in wave editor
   selectedEnemyId:      null,
@@ -29,13 +34,22 @@ const S = {
   selectedNodeId:       null,   // missionId of selected node
   selectedMapSourceName: null,
   mapPaintMode:          "inspect",
+  serverValidation:      null,
+  activity:              [],
+  workbenchTab:          "problems",
+  balanceReportRevision: null,
+  projectTree:          null,
+  selectedProjectPath:  null,
+  scriptSource:         "",
+  scriptFileRevision:   null,
+  scriptOriginalId:     null,
 };
 
 const STUDIO_TABS = [
-  ["waves", "Waves"], ["enemies", "Enemies"], ["towers", "Towers"],
+  ["home", "Home"], ["waves", "Waves"], ["enemies", "Enemies"], ["towers", "Towers"],
   ["missions", "Missions"], ["worldmap", "World Map"], ["maps", "Maps"],
-  ["playtest", "Playtest"], ["balance", "Balance"], ["ai", "AI Designer"],
-  ["assets", "Assets"], ["settings", "Settings"], ["buildtargets", "Build Targets"]
+  ["playtest", "Playtest"], ["balance", "Balance"],
+  ["scripts", "Scripts"], ["assets", "Assets"], ["settings", "Settings"], ["buildtargets", "Build Targets"]
 ];
 
 const APP_INFO = {
@@ -46,6 +60,8 @@ const APP_INFO = {
   siteUrl: "https://lindforge.com",
   telegramUrl: "https://t.me/lindforge"
 };
+
+const SCRIPT_UI = { collapsed: new Set(), selectedNode: null, loading: false };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -60,6 +76,79 @@ function iconBtn(icon, title, extraClass = "") {
   return `<button class="btn-icon${extraClass ? " " + extraClass : ""}" title="${esc(title)}" aria-label="${esc(title)}">${ICO[icon]}</button>`;
 }
 
+function uniqueRecipeEntityId(collection, suggestedId) {
+  const entities = S.project?.[collection] ?? {};
+  const base = String(suggestedId || collection.slice(0, -1) || "entity")
+    .toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "entity";
+  if (!entities[base]) return base;
+  let suffix = 2;
+  while (entities[`${base}_${suffix}`]) suffix += 1;
+  return `${base}_${suffix}`;
+}
+
+function duplicateStudioEntity(collection, sourceId) {
+  const entities = S.project?.[collection];
+  const source = entities?.[sourceId];
+  if (!source) return null;
+  const targetId = uniqueRecipeEntityId(collection, `${sourceId}_copy`);
+  const duplicate = deep(source);
+  duplicate.id = targetId;
+  if (typeof duplicate.label === "string" && duplicate.label) duplicate.label = `${duplicate.label} Copy`;
+  entities[targetId] = duplicate;
+  if (collection === "enemies") { S.selectedEnemyId = targetId; renderEnemiesTab(); }
+  if (collection === "towers") { S.selectedTowerId = targetId; renderTowersTab(); }
+  if (collection === "missions") { S.selectedMissionEdId = targetId; renderMissionsTab(); }
+  markDirty(true);
+  recordActivity(`Duplicated ${collection.slice(0, -1)}`, "ok", `${sourceId} → ${targetId}`);
+  return targetId;
+}
+
+function closeRecipePicker() {
+  $("recipe-overlay")?.classList.add("hidden");
+  const list = $("recipe-list");
+  if (list) list.innerHTML = "";
+}
+
+async function openRecipePicker(collection) {
+  const labels = { enemies: "enemy", towers: "tower", missions: "mission" };
+  const singular = labels[collection];
+  if (!singular) return;
+  const overlay = $("recipe-overlay");
+  const list = $("recipe-list");
+  if (!overlay || !list) return;
+  $("recipe-title").textContent = `Add ${singular}`;
+  $("recipe-intro").textContent = `Start from a validated ${singular} archetype. Every field remains editable after creation.`;
+  list.innerHTML = `<div class="workbench-empty">Loading recipes...</div>`;
+  overlay.classList.remove("hidden");
+  try {
+    const result = await apiGet(`/api/recipes?collection=${encodeURIComponent(collection)}`);
+    list.innerHTML = result.recipes.map((recipe, index) => `<button class="recipe-option" type="button" data-recipe-index="${index}">
+      <strong>${esc(recipe.label)}</strong><span class="recipe-kind">${esc(recipe.entity?.attack?.kind ?? recipe.id)}</span>
+      <p>${esc(recipe.description)}</p>
+    </button>`).join("");
+    list.querySelectorAll("[data-recipe-index]").forEach((button) => button.addEventListener("click", () => {
+      const recipe = result.recipes[Number(button.dataset.recipeIndex)];
+      const id = uniqueRecipeEntityId(collection, recipe.suggestedId);
+      const entity = { ...deep(recipe.entity), id };
+      S.project[collection] ??= {};
+      S.project[collection][id] = entity;
+      if (collection === "enemies") { S.selectedEnemyId = id; renderEnemiesTab(); }
+      if (collection === "towers") { S.selectedTowerId = id; renderTowersTab(); }
+      if (collection === "missions") { S.selectedMissionEdId = id; renderMissionsTab(); }
+      markDirty(true);
+      recordActivity(`Added ${singular}`, "ok", `${entity.label ?? id} from ${recipe.label} recipe`);
+      closeRecipePicker();
+    }));
+    list.querySelector("button")?.focus();
+  } catch (error) {
+    closeRecipePicker();
+    toast(`Could not load ${singular} recipes: ${error.message}`, "err");
+  }
+}
+
+$("recipe-close")?.addEventListener("click", closeRecipePicker);
+$("recipe-overlay")?.addEventListener("click", (event) => { if (event.target === $("recipe-overlay")) closeRecipePicker(); });
+
 // ── Toast ─────────────────────────────────────────────────────────────────────
 let toastTimer;
 function toast(msg, type = "ok") {
@@ -73,19 +162,179 @@ function toast(msg, type = "ok") {
   setTimeout(() => { d.classList.remove("show"); setTimeout(() => d.remove(), 300); }, 4000);
 }
 function setStatus(msg) { const e = $("status-msg"); if (e) e.textContent = msg; }
-function markDirty(isDirty, skipHistory) {
-  S.dirty = isDirty;
+
+function recordActivity(action, status = "ok", detail = "", meta = {}) {
+  S.activity.unshift({ id: `${Date.now()}-${Math.random().toString(16).slice(2)}`, timestamp: new Date().toISOString(), action, status, detail, ...meta });
+  if (S.activity.length > 100) S.activity.length = 100;
+  renderWorkbench();
+}
+
+function collectProblems() {
+  const issues = [];
+  for (const issue of S.clientIssues ?? []) issues.push({ ...issue, source: "live", severity: issue.severity === "warning" ? "warning" : "error" });
+  for (const issue of S.serverValidation?.issues ?? []) {
+    issues.push({
+      ...issue,
+      source: "validation",
+      kind: issue.kind ?? issue.entityKind ?? null,
+      entityId: issue.entityId ?? issue.id ?? null,
+      severity: issue.severity === "warning" ? "warning" : "error"
+    });
+  }
+  for (const mission of S.balanceReport?.missions ?? []) {
+    for (const signal of missionBalanceSignals(mission)) issues.push({
+      ...signal,
+      source: "balance",
+      kind: signal.entityId ? "tower" : "mission",
+      entityId: signal.entityId ?? mission.missionId,
+      severity: signal.severity === "error" ? "error" : "warning"
+    });
+  }
+  for (const check of S.releaseDoctor?.checks ?? []) {
+    if (check.severity === "ok") continue;
+    issues.push({
+      source: "release",
+      code: check.id,
+      message: `${check.label}: ${check.message}`,
+      severity: check.severity === "error" ? "error" : "warning"
+    });
+  }
+  const seen = new Set();
+  return issues.filter((issue) => {
+    const key = `${issue.source}:${issue.severity}:${issue.kind}:${issue.entityId}:${issue.code}:${issue.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return Boolean(issue.message);
+  });
+}
+
+function renderWorkbench() {
+  const body = $("workbench-body");
+  if (!body) return;
+  const problems = collectProblems();
+  S.workbenchProblems = problems;
+  if ($("workbench-problem-count")) $("workbench-problem-count").textContent = String(problems.length);
+  if ($("workbench-activity-count")) $("workbench-activity-count").textContent = String(S.activity.length);
+  for (const tab of ["problems", "activity"]) {
+    const button = $(`workbench-tab-${tab}`);
+    button?.classList.toggle("active", S.workbenchTab === tab);
+    button?.setAttribute("aria-selected", String(S.workbenchTab === tab));
+  }
+  if (S.workbenchTab === "problems") {
+    body.innerHTML = problems.length ? problems.map((issue, index) => {
+      const canJump = Boolean(issue.kind && issue.entityId);
+      const tag = canJump ? "button" : "div";
+      const meta = [issue.source, issue.code, issue.kind && issue.entityId ? `${issue.kind}:${issue.entityId}` : null].filter(Boolean).join(" · ");
+      return `<${tag} class="workbench-row ${esc(issue.severity)}"${canJump ? ` data-problem-index="${index}" type="button"` : ""}>${issue.severity === "error" ? ICO.err : ICO.warn}<span class="workbench-message">${esc(issue.message)}<span class="workbench-meta">${esc(meta)}</span></span><span></span></${tag}>`;
+    }).join("") : `<div class="workbench-empty">No known problems.</div>`;
+    return;
+  }
+  body.innerHTML = S.activity.length ? S.activity.map((item) => {
+    const severity = item.status === "error" ? "error" : item.status === "warning" ? "warning" : "ok";
+    const icon = severity === "error" ? ICO.err : severity === "warning" ? ICO.warn : ICO.check;
+    return `<div class="workbench-row ${severity}">${icon}<span class="workbench-message">${esc(item.action)}${item.detail ? `<span class="workbench-meta">${esc(item.detail)}</span>` : ""}</span><time class="workbench-time">${esc(new Date(item.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }))}</time></div>`;
+  }).join("") : `<div class="workbench-empty">No activity in this session.</div>`;
+}
+
+function setWorkbench(open, tab = S.workbenchTab) {
+  S.workbenchTab = tab === "activity" ? "activity" : "problems";
+  document.documentElement.setAttribute("data-workbench", open ? "open" : "closed");
+  $("workbench-drawer")?.setAttribute("aria-hidden", String(!open));
+  $("btn-activity")?.setAttribute("aria-expanded", String(open));
+  $("btn-activity")?.classList.toggle("active", open);
+  renderWorkbench();
+}
+
+$("btn-activity")?.addEventListener("click", () => setWorkbench(document.documentElement.getAttribute("data-workbench") !== "open", "activity"));
+$("workbench-close")?.addEventListener("click", () => setWorkbench(false));
+$("workbench-tab-problems")?.addEventListener("click", () => setWorkbench(true, "problems"));
+$("workbench-tab-activity")?.addEventListener("click", () => setWorkbench(true, "activity"));
+$("workbench-body")?.addEventListener("click", (event) => {
+  const row = event.target.closest?.("[data-problem-index]");
+  if (!row) return;
+  const issue = S.workbenchProblems?.[Number(row.dataset.problemIndex)];
+  if (issue?.kind && issue?.entityId) jumpToEntity(issue.kind, issue.entityId);
+});
+
+function syncDirtyUi() {
+  S.dirty = Boolean(S.projectDirty || S.scriptDirty);
   const badge = $("dirty-badge");
   const btn   = $("btn-save");
-  if (badge) badge.classList.toggle("visible", isDirty);
-  if (btn) { btn.classList.toggle("dirty", isDirty); btn.disabled = !isDirty; }
+  if (badge) badge.classList.toggle("visible", S.dirty);
+  if (btn) { btn.classList.toggle("dirty", S.dirty); btn.disabled = !S.dirty; }
+  scheduleDesktopUiSync(500);
+}
+
+function markDirty(isDirty, skipHistory) {
+  S.projectDirty = isDirty;
+  syncDirtyUi();
   if (isDirty) {
+    invalidateBalanceReport();
     if (!skipHistory) scheduleHistoryCommit();
     scheduleValidation();
     scheduleAutosave();
     PT.dirty = true; // unsaved edits should rebuild the live playtest on next open
   }
   scheduleDesktopUiSync(skipHistory ? 0 : 500);
+}
+
+function markScriptDirty(isDirty) {
+  S.scriptDirty = isDirty;
+  syncDirtyUi();
+  if (isDirty) {
+    invalidateBalanceReport();
+    scheduleAutosave();
+    PT.dirty = true;
+  }
+}
+
+let passiveBalanceTimer = null;
+let balanceRequestSerial = 0;
+
+function balanceWarningCount(report = S.balanceReport) {
+  return report?.missions?.reduce((count, mission) => count + (missionBalanceSignals(mission).length ? 1 : 0), 0) ?? 0;
+}
+
+function updateBalanceWarningUi() {
+  const count = S.balanceReportRevision === S.contentHash ? balanceWarningCount() : 0;
+  const badge = $("balance-warning-count");
+  if (badge) {
+    badge.textContent = String(count);
+    badge.classList.toggle("hidden", count === 0);
+    badge.title = count ? `${count} mission${count === 1 ? "" : "s"} need balance review` : "";
+  }
+  renderWorkbench();
+}
+
+function invalidateBalanceReport() {
+  if (passiveBalanceTimer) clearTimeout(passiveBalanceTimer);
+  passiveBalanceTimer = null;
+  balanceRequestSerial += 1;
+  if (!S.balanceReport) return;
+  S.balanceReport = null;
+  S.balanceReportRevision = null;
+  updateBalanceWarningUi();
+}
+
+function schedulePassiveBalance(delay = 1200) {
+  if (passiveBalanceTimer) clearTimeout(passiveBalanceTimer);
+  if (S.dirty || !S.project || !S.contentHash) return;
+  const revision = S.contentHash;
+  const requestSerial = ++balanceRequestSerial;
+  passiveBalanceTimer = setTimeout(async () => {
+    passiveBalanceTimer = null;
+    try {
+      const report = await apiGet("/api/balance");
+      if (requestSerial !== balanceRequestSerial || S.dirty || S.contentHash !== revision) return;
+      S.balanceReport = report;
+      S.balanceReportRevision = revision;
+      updateBalanceWarningUi();
+      if (S.activeTab === "missions") renderMissionsTab();
+      if (S.activeTab === "balance") renderBalanceReport(report);
+    } catch (error) {
+      console.warn("Passive balance analysis unavailable:", error);
+    }
+  }, delay);
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -97,7 +346,11 @@ async function apiGet(path) {
 async function apiPost(path, body) {
   const r = await fetch(path, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error ?? `${r.status}`);
+  if (!r.ok) {
+    const error = new Error(d.error ?? `${r.status}`);
+    Object.assign(error, d);
+    throw error;
+  }
   return d;
 }
 
@@ -132,17 +385,28 @@ async function load() {
     S.contentHash = data.contentHash;
     S.serverSnapshot = deep(data); // baseline for change review
     S.balanceReport = null; // stale once the project reloads
+    S.balanceReportRevision = null;
+    S.releaseDoctor = null; // readiness describes the saved revision only
+    S.scriptDirty = false;
+    S.projectTree = null;
+    S.selectedProjectPath = null;
+    S.scriptSource = "";
+    S.scriptFileRevision = null;
+    S.scriptOriginalId = null;
     markDirty(false);
     historyInit();
     PT.dirty = true; // force playtest to rebuild from the freshly loaded project
     const nameEl = $("project-name");
     if (nameEl) nameEl.textContent = data.manifest?.name ?? "Untitled";
     setStatus("Loaded");
+    recordActivity("Project loaded", "ok", data.manifest?.name ?? "Untitled");
     renderActiveTab();
     scheduleDesktopUiSync();
     await maybeRecoverDraft();
+    schedulePassiveBalance();
   } catch (e) {
     setStatus("Load error");
+    recordActivity("Project load", "error", e.message);
     toast("Failed to load project: " + e.message, "err");
   }
 }
@@ -153,29 +417,44 @@ async function save() {
   if (btn) btn.disabled = true;
   setStatus("Saving…");
   try {
-    const body = {
-      contentHash:      S.contentHash,
-      enemies:          S.project.enemies,
-      towers:           S.project.towers,
-      waveSets:         S.project.waveSets,
-      missions:         S.project.missions,
-      abilities:        S.project.abilities,
-      constants:        S.project.constants,
-      currencies:       projCurrencies(),
-      defaultMissionId: S.project.defaultMissionId,
-      worldMap:         S.project.worldMap,
-      visuals:          S.project.visuals,
-      mapSources:       S.project.mapSources,
-      manifest:         S.project.manifest,
-      buildTargets:     S.project.buildTargets,
-    };
-    const res = await apiPost("/api/project/save", body);
-    S.contentHash = res.newHash;
+    if (S.projectDirty) {
+      const body = {
+        contentHash:      S.contentHash,
+        enemies:          S.project.enemies,
+        towers:           S.project.towers,
+        waveSets:         S.project.waveSets,
+        missions:         S.project.missions,
+        abilities:        S.project.abilities,
+        constants:        S.project.constants,
+        currencies:       projCurrencies(),
+        defaultMissionId: S.project.defaultMissionId,
+        defaultDifficultyId: S.project.defaultDifficultyId,
+        difficulties:     S.project.difficulties,
+        metaProgression:  S.project.metaProgression,
+        worldMap:         S.project.worldMap,
+        visuals:          S.project.visuals,
+        storyComics:      S.project.storyComics,
+        battleBackgrounds:S.project.battleBackgrounds,
+        mapSources:       S.project.mapSources,
+        manifest:         S.project.manifest,
+        buildTargets:     S.project.buildTargets,
+      };
+      const res = await apiPost("/api/project/save", body);
+      S.contentHash = res.newHash;
+      S.projectDirty = false;
+    }
+    if (S.scriptDirty && !await saveActiveScript({ silent: true })) {
+      syncDirtyUi();
+      setStatus("Script error");
+      return false;
+    }
     S.serverSnapshot = deep(S.project); // saved state becomes the new baseline
     clearDraft();
-    markDirty(false);
+    syncDirtyUi();
     setStatus("Saved");
+    recordActivity("Project saved", "ok");
     toast("Project saved.", "ok");
+    schedulePassiveBalance();
     return true;
   } catch (e) {
     if (e.message?.includes("changed on disk")) {
@@ -185,13 +464,22 @@ async function save() {
       toast("Save failed: " + e.message, "err");
       setStatus("Save error");
     }
-    if (btn) btn.disabled = false;
+    recordActivity("Project save", "error", e.message);
+    syncDirtyUi();
     return false;
   }
 }
 
 // ── Tab navigation ────────────────────────────────────────────────────────────
 function switchTab(tab) {
+  if (AI?.focusTimer) {
+    clearTimeout(AI.focusTimer);
+    AI.focusTimer = null;
+  }
+  if (tab !== "assets" && assetsMusicPreviewId && assetsAudio) {
+    assetsAudio.selectMusic("");
+    assetsMusicPreviewId = null;
+  }
   S.activeTab = tab;
   document.querySelectorAll(".nav-tab").forEach(t =>
     t.classList.toggle("active", t.dataset.tab === tab));
@@ -206,7 +494,8 @@ function switchTab(tab) {
 function renderActiveTab() {
   if (!S.project) return;
   const t = S.activeTab;
-  if (t === "waves")        renderWavesTab();
+  if (t === "home")         renderHomeTab();
+  else if (t === "waves")   renderWavesTab();
   else if (t === "enemies") renderEnemiesTab();
   else if (t === "towers")  renderTowersTab();
   else if (t === "missions") renderMissionsTab();
@@ -214,15 +503,101 @@ function renderActiveTab() {
   else if (t === "maps") renderMapsTab();
   else if (t === "playtest") renderPlaytestTab();
   else if (t === "balance") renderBalanceTab();
-  else if (t === "ai") renderAiTab();
+  else if (t === "scripts") renderScriptsTab();
   else if (t === "assets") renderAssetsTab();
   else if (t === "settings") renderSettingsTab();
   else if (t === "buildtargets") renderBuildTargetsTab();
   refreshValidationUI();
 }
 
+function homeWorkflowIcon(kind) {
+  const icons = {
+    author: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`,
+    play: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
+    balance: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-7"/></svg>`,
+    ai: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"/><path d="M5 17l.8 2.2L8 20l-2.2.8L5 23l-.8-2.2L2 20l2.2-.8L5 17z"/></svg>`,
+    ship: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>`
+  };
+  return icons[kind] ?? icons.author;
+}
+
+function renderHomeTab() {
+  const body = $("project-home-body");
+  if (!body || !S.project) return;
+  const project = S.project;
+  const counts = [
+    ["Missions", Object.keys(project.missions ?? {}).length],
+    ["Towers", Object.keys(project.towers ?? {}).length],
+    ["Enemies", Object.keys(project.enemies ?? {}).length],
+    ["Maps", Object.keys(project.maps ?? {}).length]
+  ];
+  const workflows = [
+    ["author", "Author", "Build waves, enemies, towers, missions, and maps.", "navigate.waves", "Open"],
+    ["play", "Playtest", "Run the selected mission and inspect deterministic events.", "project.playtest", "Play"],
+    ["balance", "Balance", "Compare strategies, leaks, upgrades, and placement sensitivity.", "project.balance", "Analyze"],
+    ["ai", "Collaborate", "Give a scoped Ask, Plan, or Act task to the connected AI.", "project.ai_designer", "AI Chat"],
+    ["ship", "Ship", "Review targets and prepare browser or native game builds.", "navigate.buildtargets", "Configure"]
+  ];
+  const readiness = S.releaseDoctor?.checks ?? [];
+  const workingCopy = {
+    label: "Working copy",
+    message: S.dirty ? "Unsaved edits are not included in Release Doctor." : "Saved files and the editor are in sync.",
+    severity: S.dirty ? "warning" : "ok"
+  };
+  const checks = readiness.length
+    ? [workingCopy, ...readiness]
+    : [workingCopy, { label: "Release readiness", message: "Run Release Doctor to validate maps, identity, content, and build targets.", severity: "warning" }];
+  const recent = S.activity.slice(0, 5);
+
+  body.innerHTML = `
+    <div class="home-identity">
+      <div><h1>${esc(project.manifest?.name ?? "Untitled Project")}</h1><p>${esc(project.manifest?.description ?? `Default mission: ${project.defaultMissionId ?? "not set"}`)}</p></div>
+      <div class="home-counts">${counts.map(([label, value]) => `<span class="home-count"><b>${value}</b>${esc(label)}</span>`).join("")}</div>
+    </div>
+    <section class="home-section" aria-labelledby="home-workflow-title">
+      <div class="home-section-head"><h3 id="home-workflow-title">Workflow</h3><span class="home-section-note">One project · deterministic runtime</span></div>
+      ${workflows.map(([kind, title, description, command, action]) => `<div class="home-workflow-row"><span class="home-workflow-icon" aria-hidden="true">${homeWorkflowIcon(kind)}</span><span class="home-workflow-main"><strong>${esc(title)}</strong><span>${esc(description)}</span></span><button class="btn btn-outline" type="button" data-home-command="${esc(command)}">${esc(action)}</button></div>`).join("")}
+    </section>
+    <section class="home-section" aria-labelledby="home-readiness-title">
+      <div class="home-section-head"><h3 id="home-readiness-title">Production Readiness</h3>${S.releaseDoctor ? `<span class="home-section-note">Saved revision checked</span>` : ""}</div>
+      ${checks.map((check) => `<div class="home-check-row"><span class="home-workflow-icon ${esc(check.severity)}" aria-hidden="true">${check.severity === "ok" ? ICO.check : check.severity === "error" ? ICO.err : ICO.warn}</span><span class="home-check-main"><strong>${esc(check.label)}</strong><span>${esc(check.message)}</span></span><span class="home-check-state ${esc(check.severity)}">${esc(check.severity)}</span></div>`).join("")}
+    </section>
+    <section class="home-section" aria-labelledby="home-activity-title">
+      <div class="home-section-head"><h3 id="home-activity-title">Recent Activity</h3><button class="home-link-button" type="button" data-home-activity>View all</button></div>
+      ${recent.length ? recent.map((item) => `<div class="home-activity-row"><time>${esc(new Date(item.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</time><span>${esc(item.action)}${item.detail ? ` · ${esc(item.detail)}` : ""}</span><span class="home-check-state ${item.status === "error" ? "error" : item.status === "warning" ? "warning" : "ok"}">${esc(item.status)}</span></div>`).join("") : `<div class="workbench-empty">No activity in this session.</div>`}
+    </section>`;
+
+  body.querySelectorAll("[data-home-command]").forEach((button) => button.addEventListener("click", () => runStudioCommand(button.dataset.homeCommand)));
+  body.querySelector("[data-home-activity]")?.addEventListener("click", () => setWorkbench(true, "activity"));
+}
+
+async function runReleaseDoctor() {
+  const button = $("btn-release-doctor");
+  await withButtonSpinner(button, async () => {
+    setStatus("Checking release readiness…");
+    try {
+      const result = await apiGet("/api/release-doctor");
+      S.releaseDoctor = result;
+      S.serverValidation = result.validation;
+      const errors = result.checks.filter((check) => check.severity === "error").length;
+      const warnings = result.checks.filter((check) => check.severity === "warning").length + (S.dirty ? 1 : 0);
+      recordActivity("Release Doctor", errors ? "error" : warnings ? "warning" : "ok", `${errors} errors, ${warnings} warnings`);
+      renderWorkbench();
+      renderHomeTab();
+      setStatus(errors ? "Release blocked" : warnings ? "Release has warnings" : "Release ready");
+      toast(errors ? "Release Doctor found blocking issues." : warnings ? "Release Doctor completed with warnings." : "Saved project is release-ready.", errors ? "err" : warnings ? "warn" : "ok");
+    } catch (error) {
+      setStatus("Release check failed");
+      recordActivity("Release Doctor", "error", error.message);
+      toast("Release Doctor failed: " + error.message, "err");
+    }
+  });
+}
+
+$("btn-release-doctor")?.addEventListener("click", runReleaseDoctor);
+
 // ═════════════════════════════════════════════════════════════════════════════
-// AI CO-DESIGNER — chat panel driving the MCP tool surface (author→simulate→diagnose→patch)
+// AI CHAT — account/API connections live in Settings; the working chat stays docked on the right.
 // ═════════════════════════════════════════════════════════════════════════════
 const AI = {
   messages: [],
@@ -230,12 +605,16 @@ const AI = {
   controller: null,
   wired: false,
   provider: null,
-  openRouterModels: null,
-  openRouterLoading: false,
-  keyPromptedFor: null,
+  modelCatalogs: {},
+  modelLoading: new Set(),
   runtimeStatus: {},
   runtimeStatusLoading: null,
-  runtimePollTimer: null
+  runtimePollTimer: null,
+  attachments: [],
+  dockOpen: false,
+  activateOnConnect: null,
+  focusTimer: null,
+  pendingReview: null
 };
 const AI_LEGACY_KEY_LS = "towerforge:anthropic-key";
 const AI_LEGACY_MODEL_LS = "towerforge:ai-model";
@@ -243,12 +622,17 @@ const AI_KEYS_LS = "towerforge:ai-keys";
 const AI_MODELS_LS = "towerforge:ai-models";
 const AI_CUSTOM_MODELS_LS = "towerforge:ai-custom-models";
 const AI_PROVIDER_LS = "towerforge:ai-provider";
+const AI_REASONING_LS = "towerforge:ai-reasoning";
+const AI_PERMISSION_MODE_LS = "towerforge:ai-permission-mode";
 const AI_MODEL_ID_RE = /^[A-Za-z0-9~][A-Za-z0-9._:/~+@-]{0,199}$/;
+const AI_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const AI_REASONING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 const AI_PROVIDERS = {
   codex: {
     label: "Codex (ChatGPT)",
     auth: "runtime",
     defaultModel: "default",
+    reasoningLevels: AI_REASONING_LEVELS,
     models: [
       { id: "default", label: "Account default" },
       { id: "gpt-5.6", label: "GPT-5.6" },
@@ -259,6 +643,7 @@ const AI_PROVIDERS = {
     label: "Claude Code",
     auth: "runtime",
     defaultModel: "sonnet",
+    reasoningLevels: ["low", "medium", "high", "max"],
     models: [
       { id: "sonnet", label: "Sonnet (balanced)" },
       { id: "opus", label: "Opus (deep)" },
@@ -271,6 +656,7 @@ const AI_PROVIDERS = {
     keyLabel: "Anthropic API key",
     keyPlaceholder: "sk-ant-...",
     defaultModel: "claude-sonnet-5",
+    reasoningLevels: ["low", "medium", "high", "max"],
     models: [
       { id: "claude-sonnet-5", label: "Sonnet 5 (balanced)" },
       { id: "claude-opus-4-8", label: "Opus 4.8 (deep)" },
@@ -284,6 +670,7 @@ const AI_PROVIDERS = {
     keyLabel: "OpenAI API key",
     keyPlaceholder: "sk-...",
     defaultModel: "gpt-5.6-terra",
+    reasoningLevels: ["low", "medium", "high", "xhigh"],
     models: [
       { id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)" },
       { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (deep)" },
@@ -296,6 +683,7 @@ const AI_PROVIDERS = {
     keyLabel: "OpenRouter token",
     keyPlaceholder: "sk-or-v1-...",
     defaultModel: "openrouter/auto",
+    reasoningLevels: ["low", "medium", "high", "xhigh"],
     models: [
       { id: "openrouter/auto", label: "Auto Router" },
       { id: "~openai/gpt-latest", label: "OpenAI GPT Latest" }
@@ -330,7 +718,7 @@ function aiInitStorage() {
 }
 
 function aiProvider() {
-  const value = $("ai-provider")?.value || AI.provider || localStorage.getItem(AI_PROVIDER_LS) || "codex";
+  const value = AI.provider || localStorage.getItem(AI_PROVIDER_LS) || "codex";
   return AI_PROVIDERS[value] ? value : "codex";
 }
 
@@ -363,6 +751,10 @@ function aiIsReady(provider = aiProvider()) {
   return aiIsRuntime(provider) ? Boolean(aiRuntimeStatus(provider)?.connected) : aiHasKey(provider);
 }
 
+function aiAnyReady() {
+  return Object.keys(AI_PROVIDERS).some((provider) => aiIsReady(provider));
+}
+
 function aiSetKey(provider, value) {
   const keys = aiKeys();
   if (value) keys[provider] = value;
@@ -381,6 +773,22 @@ function aiSetStoredModel(provider, model) {
   localStorage.setItem(AI_MODELS_LS, JSON.stringify(models));
 }
 
+function aiStoredReasoning(provider = aiProvider()) {
+  const value = aiReadStorage(AI_REASONING_LS)[provider];
+  return value === "default" || AI_REASONING_LEVELS.includes(value) ? value : "default";
+}
+
+function aiSetStoredReasoning(provider, reasoning) {
+  const values = aiReadStorage(AI_REASONING_LS);
+  values[provider] = reasoning;
+  localStorage.setItem(AI_REASONING_LS, JSON.stringify(values));
+}
+
+function aiPermissionMode() {
+  const value = localStorage.getItem(AI_PERMISSION_MODE_LS) || "ask";
+  return ["ask", "plan", "act"].includes(value) ? value : "ask";
+}
+
 function aiCustomModels(provider = aiProvider()) {
   const values = aiReadStorage(AI_CUSTOM_MODELS_LS)[provider];
   return Array.isArray(values) ? values.filter((value) => typeof value === "string" && AI_MODEL_ID_RE.test(value)) : [];
@@ -396,9 +804,10 @@ function aiAddCustomModel(provider, model) {
 function aiAvailableModels(provider = aiProvider()) {
   const byId = new Map();
   for (const model of aiProviderInfo(provider).models) byId.set(model.id, model);
-  if (provider === "openrouter" && Array.isArray(AI.openRouterModels)) {
-    for (const model of AI.openRouterModels) {
+  if (Array.isArray(AI.modelCatalogs[provider])) {
+    for (const model of AI.modelCatalogs[provider]) {
       if (!byId.has(model.id)) byId.set(model.id, { id: model.id, label: model.name || model.id });
+      else byId.set(model.id, { ...byId.get(model.id), ...model, label: model.label || model.name || byId.get(model.id).label });
     }
   }
   for (const id of aiCustomModels(provider)) {
@@ -408,34 +817,97 @@ function aiAvailableModels(provider = aiProvider()) {
 }
 
 function renderAiModelOptions(provider = aiProvider()) {
-  const select = $("ai-model");
-  if (!select) return;
   const selected = aiStoredModel(provider);
   const models = aiAvailableModels(provider);
   if (!models.some((model) => model.id === selected)) models.unshift({ id: selected, label: `${selected} (custom)` });
-  select.innerHTML = models.map((model) => `<option value="${esc(model.id)}">${esc(model.label)}</option>`).join("");
-  if (provider === "openrouter" && AI.openRouterLoading) {
-    select.insertAdjacentHTML("beforeend", '<option disabled value="">Loading OpenRouter models...</option>');
+  for (const id of ["ai-model", "setting-ai-model"]) {
+    const select = $(id);
+    if (!select) continue;
+    select.innerHTML = models.map((model) => `<option value="${esc(model.id)}">${esc(model.label)}</option>`).join("");
+    if (AI.modelLoading.has(provider)) select.insertAdjacentHTML("beforeend", '<option disabled value="">Loading models...</option>');
+    select.value = selected;
   }
-  select.value = selected;
+  renderAiReasoningOptions(provider);
 }
 
-async function loadOpenRouterModels() {
-  if (AI.openRouterLoading || AI.openRouterModels !== null) return;
-  AI.openRouterLoading = true;
-  renderAiModelOptions("openrouter");
+async function loadAiModels(provider = aiProvider(), force = false) {
+  if (!["codex", "claude-code", "openrouter"].includes(provider)) return;
+  if (AI.modelLoading.has(provider) || (!force && Array.isArray(AI.modelCatalogs[provider]))) return;
+  if (aiIsRuntime(provider) && !aiIsReady(provider)) return;
+  AI.modelLoading.add(provider);
+  renderAiModelOptions(provider);
   try {
-    const response = await fetch("/api/ai/models?provider=openrouter");
+    const response = await fetch(`/api/ai/models?provider=${encodeURIComponent(provider)}`);
     if (!response.ok) throw new Error(`Server returned ${response.status}`);
     const payload = await response.json();
-    AI.openRouterModels = Array.isArray(payload.models) ? payload.models : [];
+    AI.modelCatalogs[provider] = Array.isArray(payload.models) ? payload.models : [];
   } catch (error) {
-    AI.openRouterModels = [];
-    toast(`OpenRouter catalog unavailable: ${error.message}`, "warn");
+    AI.modelCatalogs[provider] = [];
+    toast(`${aiProviderInfo(provider).label} model catalog unavailable: ${error.message}`, "warn");
   } finally {
-    AI.openRouterLoading = false;
-    if (aiProvider() === "openrouter") renderAiModelOptions("openrouter");
+    AI.modelLoading.delete(provider);
+    if (aiProvider() === provider) renderAiModelOptions(provider);
   }
+}
+
+function aiCurrentModelInfo(provider = aiProvider()) {
+  const id = aiStoredModel(provider);
+  return aiAvailableModels(provider).find((model) => model.id === id) || null;
+}
+
+function renderAiReasoningOptions(provider = aiProvider()) {
+  const model = aiCurrentModelInfo(provider);
+  const dynamic = Array.isArray(model?.reasoningLevels) ? model.reasoningLevels.filter((level) => AI_REASONING_LEVELS.includes(level)) : [];
+  const levels = dynamic.length ? dynamic : aiProviderInfo(provider).reasoningLevels || AI_REASONING_LEVELS;
+  const suggested = model?.defaultReasoning && levels.includes(model.defaultReasoning) ? ` (${model.defaultReasoning})` : "";
+  const selected = aiStoredReasoning(provider);
+  const options = [
+    { id: "default", label: `Default${suggested}` },
+    ...levels.map((id) => ({ id, label: id === "xhigh" ? "Extra high" : id[0].toUpperCase() + id.slice(1) }))
+  ];
+  for (const id of ["ai-reasoning", "setting-ai-reasoning"]) {
+    const select = $(id);
+    if (!select) continue;
+    select.innerHTML = options.map((option) => `<option value="${option.id}">${esc(option.label)}</option>`).join("");
+    select.value = options.some((option) => option.id === selected) ? selected : "default";
+  }
+}
+
+function renderAiProviderOptions() {
+  const account = ["codex", "claude-code"];
+  const direct = ["anthropic", "openai", "openrouter"];
+  const option = (provider) => `<option value="${provider}">${esc(AI_PROVIDERS[provider].label)}</option>`;
+  const html = `<optgroup label="Account runtimes">${account.map(option).join("")}</optgroup><optgroup label="API keys">${direct.map(option).join("")}</optgroup>`;
+  for (const id of ["ai-provider", "setting-ai-provider"]) {
+    const select = $(id);
+    if (!select) continue;
+    select.innerHTML = html;
+    select.value = aiProvider();
+  }
+}
+
+function clearAiConversation() {
+  AI.controller?.abort();
+  AI.messages = [];
+  AI.attachments = [];
+  if ($("ai-transcript")) $("ai-transcript").innerHTML = "";
+  renderAiAttachments();
+  renderAiEmpty();
+}
+
+function setAiProvider(provider, { announce = true } = {}) {
+  if (!AI_PROVIDERS[provider]) return;
+  const changed = AI.provider !== provider;
+  AI.provider = provider;
+  localStorage.setItem(AI_PROVIDER_LS, provider);
+  renderAiProviderOptions();
+  renderAiModelOptions(provider);
+  updateAiUi();
+  if (changed) {
+    clearAiConversation();
+    if (announce) toast(`AI provider: ${aiProviderInfo(provider).label}. New chat started.`, "ok");
+  }
+  loadAiModels(provider);
 }
 
 function scheduleAiRuntimePolling(provider) {
@@ -444,7 +916,14 @@ function scheduleAiRuntimePolling(provider) {
   AI.runtimePollTimer = setInterval(async () => {
     attempts += 1;
     const status = await loadAiRuntimeStatus(provider, true);
-    if (status?.connected || attempts >= 80 || aiProvider() !== provider) {
+    if (status?.connected) {
+      setAiProvider(provider, { announce: false });
+      AI.activateOnConnect = null;
+      await loadAiModels(provider, true);
+      setAiDockOpen(true);
+      toast(`${aiProviderInfo(provider).label} connected.`, "ok");
+    }
+    if (status?.connected || attempts >= 80) {
       clearInterval(AI.runtimePollTimer);
       AI.runtimePollTimer = null;
     }
@@ -456,7 +935,7 @@ async function loadAiRuntimeStatus(provider = aiProvider(), force = false) {
   if (AI.runtimeStatusLoading === provider) return aiRuntimeStatus(provider);
   if (!force && aiRuntimeStatus(provider)) return aiRuntimeStatus(provider);
   AI.runtimeStatusLoading = provider;
-  updateAiKeyUi();
+  updateAiUi();
   try {
     const response = await fetch(`/api/ai/runtime/status?provider=${encodeURIComponent(provider)}`);
     const payload = await response.json();
@@ -468,8 +947,9 @@ async function loadAiRuntimeStatus(provider = aiProvider(), force = false) {
     return AI.runtimeStatus[provider];
   } finally {
     if (AI.runtimeStatusLoading === provider) AI.runtimeStatusLoading = null;
+    updateAiUi();
     if (aiProvider() === provider) {
-      updateAiKeyUi();
+      if (AI.runtimeStatus[provider]?.connected) loadAiModels(provider, force);
       if (!AI.messages.length) renderAiEmpty();
     }
   }
@@ -492,16 +972,16 @@ async function openAiAuthUrl(url) {
   else window.open(url, "_blank", "noopener,noreferrer");
 }
 
-async function aiRuntimeConnect() {
-  const provider = aiProvider();
+async function aiRuntimeConnect(provider = aiProvider()) {
   if (!aiIsRuntime(provider)) return;
-  const button = $("ai-runtime-connect");
+  const button = document.querySelector(`[data-ai-connect="${CSS.escape(provider)}"]`);
   if (button) button.disabled = true;
   try {
     const payload = await postAiRuntime("/api/ai/runtime/connect", provider);
     if (payload.authUrl) await openAiAuthUrl(payload.authUrl);
     AI.runtimeStatus[provider] = { provider, available: true, connected: false, authenticating: true };
-    updateAiKeyUi();
+    AI.activateOnConnect = provider;
+    updateAiUi();
     renderAiEmpty();
     scheduleAiRuntimePolling(provider);
   } catch (error) {
@@ -512,8 +992,7 @@ async function aiRuntimeConnect() {
   }
 }
 
-async function aiRuntimeDisconnect() {
-  const provider = aiProvider();
+async function aiRuntimeDisconnect(provider = aiProvider()) {
   if (!aiIsRuntime(provider)) return;
   if (!await confirmDialog({
     title: `Disconnect ${aiProviderInfo(provider).label}?`,
@@ -524,13 +1003,25 @@ async function aiRuntimeDisconnect() {
   try {
     await postAiRuntime("/api/ai/runtime/disconnect", provider);
     AI.runtimeStatus[provider] = { provider, available: true, connected: false };
-    AI.messages = [];
-    if ($("ai-transcript")) $("ai-transcript").innerHTML = "";
-    updateAiKeyUi();
-    renderAiEmpty();
+    delete AI.modelCatalogs[provider];
+    if (aiProvider() === provider) clearAiConversation();
+    updateAiUi();
   } catch (error) {
     toast(`Could not disconnect: ${error.message}`, "err");
   }
+}
+
+async function removeAiKey(provider) {
+  if (!await confirmDialog({
+    title: `Remove ${aiProviderInfo(provider).label} key?`,
+    message: "The key stored on this device will be deleted. Project files are not changed.",
+    confirmLabel: "Remove key",
+    danger: true
+  })) return;
+  aiSetKey(provider, "");
+  if (aiProvider() === provider) clearAiConversation();
+  updateAiUi();
+  toast(`${aiProviderInfo(provider).label} key removed.`, "ok");
 }
 
 /** Tiny safe markdown: escape, then **bold**, `code`, and newlines. */
@@ -541,95 +1032,59 @@ function aiMarkdown(text) {
     .replace(/\n/g, "<br>");
 }
 
-function renderAiTab() {
-  if (!AI.wired) wireAi();
+function ensureAiInitialized() {
   if (!AI.provider) {
     aiInitStorage();
     const stored = localStorage.getItem(AI_PROVIDER_LS) || "codex";
     AI.provider = AI_PROVIDERS[stored] ? stored : "codex";
-    if ($("ai-provider")) $("ai-provider").value = AI.provider;
-    renderAiModelOptions(AI.provider);
-    if (AI.provider === "openrouter") loadOpenRouterModels();
   }
-  updateAiKeyUi();
-  const t = $("ai-transcript");
-  if (t && !AI.messages.length) renderAiEmpty();
-  if (aiIsRuntime()) {
-    loadAiRuntimeStatus(aiProvider());
-  } else if (!aiHasKey() && AI.keyPromptedFor !== aiProvider()) {
-    AI.keyPromptedFor = aiProvider();
-    toggleAiKeyRow(true);
-  }
+  renderAiProviderOptions();
+  renderAiModelOptions(AI.provider);
+  if (!AI.wired) wireAi();
+  updateAiUi();
+  if (!AI.messages.length) renderAiEmpty();
+  loadAiModels(AI.provider);
 }
 
 function wireAi() {
   AI.wired = true;
+  $("ai-mode")?.addEventListener("change", () => {
+    localStorage.setItem(AI_PERMISSION_MODE_LS, $("ai-mode").value);
+    updateAiUi();
+  });
   $("ai-provider")?.addEventListener("change", () => {
-    const provider = aiProvider();
-    const changed = AI.provider !== provider;
-    AI.provider = provider;
-    localStorage.setItem(AI_PROVIDER_LS, provider);
-    renderAiModelOptions(provider);
-    updateAiKeyUi();
-    toggleAiKeyRow(false);
-    toggleAiModelRow(false);
-    AI.keyPromptedFor = null;
-    if (changed) {
-      AI.messages = [];
-      if ($("ai-transcript")) $("ai-transcript").innerHTML = "";
-      renderAiEmpty();
-      toast(`AI provider: ${aiProviderInfo(provider).label}. New chat started.`, "ok");
-    }
-    if (provider === "openrouter") loadOpenRouterModels();
-    if (aiIsRuntime(provider)) {
-      loadAiRuntimeStatus(provider, true);
-    } else if (!aiHasKey(provider)) {
-      AI.keyPromptedFor = provider;
-      toggleAiKeyRow(true);
-    }
+    setAiProvider($("ai-provider").value);
   });
   $("ai-model")?.addEventListener("change", () => {
     const model = $("ai-model")?.value;
-    if (model) aiSetStoredModel(aiProvider(), model);
+    if (model) { aiSetStoredModel(aiProvider(), model); renderAiModelOptions(aiProvider()); updateAiUi(); }
   });
-  $("ai-model-add")?.addEventListener("click", () => toggleAiModelRow());
-  $("ai-model-save")?.addEventListener("click", saveAiCustomModel);
-  $("ai-model-close")?.addEventListener("click", () => toggleAiModelRow(false));
-  $("ai-model-input")?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") { event.preventDefault(); saveAiCustomModel(); }
-    if (event.key === "Escape") toggleAiModelRow(false);
+  $("ai-reasoning")?.addEventListener("change", () => {
+    aiSetStoredReasoning(aiProvider(), $("ai-reasoning").value);
+    renderAiReasoningOptions(aiProvider());
   });
-  $("ai-key-btn")?.addEventListener("click", () => {
-    if (aiIsRuntime()) aiRuntimeConnect();
-    else toggleAiKeyRow();
-  });
-  $("ai-key-save")?.addEventListener("click", () => {
-    const v = $("ai-key-input")?.value.trim();
-    if (!v) return;
-    aiSetKey(aiProvider(), v);
-    $("ai-key-input").value = "";
-    toggleAiKeyRow(false);
-    updateAiKeyUi();
-    renderAiEmpty();
-    toast(`${aiProviderInfo().keyLabel} saved on this device.`, "ok");
-  });
-  $("ai-key-remove")?.addEventListener("click", () => {
-    aiSetKey(aiProvider(), "");
-    updateAiKeyUi();
-    renderAiEmpty();
-    toggleAiKeyRow(true);
-    toast(`${aiProviderInfo().keyLabel} removed.`, "ok");
-  });
-  $("ai-key-close")?.addEventListener("click", () => toggleAiKeyRow(false));
-  $("ai-key-input")?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") { event.preventDefault(); $("ai-key-save")?.click(); }
-    if (event.key === "Escape") toggleAiKeyRow(false);
-  });
-  $("ai-runtime-connect")?.addEventListener("click", aiRuntimeConnect);
-  $("ai-runtime-disconnect")?.addEventListener("click", aiRuntimeDisconnect);
   $("ai-form")?.addEventListener("submit", (e) => { e.preventDefault(); aiSend(); });
   $("ai-stop")?.addEventListener("click", () => AI.controller?.abort());
   $("ai-input")?.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); aiSend(); } });
+  $("ai-attach")?.addEventListener("click", () => $("ai-file-input")?.click());
+  $("ai-file-input")?.addEventListener("change", (event) => addAiFiles(event.target.files));
+  $("ai-attachments")?.addEventListener("click", (event) => {
+    const remove = event.target.closest?.("[data-ai-remove-attachment]");
+    if (!remove || AI.busy) return;
+    AI.attachments.splice(Number(remove.dataset.aiRemoveAttachment), 1);
+    renderAiAttachments();
+  });
+  $("ai-transcript")?.addEventListener("click", (event) => {
+    if (event.target.closest?.("[data-ai-open-settings]")) switchTab("settings");
+    if (event.target.closest?.("[data-ai-review-details]") && AI.pendingReview) {
+      showChangeReviewBetween(AI.pendingReview.before, AI.pendingReview.after, "AI changes from last turn");
+    }
+    if (event.target.closest?.("[data-ai-review-keep]") && AI.pendingReview) {
+      recordActivity("AI changes kept", "ok");
+      finishAiReview("kept");
+    }
+    if (event.target.closest?.("[data-ai-review-revert]")) revertAiReview();
+  });
 }
 
 function renderAiEmpty() {
@@ -642,55 +1097,76 @@ function renderAiEmpty() {
     else if (status.authenticating) authPrompt = `<b>Complete sign-in in your browser.</b><br><br>`;
     else if (!status.available) authPrompt = `<b>${esc(status.error || "Official runtime is unavailable.")}</b><br><br>`;
     else if (!status.connected) authPrompt = `<b>Connect your ${esc(aiProviderInfo().label)} account to begin.</b><br><br>`;
-    authPrompt += `Your prompt and the TowerForge tool results needed for the task are sent to the selected provider. OAuth credentials stay inside its official runtime, and local agent transcripts are not persisted by TowerForge.<br><br>`;
+    authPrompt += `OAuth credentials stay inside the official runtime. Prompts, selected attachments, and required TowerForge tool results are sent to ${esc(aiProviderInfo().label)}.<br><br>`;
   } else if (!aiHasKey()) {
-    authPrompt = `<b>Set your ${esc(aiProviderInfo().keyLabel)}</b> to begin. It stays on this device and is never committed.<br><br>`;
+    authPrompt = `<b>Set your ${esc(aiProviderInfo().keyLabel)} in Settings</b> to begin. It stays on this device and is never committed.<br><br>`;
   }
-  transcript.innerHTML = `<div class="ai-empty">${authPrompt}Ask the co-designer to balance a mission, add a tower, or diagnose difficulty. It runs the deterministic <b>simulate → diagnose → patch</b> loop and edits the <b>saved</b> project.</div>`;
+  transcript.innerHTML = `<div class="ai-empty">${authPrompt}Ask about the current screen, attach a visual reference, balance a mission, or author content through validated tools.<br><button class="btn btn-outline" type="button" data-ai-open-settings>AI Settings</button></div>`;
 }
 
-function updateAiKeyUi() {
+function runtimeStatusText(provider) {
+  const info = aiProviderInfo(provider);
+  const status = aiRuntimeStatus(provider);
+  if (AI.runtimeStatusLoading === provider) return "Checking account...";
+  if (status?.connected) return `${status.method || info.label}${status.subscription ? ` · ${status.subscription}` : ""}`;
+  if (status?.authenticating) return "Waiting for browser sign-in...";
+  if (status?.available === false) return status.error || "Runtime unavailable";
+  return "Not connected";
+}
+
+function renderAiConnectionSettings() {
+  const host = $("ai-connections-list");
+  if (!host) return;
+  const drafts = new Map([...host.querySelectorAll("[data-ai-key-input]")].map((input) => [input.dataset.aiKeyInput, input.value]));
+  const runtimeCard = (provider, description) => {
+    const status = aiRuntimeStatus(provider);
+    const connected = Boolean(status?.connected);
+    return `<article class="ai-connection-card">
+      <div class="ai-connection-head"><span class="ai-runtime-indicator" data-state="${connected ? "connected" : status?.authenticating ? "pending" : "disconnected"}"></span><strong>${esc(aiProviderInfo(provider).label)}</strong><span class="ai-connection-type">Account</span></div>
+      <p>${esc(description)}</p>
+      <div class="ai-connection-status">${esc(runtimeStatusText(provider))}</div>
+      <div class="ai-connection-actions">
+        <button class="btn btn-primary" type="button" data-ai-connect="${provider}"${connected ? " hidden" : ""}>${status?.authenticating ? "Open sign-in again" : "Connect"}</button>
+        <button class="btn btn-outline" type="button" data-ai-disconnect="${provider}"${connected ? "" : " hidden"}>Disconnect</button>
+      </div>
+    </article>`;
+  };
+  const keyRow = (provider) => {
+    const info = aiProviderInfo(provider);
+    const saved = aiHasKey(provider);
+    return `<div class="ai-api-key-row">
+      <div><strong>${esc(info.label)}</strong><span>${saved ? "Key saved on this device" : "Not configured"}</span></div>
+      <input data-ai-key-input="${provider}" type="password" class="mono" placeholder="${esc(saved ? `${info.keyLabel} saved; paste to replace` : info.keyPlaceholder)}" autocomplete="new-password">
+      <button class="btn btn-outline" type="button" data-ai-save-key="${provider}">Save</button>
+      <button class="btn-icon danger" type="button" data-ai-remove-key="${provider}" title="Remove key" aria-label="Remove ${esc(info.label)} key"${saved ? "" : " hidden"}>${ICO.trash}</button>
+    </div>`;
+  };
+  host.innerHTML = `<div class="ai-connection-grid">
+    ${runtimeCard("codex", "Use your ChatGPT plan through the official Codex App Server OAuth flow.")}
+    ${runtimeCard("claude-code", "Use your Claude account through the bundled official Claude Code runtime.")}
+  </div>
+  <div class="ai-connection-note">TowerForge never reads OAuth tokens. Account runtimes use private app-data storage, an isolated workspace, and only validated TowerForge tools.</div>
+  <div class="ai-api-keys">${["anthropic", "openai", "openrouter"].map(keyRow).join("")}</div>`;
+  for (const [provider, value] of drafts) {
+    const input = host.querySelector(`[data-ai-key-input="${CSS.escape(provider)}"]`);
+    if (input) input.value = value;
+  }
+}
+
+function updateAiUi() {
   const info = aiProviderInfo();
-  const runtime = aiIsRuntime();
-  const status = runtime ? aiRuntimeStatus() : null;
-  const saved = aiHasKey();
-  if ($("ai-runtime-row")) $("ai-runtime-row").hidden = !runtime;
-  if ($("ai-key-row") && runtime) $("ai-key-row").hidden = true;
-  if ($("ai-key-btn")) $("ai-key-btn").hidden = runtime;
-  if ($("ai-runtime-status") && runtime) {
-    const checking = AI.runtimeStatusLoading === aiProvider();
-    $("ai-runtime-status").textContent = checking
-      ? "Checking account..."
-      : status?.connected
-        ? `${status.method || info.label}${status.subscription ? ` · ${status.subscription}` : ""}`
-        : status?.authenticating
-          ? "Waiting for browser sign-in..."
-          : status?.available === false
-            ? status.error || "Runtime unavailable"
-            : "Not connected";
-  }
-  if ($("ai-runtime-indicator")) {
-    $("ai-runtime-indicator").dataset.state = status?.connected ? "connected" : status?.authenticating ? "pending" : "disconnected";
-  }
-  if ($("ai-runtime-connect")) {
-    $("ai-runtime-connect").hidden = Boolean(status?.connected);
-    $("ai-runtime-connect").textContent = status?.authenticating ? "Open sign-in again" : "Connect";
-  }
-  if ($("ai-runtime-disconnect")) $("ai-runtime-disconnect").hidden = !status?.connected;
-  if (!runtime) {
-    if ($("ai-key-label")) $("ai-key-label").textContent = info.keyLabel;
-    if ($("ai-key-input")) $("ai-key-input").placeholder = saved ? `${info.keyLabel} saved; paste to replace` : `${info.keyPlaceholder} (stored on this device only)`;
-    if ($("ai-key-remove")) $("ai-key-remove").hidden = !saved;
-    if ($("ai-key-btn")) {
-      $("ai-key-btn").textContent = saved ? "Key saved" : "API key";
-      $("ai-key-btn").title = `Set ${info.keyLabel}`;
-    }
-  }
-  if ($("ai-model-label")) $("ai-model-label").textContent = `${info.label} model ID`;
+  const ready = aiIsReady();
+  const modeLabel = aiPermissionMode()[0].toUpperCase() + aiPermissionMode().slice(1);
+  if ($("ai-dock-status")) $("ai-dock-status").textContent = ready ? `${modeLabel} · ${info.label} · ${aiStoredModel()}` : aiIsRuntime() ? `${modeLabel} · ${runtimeStatusText(aiProvider())}` : `${modeLabel} · ${info.keyLabel} required`;
+  if ($("ai-chat-status-dot")) $("ai-chat-status-dot").dataset.state = aiAnyReady() ? "ready" : "offline";
+  if ($("btn-ai-chat")) $("btn-ai-chat").classList.toggle("active", AI.dockOpen);
+  if ($("ai-mode")) $("ai-mode").value = aiPermissionMode();
+  renderAiConnectionSettings();
+  aiSetBusy(AI.busy);
 }
 
 function saveAiCustomModel() {
-  const input = $("ai-model-input");
+  const input = $("setting-ai-custom-model");
   const model = input?.value.trim() || "";
   if (!AI_MODEL_ID_RE.test(model)) {
     toast("Enter a valid model ID (letters, numbers, ., -, _, /, :, ~, + or @).", "warn");
@@ -701,23 +1177,7 @@ function saveAiCustomModel() {
   aiSetStoredModel(provider, model);
   if (input) input.value = "";
   renderAiModelOptions(provider);
-  toggleAiModelRow(false);
   toast(`Model added: ${model}`, "ok");
-}
-
-function toggleAiKeyRow(show) {
-  if (aiIsRuntime()) return;
-  const row = $("ai-key-row");
-  if (!row) return;
-  row.hidden = show === undefined ? !row.hidden : !show;
-  if (!row.hidden) $("ai-key-input")?.focus();
-}
-
-function toggleAiModelRow(show) {
-  const row = $("ai-model-row");
-  if (!row) return;
-  row.hidden = show === undefined ? !row.hidden : !show;
-  if (!row.hidden) $("ai-model-input")?.focus();
 }
 
 function aiBubble(role, html) {
@@ -735,28 +1195,245 @@ function aiSetBusy(b) {
   if ($("ai-send")) $("ai-send").hidden = b;
   if ($("ai-stop")) $("ai-stop").hidden = !b;
   if ($("ai-input")) $("ai-input").disabled = b;
+  if ($("ai-mode")) $("ai-mode").disabled = b;
   if ($("ai-provider")) $("ai-provider").disabled = b;
   if ($("ai-model")) $("ai-model").disabled = b;
-  if ($("ai-model-add")) $("ai-model-add").disabled = b;
-  if ($("ai-key-btn")) $("ai-key-btn").disabled = b;
-  if ($("ai-runtime-connect")) $("ai-runtime-connect").disabled = b;
-  if ($("ai-runtime-disconnect")) $("ai-runtime-disconnect").disabled = b;
+  if ($("ai-reasoning")) $("ai-reasoning").disabled = b;
+  const supportsImages = aiCurrentModelInfo()?.inputModalities?.includes("image") !== false;
+  if ($("ai-attach")) {
+    $("ai-attach").disabled = b || !supportsImages;
+    $("ai-attach").title = supportsImages ? "Attach image or video" : "Selected model does not accept images";
+  }
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+function base64ByteLength(value) {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.floor(value.length * 3 / 4) - padding;
+}
+
+async function imageAttachmentFromBlob(blob, name, sourceKind = "image", timestampSeconds = null) {
+  if (!AI_IMAGE_TYPES.has(blob.type)) throw new Error("Use JPEG, PNG, GIF, or WebP images.");
+  if (blob.size > 4 * 1024 * 1024) throw new Error(`${name} is larger than 4 MB.`);
+  return { name, mimeType: blob.type, data: bytesToBase64(new Uint8Array(await blob.arrayBuffer())), sourceKind, timestampSeconds };
+}
+
+function waitForMedia(element, event, timeoutMs = 12_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Media decoding timed out.")), timeoutMs);
+    const done = () => { clearTimeout(timer); cleanup(); resolve(); };
+    const fail = () => { clearTimeout(timer); cleanup(); reject(new Error("This media format could not be decoded.")); };
+    const cleanup = () => { element.removeEventListener(event, done); element.removeEventListener("error", fail); };
+    element.addEventListener(event, done, { once: true });
+    element.addEventListener("error", fail, { once: true });
+  });
+}
+
+async function sampleVideoAttachment(file) {
+  if (file.size > 200 * 1024 * 1024) throw new Error(`${file.name} is larger than 200 MB.`);
+  const video = document.createElement("video");
+  video.muted = true;
+  video.preload = "metadata";
+  const url = URL.createObjectURL(file);
+  video.src = url;
+  try {
+    await waitForMedia(video, "loadedmetadata");
+    if (!Number.isFinite(video.duration) || video.duration <= 0 || !video.videoWidth || !video.videoHeight) throw new Error("Video metadata is invalid.");
+    const times = video.duration < 1 ? [video.duration / 2] : [0.08, 0.36, 0.64, 0.92].map((ratio) => Math.min(video.duration - 0.05, video.duration * ratio));
+    const scale = Math.min(1, 960 / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+    const context = canvas.getContext("2d", { alpha: false });
+    const frames = [];
+    for (const time of times) {
+      video.currentTime = Math.max(0, time);
+      await waitForMedia(video, "seeked");
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+      if (!blob) throw new Error("Could not sample the video frame.");
+      const timestamp = Math.round(time * 10) / 10;
+      frames.push(await imageAttachmentFromBlob(blob, `${file.name} frame ${timestamp}s`, "video-frame", timestamp));
+    }
+    return frames;
+  } finally {
+    URL.revokeObjectURL(url);
+    video.removeAttribute("src");
+  }
+}
+
+async function addAiFiles(fileList) {
+  const files = [...(fileList || [])];
+  if (!files.length || AI.busy) return;
+  if (aiCurrentModelInfo()?.inputModalities?.includes("image") === false) {
+    toast("The selected model does not accept image input.", "warn");
+    return;
+  }
+  try {
+    const next = [...AI.attachments];
+    for (const file of files) {
+      const attachments = file.type.startsWith("video/")
+        ? await sampleVideoAttachment(file)
+        : [await imageAttachmentFromBlob(file, file.name)];
+      if (next.length + attachments.length > 8) throw new Error("Attach at most 8 images or sampled video frames per message.");
+      next.push(...attachments);
+      if (next.reduce((total, attachment) => total + base64ByteLength(attachment.data), 0) > 10 * 1024 * 1024) {
+        throw new Error("Attachments must total 10 MB or less.");
+      }
+    }
+    AI.attachments = next;
+    renderAiAttachments();
+    toast(files.some((file) => file.type.startsWith("video/")) ? "Video sampled locally. Only still frames will be sent." : "Attachment ready.", "ok");
+  } catch (error) {
+    toast(`Attachment failed: ${error.message}`, "err");
+  } finally {
+    if ($("ai-file-input")) $("ai-file-input").value = "";
+  }
+}
+
+function renderAiAttachments() {
+  const host = $("ai-attachments");
+  if (!host) return;
+  host.hidden = !AI.attachments.length;
+  host.innerHTML = AI.attachments.map((attachment, index) => `<div class="ai-attachment-chip">
+    <img src="data:${attachment.mimeType};base64,${attachment.data}" alt="">
+    <span title="${esc(attachment.name)}">${esc(attachment.name)}</span>
+    <button type="button" data-ai-remove-attachment="${index}" title="Remove attachment" aria-label="Remove attachment">${ICO.x}</button>
+  </div>`).join("");
+}
+
+function aiCurrentSelection() {
+  if (S.activeTab === "waves" && S.waveMissionId) return { collection: "missions", id: S.waveMissionId };
+  if (S.activeTab === "enemies" && S.selectedEnemyId) return { collection: "enemies", id: S.selectedEnemyId };
+  if (S.activeTab === "towers" && S.selectedTowerId) return { collection: "towers", id: S.selectedTowerId };
+  if (S.activeTab === "missions" && S.selectedMissionEdId) return { collection: "missions", id: S.selectedMissionEdId };
+  if (S.activeTab === "worldmap" && S.selectedNodeId) return { collection: "missions", id: S.selectedNodeId };
+  if (S.activeTab === "maps" && S.selectedMapSourceName) return { collection: "mapSources", id: S.selectedMapSourceName };
+  if (S.activeTab === "playtest" && PT?.missionId) return { collection: "missions", id: PT.missionId };
+  return null;
+}
+
+function aiLastRunContext() {
+  if (S.activeTab === "playtest" && PT?.game) {
+    const snapshot = PT.game.getSnapshot();
+    return {
+      kind: "playtest",
+      missionId: PT.missionId,
+      summary: `${snapshot.outcome}; core ${snapshot.coreHp}/${snapshot.maxCoreHp}; wave ${snapshot.waveIndex ?? 0}/${snapshot.totalWaves ?? 0}; enemies ${snapshot.enemies?.length ?? 0}; towers ${snapshot.towers?.length ?? 0}`
+    };
+  }
+  if (S.activeTab === "balance" && S.balanceReport?.summary) {
+    const summary = S.balanceReport.summary;
+    return {
+      kind: "balance",
+      missionId: null,
+      summary: `${summary.missions ?? 0} missions analyzed; ${summary.flagged ?? 0} flagged; ${summary.errors ?? 0} errors; ${summary.warnings ?? 0} warnings`
+    };
+  }
+  if (S.lastSimulation) {
+    const result = S.lastSimulation;
+    return {
+      kind: "simulation",
+      missionId: result.missionId,
+      summary: `${result.outcome}; core ${result.coreHp}/${result.maxCoreHp}; waves ${result.startedWaveCount}/${result.totalWaves}; elapsed ${result.elapsed}`
+    };
+  }
+  return null;
+}
+
+function aiContextEnvelope() {
+  const issues = (S.clientIssues ?? []).slice(0, 20).map((issue) => ({
+    severity: issue.severity === "warning" ? "warning" : "error",
+    kind: issue.kind,
+    entityId: issue.entityId,
+    code: issue.code,
+    message: issue.message
+  }));
+  return {
+    activeTab: S.activeTab,
+    project: {
+      name: S.project?.manifest?.name || "Untitled",
+      defaultMissionId: S.project?.defaultMissionId || null,
+      dirty: Boolean(S.dirty)
+    },
+    selection: aiCurrentSelection(),
+    validation: {
+      errorCount: issues.filter((issue) => issue.severity === "error").length,
+      warningCount: issues.filter((issue) => issue.severity === "warning").length,
+      issues
+    },
+    lastRun: aiLastRunContext()
+  };
+}
+
+function appendAiReviewCard(host, review) {
+  const rows = changeReviewRows(review.before, review.after);
+  const card = document.createElement("div");
+  card.className = "ai-review-card";
+  card.dataset.aiReviewId = review.id;
+  card.innerHTML = `<div class="ai-review-title">AI changes applied locally</div>
+    <div class="ai-review-summary">${rows ? "Review the changed sections or revert this turn." : "Only generated output changed; project content is unchanged."}</div>
+    <div class="ai-review-actions">
+      <button class="btn btn-outline" type="button" data-ai-review-details>Review</button>
+      <button class="btn btn-outline danger" type="button" data-ai-review-revert>Revert</button>
+      <button class="btn btn-primary" type="button" data-ai-review-keep>Keep</button>
+    </div>`;
+  host.appendChild(card);
+}
+
+function finishAiReview(action) {
+  const review = AI.pendingReview;
+  if (!review) return;
+  const card = $("ai-transcript")?.querySelector(`[data-ai-review-id="${CSS.escape(review.id)}"]`);
+  if (card) {
+    card.classList.add("resolved");
+    card.querySelector(".ai-review-summary").textContent = action === "reverted" ? "Changes reverted." : "Changes kept.";
+    card.querySelector(".ai-review-actions")?.remove();
+  }
+  AI.pendingReview = null;
+}
+
+async function revertAiReview() {
+  const review = AI.pendingReview;
+  if (!review || AI.busy) return;
+  try {
+    S.project = deep(review.before);
+    historyInit();
+    markDirty(true, true);
+    renderActiveTab();
+    if (!(await save())) throw new Error("Could not save the restored project.");
+    await apiPost("/api/maps/compile", {});
+    await load();
+    finishAiReview("reverted");
+    recordActivity("AI changes reverted", "warning", "Restored the pre-turn project snapshot");
+    toast("AI changes reverted.", "ok");
+  } catch (error) {
+    recordActivity("AI revert", "error", error.message);
+    toast(`Could not revert AI changes: ${error.message}`, "err");
+  }
 }
 
 async function aiSend() {
   if (AI.busy) return;
   const input = $("ai-input");
-  const text = input?.value.trim();
+  const text = input?.value.trim() || (AI.attachments.length ? "Please analyze the attached visual reference." : "");
   if (!text) return;
   const provider = aiProvider();
   const apiKey = aiKey(provider);
   if (!aiIsReady(provider)) {
     if (aiIsRuntime(provider)) {
-      toast(`Connect ${aiProviderInfo(provider).label} first.`, "warn");
-      aiRuntimeConnect();
+      toast(`Connect ${aiProviderInfo(provider).label} in Settings first.`, "warn");
+      switchTab("settings");
     } else {
-      toggleAiKeyRow(true);
-      toast(`Set your ${aiProviderInfo(provider).keyLabel} first.`, "warn");
+      toast(`Set your ${aiProviderInfo(provider).keyLabel} in Settings first.`, "warn");
+      switchTab("settings");
     }
     return;
   }
@@ -765,24 +1442,42 @@ async function aiSend() {
     if (!ok) return;
     await save();
   }
+  if (AI.pendingReview) {
+    toast("Keep or revert the previous AI changes before starting another turn.", "warn");
+    return;
+  }
+  const preAiProject = deep(S.project);
 
   input.value = "";
   $("ai-transcript")?.querySelector(".ai-empty")?.remove();
   // Snapshot so an aborted/failed turn (no authoritative `done`) doesn't leave AI.messages with a
   // dangling user turn that diverges from what the server actually ran.
   const snapshot = AI.messages.slice();
+  const turnAttachments = AI.attachments.slice();
   AI.messages.push({ role: "user", content: text });
-  aiBubble("user", esc(text));
+  aiBubble("user", `${esc(text)}${turnAttachments.length ? `<span class="ai-user-attachments">${turnAttachments.length} visual${turnAttachments.length === 1 ? "" : "s"} attached</span>` : ""}`);
+  AI.attachments = [];
+  renderAiAttachments();
   const wrap = aiBubble("assistant", `<div class="ai-steps"></div>`);
   const steps = wrap.querySelector(".ai-steps");
   aiSetBusy(true);
   AI.controller = new AbortController();
+  recordActivity("AI turn started", "ok", `${aiProviderInfo(provider).label} · ${aiStoredModel(provider)}`);
   let appliedPatch = false;
   let gotDone = false;
   try {
     const res = await fetch("/api/ai/chat", {
       method: "POST", headers: { "Content-Type": "application/json" }, signal: AI.controller.signal,
-      body: JSON.stringify({ provider, ...(aiIsRuntime(provider) ? {} : { apiKey }), model: $("ai-model")?.value, messages: AI.messages })
+      body: JSON.stringify({
+        provider,
+        ...(aiIsRuntime(provider) ? {} : { apiKey }),
+        model: aiStoredModel(provider),
+        reasoning: aiStoredReasoning(provider),
+        mode: aiPermissionMode(),
+        context: aiContextEnvelope(),
+        attachments: turnAttachments,
+        messages: AI.messages
+      })
     });
     if (!res.ok || !res.body) throw new Error(`Server returned ${res.status}`);
     const reader = res.body.getReader();
@@ -802,23 +1497,72 @@ async function aiSend() {
         else if (ev.type === "tool_result") {
           const el = steps.querySelector(`.ai-tool[data-id="${CSS.escape(ev.id)}"] .ai-tool-status`);
           if (el) { el.textContent = ev.ok ? "done" : "error"; el.className = `ai-tool-status ${ev.ok ? "ok" : "err"}`; el.title = JSON.stringify(ev.summary ?? {}).slice(0, 500); }
+          recordActivity(`AI tool · ${ev.name}`, ev.ok ? "ok" : "error", JSON.stringify(ev.summary ?? {}).slice(0, 240));
         }
-        else if (ev.type === "error") steps.insertAdjacentHTML("beforeend", `<div class="ai-error">${esc(ev.error)}</div>`);
-        else if (ev.type === "done") { gotDone = true; if (Array.isArray(ev.messages)) AI.messages = ev.messages; appliedPatch = !!ev.appliedPatch; }
+        else if (ev.type === "error") { steps.insertAdjacentHTML("beforeend", `<div class="ai-error">${esc(ev.error)}</div>`); recordActivity("AI turn", "error", ev.error); }
+        else if (ev.type === "done") { gotDone = true; if (Array.isArray(ev.messages)) AI.messages = ev.messages; appliedPatch = !!ev.appliedPatch; recordActivity("AI turn completed", "ok", appliedPatch ? "Project files changed" : "No project writes"); }
         $("ai-transcript").scrollTop = $("ai-transcript").scrollHeight;
       }
     }
   } catch (e) {
     steps.insertAdjacentHTML("beforeend", `<div class="ai-error">${e.name === "AbortError" ? "Stopped." : esc(e.message)}</div>`);
   } finally {
-    if (!gotDone) AI.messages = snapshot; // turn didn't complete — keep history consistent with the server
+    if (!gotDone) { AI.messages = snapshot; AI.attachments = turnAttachments; renderAiAttachments(); }
     aiSetBusy(false);
     AI.controller = null;
   }
   if (appliedPatch) {
-    toast("AI applied balance changes — reloading project.", "ok");
+    toast("AI applied project changes — reloading.", "ok");
     await load(); // refetch the on-disk project the AI just patched (renderActiveTab re-renders the AI tab)
+    const review = { id: `review-${Date.now()}`, before: preAiProject, after: deep(S.project) };
+    AI.pendingReview = review;
+    appendAiReviewCard(steps, review);
+    $("ai-transcript").scrollTop = $("ai-transcript").scrollHeight;
   }
+}
+
+function setAiDockOpen(open) {
+  ensureAiInitialized();
+  if (AI.focusTimer) {
+    clearTimeout(AI.focusTimer);
+    AI.focusTimer = null;
+  }
+  AI.dockOpen = Boolean(open);
+  document.documentElement.setAttribute("data-ai-dock", AI.dockOpen ? "open" : "closed");
+  $("ai-dock")?.setAttribute("aria-hidden", String(!AI.dockOpen));
+  for (const id of ["btn-ai-chat", "sidebar-ai-chat"]) $(id)?.setAttribute("aria-expanded", String(AI.dockOpen));
+  $("sidebar-ai-chat")?.classList.toggle("active", AI.dockOpen);
+  updateAiUi();
+  if (AI.dockOpen) {
+    Promise.all([loadAiRuntimeStatus("codex"), loadAiRuntimeStatus("claude-code")]).then(updateAiUi);
+    AI.focusTimer = setTimeout(() => {
+      AI.focusTimer = null;
+      if (AI.dockOpen && !document.activeElement?.matches("input, textarea, select")) $("ai-input")?.focus();
+    }, 80);
+  }
+}
+
+function openAiWithPrompt(prompt, { mode = "ask" } = {}) {
+  setAiDockOpen(true);
+  const modeSelect = $("ai-mode");
+  if (modeSelect && modeSelect.querySelector(`option[value="${mode}"]`)) {
+    modeSelect.value = mode;
+    modeSelect.dispatchEvent(new Event("change"));
+  }
+  const input = $("ai-input");
+  if (input) {
+    input.value = prompt;
+    input.focus();
+  }
+}
+
+function setupAiDock() {
+  ensureAiInitialized();
+  $("btn-ai-chat")?.addEventListener("click", () => setAiDockOpen(!AI.dockOpen));
+  $("sidebar-ai-chat")?.addEventListener("click", () => setAiDockOpen(!AI.dockOpen));
+  $("ai-dock-close")?.addEventListener("click", () => setAiDockOpen(false));
+  $("ai-new-chat")?.addEventListener("click", clearAiConversation);
+  renderAiAttachments();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1152,16 +1896,7 @@ function renderEnemiesTab() {
 $("enemy-search")?.addEventListener("input", renderEnemiesTab);
 
 $("btn-add-enemy")?.addEventListener("click", () => {
-  const id = "enemy_" + Math.random().toString(36).slice(-6);
-  if (!S.project.enemies) S.project.enemies = {};
-  S.project.enemies[id] = {
-    id, label: "New Enemy",
-    maxHp: 10, speed: 1, coreDamage: 1,
-    coinReward: 1, reward: { coins: 1 },
-    color: "#888888", hitRadius: 0.5,
-  };
-  S.selectedEnemyId = id;
-  markDirty(true); renderEnemiesTab();
+  openRecipePicker("enemies");
 });
 
 // ── Currencies ────────────────────────────────────────────────────────────────
@@ -1303,7 +2038,10 @@ function renderEnemyDetail(id) {
           <div class="mono text-muted" style="font-size:11px">${esc(id)}</div>
         </div>
       </div>
-      <button class="btn btn-danger" id="enemy-del-btn">Delete</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline" id="enemy-dup-btn">${ICO.copy} Duplicate</button>
+        <button class="btn btn-danger" id="enemy-del-btn">Delete</button>
+      </div>
     </div>
 
     <div class="form-section">
@@ -1483,6 +2221,7 @@ function renderEnemyDetail(id) {
     S.selectedEnemyId = null;
     markDirty(true); renderEnemiesTab();
   });
+  $("enemy-dup-btn")?.addEventListener("click", () => duplicateStudioEntity("enemies", id));
 }
 
 function persistEnemy(oldId) {
@@ -1593,15 +2332,7 @@ function renderTowersTab() {
 $("tower-search")?.addEventListener("input", renderTowersTab);
 
 $("btn-add-tower")?.addEventListener("click", () => {
-  const id = "tower_" + Math.random().toString(36).slice(-6);
-  if (!S.project.towers) S.project.towers = {};
-  S.project.towers[id] = {
-    id, label: "New Tower",
-    cost: { coins: 4 }, footprintRadius: 1, range: 5,
-    attack: { kind: "single", fireRate: 1, damagePerStack: 0.5, startingStacks: 3, maxStacks: 10, upgradeCost: 3 },
-  };
-  S.selectedTowerId = id;
-  markDirty(true); renderTowersTab();
+  openRecipePicker("towers");
 });
 
 function renderTowerDetail(id) {
@@ -1617,7 +2348,7 @@ function renderTowerDetail(id) {
     .filter(tid => tid !== id)
     .map(tid => `<option value="${esc(tid)}"${tid===t.requiresAuraFrom?" selected":""}>${esc(tid)}</option>`)
     .join("");
-  const kinds = ["single","pulse","sniper","antiair","splash","support","support_buff"];
+  const kinds = ["single","pulse","sniper","antiair","splash","pipeline","support","support_buff"];
 
   detail.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)">
@@ -1628,7 +2359,10 @@ function renderTowerDetail(id) {
           <div class="mono text-muted" style="font-size:11px">${esc(id)}</div>
         </div>
       </div>
-      <button class="btn btn-danger" id="tower-del-btn">Delete</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline" id="tower-dup-btn">${ICO.copy} Duplicate</button>
+        <button class="btn btn-danger" id="tower-del-btn">Delete</button>
+      </div>
     </div>
 
     <div class="form-section">
@@ -1676,7 +2410,7 @@ function renderTowerDetail(id) {
   // Switching attack kind re-renders fields
   $("tf-attack-kind")?.addEventListener("change", () => {
     const newKind = $("tf-attack-kind").value;
-    towers[id].attack = { ...(towers[id].attack ?? {}), kind: newKind };
+    towers[id].attack = defaultAttackModel(newKind);
     $("attack-fields").innerHTML = buildAttackFields(towers[id].attack);
     bindAttackFieldListeners(id);
   });
@@ -1692,6 +2426,21 @@ function renderTowerDetail(id) {
     S.selectedTowerId = null;
     markDirty(true); renderTowersTab();
   });
+  $("tower-dup-btn")?.addEventListener("click", () => duplicateStudioEntity("towers", id));
+}
+
+function defaultAttackModel(kind) {
+  const defaults = {
+    single: { kind, fireRate: 1, damagePerStack: 1, startingStacks: 1, maxStacks: 5, upgradeCost: 10 },
+    pulse: { kind, pulseRate: 1, pulseDamage: 1, dotDamagePerUnit: 0.1, dotDuration: 3, upgradeCosts: [] },
+    sniper: { kind, interval: 2, damage: 5, targetPriority: "largest_hp", upgradeCosts: [] },
+    antiair: { kind, fireRate: 1, damage: 2, maxTargetsByLevel: [1, 2, 3, 4], upgradeCosts: [] },
+    splash: { kind, interval: 1.5, damage: 3, splashDamage: 2, armoredChipDamage: 1, splashRadius: 1, slowFactor: 0.7, slowDuration: 2, affectsClasses: ["ground"], upgradeCosts: [] },
+    pipeline: { kind, interval: 1, targeting: { classes: ["ground"], mode: "first", maxTargets: 1 }, delivery: { kind: "single" }, effects: [{ kind: "damage", amount: 1 }], upgradeCosts: [] },
+    support: { kind, auraRadius: 3, unlocksTowerIds: [], upgradeCosts: [] },
+    support_buff: { kind, auraRadius: 3, fireRateMultiplierByLevel: [1.2, 1.3, 1.4], affectsTowerIds: [], upgradeCosts: [] }
+  };
+  return deep(defaults[kind] ?? defaults.single);
 }
 
 function buildAttackFields(a) {
@@ -1739,8 +2488,29 @@ function buildAttackFields(a) {
         <div class="form-row">${v("interval", 1.7, 0.05, "Interval (s)")}${v("damage", 0.32, 0.01, "Damage")}${v("splashDamage", 0.14, 0.01, "Splash Damage")}</div>
         <div class="form-row">${v("splashRadius", 1, 0.1, "Splash Radius")}${slider("slowFactor", 0.55, "Slow Factor", { min: 0.05, max: 0.95, step: 0.05 }, "Speed multiplier while slowed — must be below 1.")}${v("slowDuration", 4, 0.5, "Slow Duration (s)")}</div>
         <div class="form-row">${v("armoredChipDamage", 0.08, 0.01, "Armored Chip Dmg", "Capped damage dealt to pierce-only-armored enemies.")}</div>
+        ${targetClassEditor(a.affectsClasses ?? ["ground"], "af-affects-class", "Splash affects")}
         ${lvl("intervalByLevel", [1.7, 1.45, 1.2], "Interval by Level")}
         ${costs("Upgrade Costs")}`;
+    case "pipeline": {
+      const targeting = a.targeting ?? {};
+      const delivery = a.delivery ?? { kind: "single" };
+      const deliveryFields = delivery.kind === "area"
+        ? `${vNested("delivery.radius", delivery.radius, 0.1, "Radius")}${vNested("delivery.secondaryMultiplier", delivery.secondaryMultiplier ?? 1, 0.05, "Secondary Multiplier")}`
+        : delivery.kind === "chain"
+          ? `${vNested("delivery.maxJumps", delivery.maxJumps, 1, "Max Jumps")}${vNested("delivery.jumpRadius", delivery.jumpRadius, 0.5, "Jump Radius")}${vNested("delivery.damageFalloff", delivery.damageFalloff ?? 1, 0.05, "Damage Falloff")}`
+          : "";
+      return `${title("Effect Pipeline")}
+        <div class="form-row">${v("interval", 1, 0.05, "Interval")}
+          <div class="field"><label>Target Priority</label><select class="af-pipeline-target" data-pf="mode">${PT_TARGET_MODES.map(([mode, label]) => `<option value="${mode}"${(targeting.mode ?? "first") === mode ? " selected" : ""}>${label}</option>`).join("")}</select></div>
+          <div class="field"><label>Primary Targets</label><input class="af-pipeline-target" data-pf="maxTargets" type="number" min="1" step="1" value="${targeting.maxTargets ?? 1}"></div>
+        </div>
+        ${targetClassEditor(targeting.classes ?? ["ground"], "af-pipeline-class", "Targets")}
+        <div class="form-row"><div class="field"><label>Delivery</label><select id="af-pipeline-delivery">${["single", "multi", "area", "chain", "aura"].map(kind => `<option value="${kind}"${delivery.kind === kind ? " selected" : ""}>${kind}</option>`).join("")}</select></div>${deliveryFields}</div>
+        <div class="field field-full"><label>Ordered Effects ${helpIcon("Effects run in order for every delivered target: damage, status, or resource.")}</label><textarea id="af-pipeline-effects" class="mono" rows="8" spellcheck="false">${esc(JSON.stringify(a.effects ?? [{ kind: "damage", amount: 1 }], null, 2))}</textarea></div>
+        ${lvl("intervalByLevel", [a.interval ?? 1], "Interval by Level")}
+        ${lvl("rangeByLevel", [S.project.towers?.[S.selectedTowerId]?.range ?? 3], "Range by Level", { step: 0.5 })}
+        ${costs("Upgrade Costs")}`;
+    }
     case "support":
       return `${title("Support (Aura)")}
         <div class="form-row">${v("auraRadius", 4, 0.5, "Aura Radius")}</div>
@@ -1757,6 +2527,9 @@ function buildAttackFields(a) {
       return `<div class="text-muted" style="padding:8px">Select an attack kind above.</div>`;
   }
   };
+  function vNested(path, value, step, label) {
+    return `<div class="field"><label>${esc(label)}</label><input class="af-pipeline-delivery-num" data-pf="${esc(path)}" type="number" min="0" step="${step}" value="${value ?? ""}"></div>`;
+  }
   const damaging = ["single", "pulse", "sniper", "antiair", "splash"].includes(a.kind);
   return perKind() + (damaging ? damageTypeField(a) + statusOnHitEditor(a) : "") + (a.kind === "single" ? chainEditor(a) : "");
 }
@@ -1780,6 +2553,14 @@ function damageTypeField(a) {
     <input class="af-str" data-f="damageType" type="text" placeholder="physical" value="${esc(a.damageType ?? "")}"></div></div>`;
 }
 
+function targetClassEditor(selected, inputClass, label) {
+  const active = new Set(selected ?? []);
+  return `<div class="field field-full"><label>${esc(label)} ${helpIcon("Choose which enemy classes this effect can reach. At least one class is required.")}</label>
+    <div class="check-grid">
+      ${["ground", "flying"].map((targetClass) => `<label class="check-item"><input class="${inputClass}" data-target-class="${targetClass}" type="checkbox"${active.has(targetClass) ? " checked" : ""}> ${targetClass}</label>`).join("")}
+    </div></div>`;
+}
+
 // Optional data-driven on-hit status effects (stun / slow / poison) for any damaging tower.
 function statusOnHitEditor(a) {
   const s = a.statusOnHit ?? {};
@@ -1790,7 +2571,8 @@ function statusOnHitEditor(a) {
       <label style="font-weight:400;font-size:12px;margin-left:auto;display:inline-flex;gap:6px;align-items:center">
         <input type="checkbox" id="af-status-enable" ${on ? "checked" : ""}> enable</label></div>
     ${on ? `<div class="form-row">${num("stun", s.stun, 0.5, "Stun (s)")}${num("poison.dps", s.poison?.dps, 0.5, "Poison DPS")}${num("poison.duration", s.poison?.duration, 0.5, "Poison Duration (s)")}</div>
-    <div class="form-row">${num("slow.factor", s.slow?.factor, 0.05, "Slow Factor (<1)")}${num("slow.duration", s.slow?.duration, 0.5, "Slow Duration (s)")}</div>` : ""}`;
+    <div class="form-row">${num("slow.factor", s.slow?.factor, 0.05, "Slow Factor (<1)")}${num("slow.duration", s.slow?.duration, 0.5, "Slow Duration (s)")}</div>
+    ${targetClassEditor(s.slowAffectsClasses ?? ["ground"], "af-status-class", "Slow affects")}` : ""}`;
 }
 
 function bindAttackFieldListeners(id) {
@@ -1869,10 +2651,25 @@ function bindAttackFieldListeners(id) {
     // Drop partial slow/poison groups (need both fields) so validation stays clean.
     if (out.slow && (out.slow.factor === undefined || out.slow.duration === undefined)) delete out.slow;
     if (out.poison && (out.poison.dps === undefined || out.poison.duration === undefined)) delete out.poison;
+    if (out.slow) out.slowAffectsClasses = [...document.querySelectorAll(".af-status-class:checked")].map(item => item.dataset.targetClass);
     attack().statusOnHit = out;
     markDirty(true);
   };
   document.querySelectorAll(".af-status").forEach(inp => inp.addEventListener("change", rebuildStatus));
+  document.querySelectorAll(".af-status-class").forEach(cb => cb.addEventListener("change", () => {
+    const selected = [...document.querySelectorAll(".af-status-class:checked")].map(item => item.dataset.targetClass);
+    if (!selected.length) { cb.checked = true; toast("Slow must affect at least one enemy class.", "warn"); return; }
+    attack().statusOnHit ??= {};
+    attack().statusOnHit.slowAffectsClasses = selected;
+    markDirty(true);
+  }));
+
+  document.querySelectorAll(".af-affects-class").forEach(cb => cb.addEventListener("change", () => {
+    const selected = [...document.querySelectorAll(".af-affects-class:checked")].map(item => item.dataset.targetClass);
+    if (!selected.length) { cb.checked = true; toast("Splash must affect at least one enemy class.", "warn"); return; }
+    attack().affectsClasses = selected;
+    markDirty(true);
+  }));
 
   // Chain delivery (nested chain object, single-kind only; rebuilt from .af-chain inputs)
   $("af-chain-enable")?.addEventListener("change", (e) => {
@@ -1890,6 +2687,45 @@ function bindAttackFieldListeners(id) {
     markDirty(true);
   };
   document.querySelectorAll(".af-chain").forEach(inp => inp.addEventListener("change", rebuildChain));
+
+  // Universal tower pipeline: targeting -> delivery -> ordered effects.
+  document.querySelectorAll(".af-pipeline-target").forEach(input => input.addEventListener("change", () => {
+    attack().targeting ??= { classes: ["ground"] };
+    attack().targeting[input.dataset.pf] = input.dataset.pf === "maxTargets" ? Math.max(1, Number(input.value) || 1) : input.value;
+    markDirty(true);
+  }));
+  document.querySelectorAll(".af-pipeline-class").forEach(input => input.addEventListener("change", () => {
+    const selected = [...document.querySelectorAll(".af-pipeline-class:checked")].map(item => item.dataset.targetClass);
+    if (!selected.length) { input.checked = true; toast("Pipeline targeting needs at least one enemy class.", "warn"); return; }
+    attack().targeting ??= {};
+    attack().targeting.classes = selected;
+    markDirty(true);
+  }));
+  $("af-pipeline-delivery")?.addEventListener("change", event => {
+    const kind = event.target.value;
+    attack().delivery = kind === "area"
+      ? { kind, radius: 1, secondaryMultiplier: 1 }
+      : kind === "chain"
+        ? { kind, maxJumps: 2, jumpRadius: 2, damageFalloff: 0.7 }
+        : { kind };
+    markDirty(true); refresh();
+  });
+  document.querySelectorAll(".af-pipeline-delivery-num").forEach(input => input.addEventListener("change", () => {
+    const field = input.dataset.pf.split(".")[1];
+    attack().delivery[field] = Number(input.value) || 0;
+    markDirty(true);
+  }));
+  $("af-pipeline-effects")?.addEventListener("change", event => {
+    try {
+      const effects = JSON.parse(event.target.value);
+      if (!Array.isArray(effects) || !effects.length) throw new Error("Effects must be a non-empty JSON array.");
+      attack().effects = effects;
+      markDirty(true);
+      toast("Pipeline effects updated.", "ok");
+    } catch (error) {
+      toast(`Invalid pipeline effects: ${error.message}`, "err");
+    }
+  });
 }
 
 function persistTower(oldId) {
@@ -1931,9 +2767,15 @@ function renderMissionsTab() {
     const label = (m.label || id).toLowerCase();
     if (filter && !label.includes(filter) && !id.includes(filter)) continue;
     const div = document.createElement("div");
-    div.className = "entity-item" + (id === S.selectedMissionEdId ? " active" : "");
+    const balanceMission = S.balanceReportRevision === S.contentHash
+      ? S.balanceReport?.missions?.find((mission) => mission.missionId === id)
+      : null;
+    const balanceFlags = balanceMission ? missionBalanceSignals(balanceMission) : [];
+    const balanceSeverity = balanceFlags.some((flag) => flag.severity === "error") ? "error" : "warning";
+    div.className = "entity-item" + (id === S.selectedMissionEdId ? " active" : "") + (balanceFlags.length ? " balance-warning" : "");
     const badges = [];
     if (m.availability === "comingSoon") badges.push(`<span class="tag">soon</span>`);
+    if (balanceFlags.length) badges.push(`<span class="tag balance-tag ${balanceSeverity}" title="${esc(balanceFlags.map((flag) => flag.message).join(" · "))}">${balanceFlags.length} balance</span>`);
     div.innerHTML = `
       <div class="item-name">${esc(m.label || id)}</div>
       <div class="item-id">${esc(id)}</div>
@@ -1951,19 +2793,51 @@ function renderMissionsTab() {
 $("mission-search")?.addEventListener("input", renderMissionsTab);
 
 $("btn-add-mission")?.addEventListener("click", () => {
-  const id = "mission_" + Math.random().toString(36).slice(-6);
-  const firstMap    = Object.keys(S.project.maps ?? {})[0] ?? "";
-  const firstWaveSet = Object.keys(S.project.waveSets ?? {})[0] ?? "";
-  if (!S.project.missions) S.project.missions = {};
-  S.project.missions[id] = {
-    id, label: "New Mission", description: "", availability: "playable",
-    mapId: firstMap, waveSetId: firstWaveSet,
-    startingCoreHp: 20, startingResources: { coins: 6 },
-    prepTimeUnits: 20, buildTowerIds: [], abilityIds: [],
-  };
-  S.selectedMissionEdId = id;
-  markDirty(true); renderMissionsTab();
+  openRecipePicker("missions");
 });
+
+function missionVictoryRows(mission) {
+  const rows = mission.objectives?.victory?.length
+    ? mission.objectives.victory
+    : [{ id: "clear_waves", label: "Clear all waves", kind: "clearWaves" }];
+  const enemies = Object.keys(S.project.enemies ?? {});
+  const currencies = projCurrencies();
+  return rows.map((objective, index) => {
+    const kinds = [["clearWaves", "Clear all waves"], ["surviveSeconds", "Survive time"], ["killCount", "Kill count"], ["accumulateResource", "Accumulate resource"]];
+    const target = objective.kind === "surviveSeconds" ? objective.seconds : objective.kind === "killCount" ? objective.count : objective.kind === "accumulateResource" ? objective.amount : null;
+    const reference = objective.kind === "killCount"
+      ? `<select class="mf-objective-ref"><option value="">All enemies</option>${enemies.map((id) => `<option value="${esc(id)}"${objective.enemyTypeId === id ? " selected" : ""}>${esc(id)}</option>`).join("")}</select>`
+      : objective.kind === "accumulateResource"
+        ? `<select class="mf-objective-ref">${currencies.map((currency) => `<option value="${esc(currency.id)}"${objective.resourceId === currency.id ? " selected" : ""}>${esc(currency.label)}</option>`).join("")}</select>`
+        : `<span class="text-muted">${objective.kind === "clearWaves" ? "Mission waves" : "Time units"}</span>`;
+    return `<div class="mission-rule-row" data-objective-index="${index}" data-objective-id="${esc(objective.id)}">
+      <input class="mf-objective-label" aria-label="Objective label" value="${esc(objective.label ?? "")}" placeholder="Objective label">
+      <select class="mf-objective-kind" aria-label="Victory objective kind">${kinds.map(([kind, label]) => `<option value="${kind}"${objective.kind === kind ? " selected" : ""}>${label}</option>`).join("")}</select>
+      ${target === null ? `<span class="mission-rule-target text-muted">Automatic</span>` : `<input class="mf-objective-target" aria-label="Objective target" type="number" min="0.01" step="0.1" value="${target}">`}
+      ${reference}
+      <button class="btn-icon mf-objective-delete" type="button" title="Remove objective" aria-label="Remove objective">${ICO.trash}</button>
+    </div>`;
+  }).join("");
+}
+
+function missionStarRows(mission) {
+  const stars = mission.objectives?.stars ?? [];
+  const currencies = projCurrencies();
+  return stars.map((star, index) => {
+    const kinds = [["coreHpAtLeast", "Core HP at least"], ["maxLeaks", "Leaks at most"], ["timeAtMost", "Finish by time"], ["resourceAtLeast", "Resource at least"]];
+    const target = star.kind === "maxLeaks" ? star.maxLeaks : star.kind === "timeAtMost" ? star.seconds : star.amount;
+    const reference = star.kind === "resourceAtLeast"
+      ? `<select class="mf-star-resource">${currencies.map((currency) => `<option value="${esc(currency.id)}"${star.resourceId === currency.id ? " selected" : ""}>${esc(currency.label)}</option>`).join("")}</select>`
+      : `<span class="text-muted">${star.kind === "timeAtMost" ? "Time units" : star.kind === "maxLeaks" ? "Enemies" : "Core HP"}</span>`;
+    return `<div class="mission-rule-row" data-star-index="${index}" data-star-id="${esc(star.id)}">
+      <input class="mf-star-label" aria-label="Star label" value="${esc(star.label ?? "")}" placeholder="Star label">
+      <select class="mf-star-kind" aria-label="Star condition kind">${kinds.map(([kind, label]) => `<option value="${kind}"${star.kind === kind ? " selected" : ""}>${label}</option>`).join("")}</select>
+      <input class="mf-star-target" aria-label="Star target" type="number" min="0" step="0.1" value="${target ?? 0}">
+      ${reference}
+      <button class="btn-icon mf-star-delete" type="button" title="Remove star" aria-label="Remove star">${ICO.trash}</button>
+    </div>`;
+  }).join("");
+}
 
 function renderMissionDetail(id) {
   const detail   = $("mission-detail");
@@ -1998,6 +2872,7 @@ function renderMissionDetail(id) {
     </label>`).join("");
 
   const sun = m.sunlight;
+  const economy = m.economy;
 
   detail.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)">
@@ -2007,6 +2882,7 @@ function renderMissionDetail(id) {
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-outline" id="mission-sim-btn">Sim</button>
+        <button class="btn btn-outline" id="mission-dup-btn">${ICO.copy} Duplicate</button>
         <button class="btn btn-danger"  id="mission-del-btn">Delete</button>
       </div>
     </div>
@@ -2052,6 +2928,37 @@ function renderMissionDetail(id) {
     </div>` : ""}
 
     <div class="form-section">
+      <div class="form-section-title">Economy</div>
+      <label class="check-item" style="margin-bottom:8px">
+        <input id="mf-economy-enable" type="checkbox"${economy ? " checked" : ""}> Enable mission economy rules
+      </label>
+      <div id="economy-fields" style="${economy ? "" : "display:none"}">
+        <div class="attack-section">
+          <div class="form-row">
+            <div class="field"><label>Sell Refund</label><input id="mf-econ-refund" type="number" min="0" max="1" step="0.05" value="${economy?.sellRefundRatio ?? 0.7}"></div>
+            <div class="field"><label>Interest / Wave</label><input id="mf-econ-interest" type="number" min="0" step="0.01" value="${economy?.interestRate ?? 0}"></div>
+          </div>
+          <div class="form-row">${currencyBagFields(economy?.perWaveStart, "mf-econ-start", " / wave start")}</div>
+          <div class="form-row">${currencyBagFields(economy?.perWaveClear, "mf-econ-clear", " / wave clear")}</div>
+          <div class="form-row">${currencyBagFields(economy?.passivePerTimeUnit, "mf-econ-passive", " / time unit")}</div>
+          <div class="form-row">${currencyBagFields(economy?.earlyStartBonusPerUnit, "mf-econ-early", " / skipped prep unit")}</div>
+          <div class="form-row">${currencyBagFields(economy?.interestCap, "mf-econ-cap", " interest cap")}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <div class="form-section-title form-section-title-actions"><span>Mission Objectives</span><button id="mf-objective-add" class="btn btn-outline" type="button">${ICO.plus} Objective</button></div>
+      <div class="mission-rule-list">${missionVictoryRows(m)}</div>
+      <div class="mission-failure-grid">
+        <div class="field"><label>Maximum Leaks</label><input id="mf-fail-leaks" type="number" min="0" placeholder="No limit" value="${m.objectives?.failure?.find((item) => item.kind === "maxLeaks")?.maxLeaks ?? ""}"></div>
+        <div class="field"><label>Time Limit</label><input id="mf-fail-time" type="number" min="0.01" step="0.1" placeholder="No limit" value="${m.objectives?.failure?.find((item) => item.kind === "timeLimit")?.seconds ?? ""}"></div>
+      </div>
+      <div class="form-section-title form-section-title-actions mission-star-title"><span>Star Ratings</span><button id="mf-star-add" class="btn btn-outline" type="button">${ICO.plus} Star</button></div>
+      <div class="mission-rule-list">${missionStarRows(m) || `<span class="text-muted mission-rule-empty">No optional star conditions.</span>`}</div>
+    </div>
+
+    <div class="form-section">
       <div class="form-section-title">Sunlight Modifier</div>
       <label class="check-item" style="margin-bottom:8px">
         <input id="mf-sun-enable" type="checkbox"${sun?" checked":""}> Enable sunlight modifier
@@ -2073,6 +2980,32 @@ function renderMissionDetail(id) {
   $("mf-sun-enable")?.addEventListener("change", () => {
     $("sun-fields").style.display = $("mf-sun-enable").checked ? "" : "none";
   });
+  $("mf-economy-enable")?.addEventListener("change", () => {
+    $("economy-fields").style.display = $("mf-economy-enable").checked ? "" : "none";
+  });
+  $("mf-objective-add")?.addEventListener("click", () => {
+    const objectives = (m.objectives ??= { victory: [{ id: "clear_waves", label: "Clear all waves", kind: "clearWaves" }] });
+    objectives.victory ??= [];
+    objectives.victory.push({ id: `objective_${objectives.victory.length + 1}`, label: "New objective", kind: "surviveSeconds", seconds: 60 });
+    markDirty(true); renderMissionDetail(id);
+  });
+  detail.querySelectorAll(".mf-objective-delete").forEach((button) => button.addEventListener("click", () => {
+    const rows = m.objectives?.victory?.length ? m.objectives.victory : [{ id: "clear_waves", label: "Clear all waves", kind: "clearWaves" }];
+    const next = rows.filter((_, index) => index !== Number(button.closest("[data-objective-index]")?.dataset.objectiveIndex));
+    m.objectives = { ...(m.objectives ?? {}), victory: next.length ? next : [{ id: "clear_waves", label: "Clear all waves", kind: "clearWaves" }] };
+    markDirty(true); renderMissionDetail(id);
+  }));
+  $("mf-star-add")?.addEventListener("click", () => {
+    const objectives = (m.objectives ??= { victory: [{ id: "clear_waves", label: "Clear all waves", kind: "clearWaves" }] });
+    const stars = (objectives.stars ??= []);
+    stars.push({ id: `star_${stars.length + 1}`, label: `Star ${stars.length + 1}`, kind: "coreHpAtLeast", amount: Math.max(1, Math.floor((m.startingCoreHp ?? 20) * 0.5)) });
+    markDirty(true); renderMissionDetail(id);
+  });
+  detail.querySelectorAll(".mf-star-delete").forEach((button) => button.addEventListener("click", () => {
+    if (!m.objectives?.stars) return;
+    m.objectives.stars.splice(Number(button.closest("[data-star-index]")?.dataset.starIndex), 1);
+    markDirty(true); renderMissionDetail(id);
+  }));
 
   detail.querySelectorAll("input, select, textarea").forEach(inp => {
     inp.addEventListener("change", () => persistMission(id));
@@ -2084,6 +3017,7 @@ function renderMissionDetail(id) {
     S.selectedMissionEdId = null;
     markDirty(true); renderMissionsTab();
   });
+  $("mission-dup-btn")?.addEventListener("click", () => duplicateStudioEntity("missions", id));
 
   $("mission-sim-btn")?.addEventListener("click", async () => {
     showOverlayLoading("sim-overlay", "sim-results", "Running headless simulation…", "sim-title", "Simulating");
@@ -2103,6 +3037,7 @@ function persistMission(oldId) {
   const buildTowerIds = [...document.querySelectorAll(".mission-tower-cb:checked")].map(cb => cb.dataset.tid);
   const abilityIds    = [...document.querySelectorAll(".mission-ability-cb:checked")].map(cb => cb.dataset.aid);
   const sunEnabled    = $("mf-sun-enable")?.checked;
+  const economyEnabled = $("mf-economy-enable")?.checked;
 
   const updated = {
     ...m,
@@ -2128,6 +3063,59 @@ function persistMission(oldId) {
       aoeDamageMultiplier: parseFloat($("mf-sun-aoe")?.value)   || 1,
     };
   } else { delete updated.sunlight; }
+
+  if (economyEnabled) {
+    updated.economy = {
+      sellRefundRatio: Math.max(0, Math.min(1, Number($("mf-econ-refund")?.value) || 0)),
+      interestRate: Math.max(0, Number($("mf-econ-interest")?.value) || 0),
+      perWaveStart: readCurrencyBag("mf-econ-start"),
+      perWaveClear: readCurrencyBag("mf-econ-clear"),
+      passivePerTimeUnit: readCurrencyBag("mf-econ-passive"),
+      earlyStartBonusPerUnit: readCurrencyBag("mf-econ-early"),
+      interestCap: readCurrencyBag("mf-econ-cap")
+    };
+  } else { delete updated.economy; }
+
+  const objectiveRows = [...document.querySelectorAll("[data-objective-index]")];
+  const victory = objectiveRows.map((row, index) => {
+    const kind = row.querySelector(".mf-objective-kind")?.value ?? "clearWaves";
+    const label = row.querySelector(".mf-objective-label")?.value.trim();
+    const target = Math.max(0, Number(row.querySelector(".mf-objective-target")?.value) || 0);
+    const reference = row.querySelector(".mf-objective-ref")?.value;
+    const base = { id: row.dataset.objectiveId || `objective_${index + 1}`, ...(label ? { label } : {}), kind };
+    if (kind === "surviveSeconds") return { ...base, seconds: target };
+    if (kind === "killCount") return { ...base, count: target, ...(reference ? { enemyTypeId: reference } : {}) };
+    if (kind === "accumulateResource") return { ...base, resourceId: reference || projCurrencies()[0]?.id || "coins", amount: target };
+    return { ...base, kind: "clearWaves" };
+  });
+  const failure = [];
+  const maxLeaks = $("mf-fail-leaks")?.value.trim();
+  const timeLimit = $("mf-fail-time")?.value.trim();
+  if (maxLeaks) failure.push({ id: "max_leaks", label: "Maximum leaks", kind: "maxLeaks", maxLeaks: Math.max(0, Number(maxLeaks) || 0) });
+  if (timeLimit) failure.push({ id: "time_limit", label: "Time limit", kind: "timeLimit", seconds: Math.max(0, Number(timeLimit) || 0) });
+
+  const stars = [...document.querySelectorAll("[data-star-index]")].map((row, index) => {
+    const kind = row.querySelector(".mf-star-kind")?.value ?? "coreHpAtLeast";
+    const label = row.querySelector(".mf-star-label")?.value.trim() || `Star ${index + 1}`;
+    const target = Math.max(0, Number(row.querySelector(".mf-star-target")?.value) || 0);
+    const base = { id: row.dataset.starId || `star_${index + 1}`, label, kind };
+    if (kind === "maxLeaks") return { ...base, maxLeaks: target };
+    if (kind === "timeAtMost") return { ...base, seconds: target };
+    if (kind === "resourceAtLeast") return { ...base, resourceId: row.querySelector(".mf-star-resource")?.value || projCurrencies()[0]?.id || "coins", amount: target };
+    return { ...base, kind: "coreHpAtLeast", amount: target };
+  });
+  const isImplicitDefault = !m.objectives
+    && victory.length === 1
+    && victory[0].kind === "clearWaves"
+    && victory[0].id === "clear_waves"
+    && failure.length === 0
+    && stars.length === 0;
+  if (isImplicitDefault) delete updated.objectives;
+  else updated.objectives = {
+    victory: victory.length ? victory : [{ id: "clear_waves", label: "Clear all waves", kind: "clearWaves" }],
+    ...(failure.length ? { failure } : {}),
+    ...(stars.length ? { stars } : {})
+  };
 
   if (newId !== oldId) { delete missions[oldId]; S.selectedMissionEdId = newId; }
   missions[newId] = updated;
@@ -2769,8 +3757,276 @@ function parseJsonInput(value, fallback) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ASSET CATALOG
 // ─────────────────────────────────────────────────────────────────────────────
+// ── Project tree / TowerScript editor ────────────────────────────────────────
+function renderScriptsTab() {
+  if (!S.projectTree && !SCRIPT_UI.loading) refreshProjectTree();
+  else renderProjectTree();
+  syncScriptEditorUi();
+}
+
+async function refreshProjectTree() {
+  SCRIPT_UI.loading = true;
+  const tree = $("project-tree");
+  if (tree) tree.innerHTML = `<div class="workbench-empty">Loading project...</div>`;
+  try {
+    S.projectTree = await apiGet("/api/project/tree");
+    renderProjectTree();
+  } catch (error) {
+    if (tree) tree.innerHTML = `<div class="workbench-empty">${esc(error.message)}</div>`;
+  } finally {
+    SCRIPT_UI.loading = false;
+  }
+}
+
+function renderProjectTree() {
+  const tree = $("project-tree");
+  if (!tree || !S.projectTree) return;
+  tree.innerHTML = renderProjectTreeNodes(S.projectTree.nodes ?? [], 0);
+  tree.querySelectorAll("[data-tree-path]").forEach((row) => row.addEventListener("click", async () => {
+    const path = row.dataset.treePath;
+    const kind = row.dataset.treeKind;
+    SCRIPT_UI.selectedNode = { path, kind, manageable: row.dataset.manageable === "true", editable: row.dataset.editable === "true" };
+    if (kind === "directory") {
+      if (SCRIPT_UI.collapsed.has(path)) SCRIPT_UI.collapsed.delete(path); else SCRIPT_UI.collapsed.add(path);
+      renderProjectTree();
+      syncScriptTreeActions();
+      return;
+    }
+    if (S.scriptDirty && path !== S.selectedProjectPath) {
+      const discard = await confirmDialog({ title: "Discard unsaved script changes?", message: S.selectedProjectPath ?? "Unsaved TowerScript", confirmLabel: "Discard", danger: true });
+      if (!discard) return;
+      markScriptDirty(false);
+    }
+    await openProjectTreeFile(path);
+  }));
+  syncScriptTreeActions();
+}
+
+function renderProjectTreeNodes(nodes, depth) {
+  return nodes.map((node) => {
+    const selected = SCRIPT_UI.selectedNode?.path === node.path;
+    const collapsed = node.kind === "directory" && SCRIPT_UI.collapsed.has(node.path);
+    const chevron = node.kind === "directory"
+      ? `<svg class="tree-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`
+      : `<span></span>`;
+    const icon = node.kind === "directory"
+      ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5h6l2 2h10v12H3z"/></svg>`
+      : node.name.endsWith(".tower.json")
+        ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`
+        : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16h16V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+    return `<div class="tree-node"><button class="tree-row${selected ? " active" : ""}${collapsed ? " collapsed" : ""}" type="button" role="treeitem" style="--tree-depth:${depth}" data-tree-path="${esc(node.path)}" data-tree-kind="${esc(node.kind)}" data-manageable="${String(Boolean(node.manageable))}" data-editable="${String(Boolean(node.editable))}">${chevron}${icon}<span class="tree-label">${esc(node.name)}</span></button>${node.kind === "directory" ? `<div class="tree-children${collapsed ? " hidden" : ""}" role="group">${renderProjectTreeNodes(node.children ?? [], depth + 1)}</div>` : ""}</div>`;
+  }).join("");
+}
+
+async function openProjectTreeFile(path) {
+  try {
+    const file = await apiGet(`/api/project/file?path=${encodeURIComponent(path)}`);
+    S.selectedProjectPath = file.path;
+    S.scriptSource = file.source;
+    S.scriptFileRevision = file.revision;
+    S.scriptOriginalId = file.editable ? safeScriptDefinition(file.source)?.id ?? null : null;
+    markScriptDirty(false);
+    const editor = $("script-editor");
+    if (editor) {
+      editor.value = file.source;
+      editor.disabled = !file.editable;
+      editor.readOnly = !file.editable;
+    }
+    syncScriptEditorUi();
+    validateScriptEditorSource();
+  } catch (error) {
+    toast(`Could not open file: ${error.message}`, "err");
+  }
+}
+
+function safeScriptDefinition(source) {
+  try {
+    const value = JSON.parse(source);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch { return null; }
+}
+
+function validateScriptEditorSource() {
+  const diagnostics = $("script-diagnostics");
+  const state = $("script-editor-state");
+  if (!S.selectedProjectPath?.endsWith(".tower.json")) {
+    if (diagnostics) diagnostics.innerHTML = "";
+    if (state) { state.textContent = "Read only"; state.className = "script-editor-state"; }
+    return false;
+  }
+  try {
+    const definition = JSON.parse($("script-editor")?.value ?? S.scriptSource);
+    const missing = ["schemaVersion", "id", "bindings", "handlers"].filter((key) => definition?.[key] === undefined);
+    if (!definition || typeof definition !== "object" || Array.isArray(definition)) throw new Error("TowerScript root must be an object.");
+    if (missing.length) throw new Error(`Missing required field${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}.`);
+    if (diagnostics) diagnostics.innerHTML = "";
+    if (state) { state.textContent = S.scriptDirty ? "Unsaved" : "Valid JSON"; state.className = `script-editor-state${S.scriptDirty ? " dirty" : ""}`; }
+    return true;
+  } catch (error) {
+    if (diagnostics) diagnostics.innerHTML = `<div class="script-diagnostic">${ICO.err}<span>${esc(error.message)}</span></div>`;
+    if (state) { state.textContent = "Invalid"; state.className = "script-editor-state invalid"; }
+    return false;
+  }
+}
+
+function syncScriptEditorUi() {
+  const editor = $("script-editor");
+  const isScript = Boolean(S.selectedProjectPath?.endsWith(".tower.json"));
+  if ($("script-editor-path")) $("script-editor-path").textContent = S.selectedProjectPath ?? "Select a file";
+  if (editor && document.activeElement !== editor && editor.value !== S.scriptSource) editor.value = S.scriptSource;
+  if (editor && !S.selectedProjectPath) editor.disabled = true;
+  const valid = validateScriptEditorSource();
+  if ($("btn-script-save")) $("btn-script-save").disabled = !isScript || !S.scriptDirty || !valid;
+  syncScriptTreeActions();
+}
+
+function syncScriptTreeActions() {
+  const manageable = Boolean(SCRIPT_UI.selectedNode?.manageable);
+  if ($("btn-script-rename")) $("btn-script-rename").disabled = !manageable;
+  if ($("btn-script-delete")) $("btn-script-delete").disabled = !manageable;
+}
+
+async function saveActiveScript({ silent = false } = {}) {
+  if (!S.scriptDirty) return true;
+  if (!S.selectedProjectPath?.endsWith(".tower.json") || !validateScriptEditorSource()) {
+    if (!silent) toast("Fix the TowerScript JSON before saving.", "err");
+    return false;
+  }
+  const source = $("script-editor")?.value ?? S.scriptSource;
+  try {
+    const result = await apiPost("/api/project/script/save", {
+      path: S.selectedProjectPath,
+      source,
+      contentHash: S.contentHash,
+      fileRevision: S.scriptFileRevision ?? "missing"
+    });
+    const definition = JSON.parse(source);
+    if (S.scriptOriginalId && S.scriptOriginalId !== definition.id) delete S.project.scripts?.[S.scriptOriginalId];
+    S.project.scripts ??= {};
+    S.project.scripts[definition.id] = definition;
+    S.project.scriptFiles ??= {};
+    S.project.scriptFiles[S.selectedProjectPath] = { path: S.selectedProjectPath, source, definition };
+    S.scriptSource = source;
+    S.scriptOriginalId = definition.id;
+    S.scriptFileRevision = result.fileRevision;
+    S.contentHash = result.newHash;
+    markScriptDirty(false);
+    PT.dirty = true;
+    await refreshProjectTree();
+    syncScriptEditorUi();
+    recordActivity("TowerScript saved", "ok", S.selectedProjectPath);
+    if (!silent) toast("TowerScript saved.", "ok");
+    return true;
+  } catch (error) {
+    const issues = error.issues ?? [];
+    if ($("script-diagnostics") && issues.length) $("script-diagnostics").innerHTML = issues.map((issue) => `<div class="script-diagnostic">${ICO.err}<span>${esc(issue.message)} <code>${esc(issue.fieldPath ?? "")}</code></span></div>`).join("");
+    if (!silent) toast(`Script save failed: ${error.message}`, "err");
+    recordActivity("TowerScript save", "error", error.message);
+    return false;
+  }
+}
+
+function newTowerScriptSource(id) {
+  return JSON.stringify({
+    schemaVersion: 1,
+    id,
+    label: id.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+    enabled: true,
+    bindings: [{ scope: "global" }],
+    initialState: {},
+    handlers: {
+      waveStarted: [{ id: "on_wave_started", actions: [{ action: "emitSignal", signal: "wave_started", payload: { $get: "event.waveIndex" } }] }]
+    }
+  }, null, 2) + "\n";
+}
+
+$("script-editor")?.addEventListener("input", () => {
+  S.scriptSource = $("script-editor").value;
+  markScriptDirty(true);
+  validateScriptEditorSource();
+  if ($("btn-script-save")) $("btn-script-save").disabled = !validateScriptEditorSource();
+});
+$("script-editor")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  event.preventDefault();
+  const editor = event.currentTarget;
+  const start = editor.selectionStart;
+  editor.setRangeText("  ", start, editor.selectionEnd, "end");
+  editor.dispatchEvent(new Event("input", { bubbles: true }));
+});
+$("btn-script-save")?.addEventListener("click", () => saveActiveScript());
+$("btn-script-refresh")?.addEventListener("click", refreshProjectTree);
+$("btn-script-new")?.addEventListener("click", async () => {
+  if (S.scriptDirty) { toast("Save or discard the current script first.", "warn"); return; }
+  const requested = window.prompt("New TowerScript path", "scripts/gameplay/new-rule.tower.json");
+  if (!requested) return;
+  const path = requested.replaceAll("\\", "/");
+  const id = path.split("/").pop()?.replace(/\.tower\.json$/, "").replace(/[^A-Za-z0-9_.-]+/g, "_") || "new_rule";
+  S.selectedProjectPath = path;
+  S.scriptFileRevision = "missing";
+  S.scriptOriginalId = null;
+  S.scriptSource = newTowerScriptSource(id);
+  SCRIPT_UI.selectedNode = { path, kind: "file", manageable: true, editable: true };
+  const editor = $("script-editor");
+  editor.disabled = false;
+  editor.readOnly = false;
+  editor.value = S.scriptSource;
+  markScriptDirty(true);
+  syncScriptEditorUi();
+  editor.focus();
+});
+$("btn-script-folder")?.addEventListener("click", async () => {
+  const path = window.prompt("New folder under scripts/", "scripts/gameplay");
+  if (!path) return;
+  try {
+    const result = await apiPost("/api/project/tree/create-folder", { path, contentHash: S.contentHash });
+    S.contentHash = result.newHash;
+    await refreshProjectTree();
+  } catch (error) { toast(error.message, "err"); }
+});
+$("btn-script-rename")?.addEventListener("click", async () => {
+  const selected = SCRIPT_UI.selectedNode;
+  if (!selected?.manageable) return;
+  if (S.scriptDirty) { toast("Save or discard the current script first.", "warn"); return; }
+  const to = window.prompt("Rename project entry", selected.path);
+  if (!to || to === selected.path) return;
+  try {
+    const result = await apiPost("/api/project/tree/rename", { from: selected.path, to, contentHash: S.contentHash });
+    S.contentHash = result.newHash;
+    if (S.selectedProjectPath === selected.path) S.selectedProjectPath = to;
+    SCRIPT_UI.selectedNode = { ...selected, path: to };
+    await refreshProjectTree();
+    if (selected.kind === "file") await openProjectTreeFile(to);
+  } catch (error) { toast(error.message, "err"); }
+});
+$("btn-script-delete")?.addEventListener("click", async () => {
+  const selected = SCRIPT_UI.selectedNode;
+  if (!selected?.manageable) return;
+  if (S.scriptDirty) { toast("Save or discard the current script first.", "warn"); return; }
+  const confirmed = await confirmDialog({ title: `Delete ${selected.path}?`, message: "A backup will be kept under .towerforge/backups/scripts.", confirmLabel: "Delete", danger: true });
+  if (!confirmed) return;
+  try {
+    const result = await apiPost("/api/project/tree/delete", { path: selected.path, contentHash: S.contentHash });
+    S.contentHash = result.newHash;
+    if (S.selectedProjectPath === selected.path || S.selectedProjectPath?.startsWith(`${selected.path}/`)) {
+      S.selectedProjectPath = null;
+      S.scriptSource = "";
+      S.scriptFileRevision = null;
+      $("script-editor").value = "";
+      $("script-editor").disabled = true;
+    }
+    SCRIPT_UI.selectedNode = null;
+    const data = await apiGet("/api/project");
+    S.project.scripts = data.scripts;
+    S.project.scriptFiles = data.scriptFiles;
+    S.contentHash = data.contentHash;
+    await refreshProjectTree();
+    syncScriptEditorUi();
+  } catch (error) { toast(error.message, "err"); }
+});
+
 function renderAssetsTab() {
-  if (!S.project.visuals) S.project.visuals = { schemaVersion: 1, assetsRoot: "assets", atlases: {}, sprites: {}, bindings: { towers: {}, enemies: {}, tiles: {}, ui: {} }, audio: { sounds: {}, events: {} } };
+  if (!S.project.visuals) S.project.visuals = { schemaVersion: 1, assetsRoot: "assets", atlases: {}, sprites: {}, bindings: { towers: {}, enemies: {}, tiles: {}, ui: {} }, audio: { sounds: {}, events: {}, musicTracks: {}, musicByMission: {} } };
   const textarea = $("visuals-json");
   if (textarea) {
     textarea.value = JSON.stringify(S.project.visuals, null, 2);
@@ -2779,14 +4035,87 @@ function renderAssetsTab() {
         S.project.visuals = JSON.parse(textarea.value);
         markDirty(true);
         renderSoundBindings();
+        renderMusicBindings();
         toast("Visual catalog updated.", "ok");
       } catch (e) {
         toast("Invalid visuals JSON: " + e.message, "err");
       }
     };
   }
+  bindJsonProjectEditor("story-comics-json", "storyComics", { seenStoragePrefix: "story_seen_", comics: {} }, "Story comics");
+  bindJsonProjectEditor("battle-backgrounds-json", "battleBackgrounds", { fallbackMissionId: "", placeholderMissionIds: [], definitions: {} }, "Battle backgrounds");
+  void renderThemePacks();
   renderSoundBindings();
+  renderMusicBindings();
   renderAtlasFrames();
+}
+
+let themePacksCache = null;
+async function renderThemePacks() {
+  const panel = $("theme-packs-panel");
+  if (!panel) return;
+  panel.innerHTML = `<div class="text-muted" style="font-size:11px">Loading theme packs...</div>`;
+  try {
+    themePacksCache ??= (await apiGet("/api/theme-packs")).packs ?? [];
+    const currentId = S.project?.visuals?.theme?.id;
+    panel.innerHTML = themePacksCache.map(pack => {
+      const colors = Object.values(pack.theme?.renderer ?? {}).slice(0, 6);
+      const active = currentId === pack.id;
+      return `<article class="theme-pack-card${active ? " active" : ""}">
+        <img class="theme-pack-preview" src="${esc(pack.previewUrl)}" alt="${esc(pack.label)} battlefield preview">
+        <div class="theme-pack-body">
+          <div><div class="theme-pack-title">${esc(pack.label)}</div><div class="theme-pack-swatches" aria-hidden="true">${colors.map(color => `<span class="theme-pack-swatch" style="background:${esc(color)}"></span>`).join("")}</div></div>
+          <button class="btn ${active ? "btn-outline" : "btn-primary"} theme-pack-apply" type="button" data-pack-id="${esc(pack.id)}" ${active ? "disabled" : ""}>${active ? "Applied" : "Preview & Apply"}</button>
+          <p class="theme-pack-description">${esc(pack.description)}</p>
+        </div>
+      </article>`;
+    }).join("") || `<div class="text-muted">No bundled theme packs found.</div>`;
+    panel.querySelectorAll(".theme-pack-apply").forEach(button => button.addEventListener("click", () => applyThemePackFromStudio(button.dataset.packId)));
+  } catch (error) {
+    panel.innerHTML = `<div class="text-muted">Theme packs unavailable: ${esc(error.message)}</div>`;
+  }
+}
+
+async function applyThemePackFromStudio(packId) {
+  if (S.dirty) {
+    toast("Save current edits before applying a theme pack.", "warn");
+    return;
+  }
+  const pack = themePacksCache?.find(item => item.id === packId);
+  try {
+    const preview = await apiPost("/api/theme-packs/apply", { packId, dryRun: true });
+    const ok = await confirmDialog({
+      title: `Apply ${pack?.label ?? packId}?`,
+      message: `This will update the renderer palette and battle background for ${preview.changes.missionIds.length} mission(s). A local backup is created before validation.`,
+      confirmLabel: "Apply theme",
+      danger: false
+    });
+    if (!ok) return;
+    const result = await apiPost("/api/theme-packs/apply", { packId, ifRevision: preview.revision });
+    if (!result.ok) throw new Error(result.error || "Theme pack could not be applied.");
+    recordActivity("Theme applied", "ok", pack?.label ?? packId);
+    toast(`${pack?.label ?? packId} applied.`, "ok");
+    await load();
+  } catch (error) {
+    recordActivity("Theme apply", "error", error.message);
+    toast(`Theme apply failed: ${error.message}`, "err");
+  }
+}
+
+function bindJsonProjectEditor(elementId, projectKey, fallback, label) {
+  const textarea = $(elementId);
+  if (!textarea) return;
+  S.project[projectKey] ??= deep(fallback);
+  textarea.value = JSON.stringify(S.project[projectKey], null, 2);
+  textarea.onchange = () => {
+    try {
+      S.project[projectKey] = JSON.parse(textarea.value);
+      markDirty(true);
+      toast(`${label} updated.`, "ok");
+    } catch (error) {
+      toast(`Invalid ${label.toLowerCase()} JSON: ${error.message}`, "err");
+    }
+  };
 }
 
 const afImages = new Map();
@@ -2880,7 +4209,9 @@ function renderAtlasFrames() {
 }
 
 let assetsAudio = null;
+let assetsMusicPreviewId = null;
 const ICO_PLAY = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>`;
+const ICO_STOP = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>`;
 function renderSoundBindings() {
   const box = $("sound-bindings");
   if (!box || !S.project.visuals) return;
@@ -2911,6 +4242,47 @@ function renderSoundBindings() {
     if (!src) return;
     if (!assetsAudio) { try { const m = await import("/renderer/audio.mjs"); assetsAudio = m.createAudioPlayer({ assetBase: "/project-file/" }); } catch { return; } }
     assetsAudio.previewSound(src);
+  }));
+}
+
+function renderMusicBindings() {
+  const box = $("music-bindings");
+  if (!box || !S.project.visuals) return;
+  S.project.visuals.audio ??= {};
+  const audio = S.project.visuals.audio;
+  audio.musicTracks ??= {};
+  audio.musicByMission ??= {};
+  const trackIds = Object.keys(audio.musicTracks);
+  const missions = Object.values(S.project.missions ?? {});
+  if (!trackIds.length) {
+    box.innerHTML = `<p class="text-dim" style="font-size:11px;margin:0">No music imported yet. Choose Kind = music above.</p>`;
+    return;
+  }
+  box.innerHTML = missions.map((mission) => {
+    const current = audio.musicByMission[mission.id] || "";
+    const options = `<option value="">No music</option>` + trackIds.map((trackId) => `<option value="${esc(trackId)}"${current === trackId ? " selected" : ""}>${esc(trackId)}</option>`).join("");
+    const previewing = current && current === assetsMusicPreviewId;
+    return `<div class="snd-row"><span class="snd-label">${esc(mission.label || mission.id)}</span><select class="music-bind" data-mission="${esc(mission.id)}">${options}</select><button class="btn-icon music-preview" data-mission="${esc(mission.id)}" title="${previewing ? "Stop music preview" : "Preview music"}" aria-pressed="${previewing ? "true" : "false"}"${current ? "" : " disabled"}>${previewing ? ICO_STOP : ICO_PLAY}</button></div>`;
+  }).join("");
+  box.querySelectorAll(".music-bind").forEach((select) => select.addEventListener("change", () => {
+    if (assetsMusicPreviewId && assetsAudio) {
+      assetsAudio.selectMusic("");
+      assetsMusicPreviewId = null;
+    }
+    if (select.value) audio.musicByMission[select.dataset.mission] = select.value;
+    else delete audio.musicByMission[select.dataset.mission];
+    markDirty(true);
+    renderMusicBindings();
+  }));
+  box.querySelectorAll(".music-preview").forEach((button) => button.addEventListener("click", async () => {
+    const trackId = audio.musicByMission[button.dataset.mission];
+    if (!audio.musicTracks[trackId]?.src) return;
+    if (!assetsAudio) { try { const module = await import("/renderer/audio.mjs"); assetsAudio = module.createAudioPlayer({ assetBase: "/project-file/" }); } catch { return; } }
+    assetsAudio.setCatalog(audio, "/project-file/");
+    assetsMusicPreviewId = assetsMusicPreviewId === trackId ? null : trackId;
+    assetsAudio.resume();
+    assetsAudio.selectMusic(assetsMusicPreviewId || "");
+    renderMusicBindings();
   }));
 }
 
@@ -3013,13 +4385,127 @@ function renderSettingsTab() {
   }
 
   setupAppearanceSettings();
+  setupProgressionSettings();
+  setupAiSettings();
   setupMcpSettings();
 }
 
+function setupProgressionSettings() {
+  const difficultyInput = $("setting-difficulties-json");
+  const metaInput = $("setting-meta-json");
+  const defaultSelect = $("setting-default-difficulty");
+  const difficultyStatus = $("setting-difficulties-status");
+  const metaStatus = $("setting-meta-status");
+  const ensureDifficulties = () => {
+    if (!Array.isArray(S.project.difficulties) || !S.project.difficulties.length) S.project.difficulties = [{ id: "normal", label: "Normal" }];
+    if (!S.project.defaultDifficultyId || !S.project.difficulties.some((item) => item.id === S.project.defaultDifficultyId)) S.project.defaultDifficultyId = S.project.difficulties[0].id;
+  };
+  const renderDefault = () => {
+    ensureDifficulties();
+    if (!defaultSelect) return;
+    defaultSelect.innerHTML = S.project.difficulties.map((item) => `<option value="${esc(item.id)}">${esc(item.label || item.id)}</option>`).join("");
+    defaultSelect.value = S.project.defaultDifficultyId;
+  };
+  ensureDifficulties();
+  S.project.metaProgression ??= { currencies: [], upgrades: {}, rewardsByMission: {} };
+  if (difficultyInput) difficultyInput.value = JSON.stringify(S.project.difficulties, null, 2);
+  if (metaInput) metaInput.value = JSON.stringify(S.project.metaProgression, null, 2);
+  renderDefault();
+  if (defaultSelect) defaultSelect.onchange = () => { S.project.defaultDifficultyId = defaultSelect.value; markDirty(true); };
+  if (difficultyInput) difficultyInput.onchange = () => {
+    try {
+      const value = JSON.parse(difficultyInput.value);
+      if (!Array.isArray(value) || !value.length || value.some((item) => !item || typeof item.id !== "string" || !item.id.trim())) throw new Error("Use a non-empty array; every profile needs an id.");
+      S.project.difficulties = value;
+      ensureDifficulties();
+      renderDefault();
+      difficultyStatus.textContent = `${value.length} profiles ready`;
+      markDirty(true);
+    } catch (error) { difficultyStatus.textContent = error.message; difficultyInput.focus(); }
+  };
+  if (metaInput) metaInput.onchange = () => {
+    try {
+      const value = JSON.parse(metaInput.value);
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Meta progression must be an object.");
+      value.currencies ??= [];
+      value.upgrades ??= {};
+      value.rewardsByMission ??= {};
+      S.project.metaProgression = value;
+      metaStatus.textContent = `${Object.keys(value.upgrades).length} upgrades ready`;
+      markDirty(true);
+    } catch (error) { metaStatus.textContent = error.message; metaInput.focus(); }
+  };
+}
+
 function setupAppearanceSettings() {
-  const themeSel = $("setting-theme"), densitySel = $("setting-density");
+  const languageSel = $("setting-language"), themeSel = $("setting-theme"), densitySel = $("setting-density");
+  if (languageSel) {
+    languageSel.innerHTML = LANGUAGES.map(({ id, label }) => `<option value="${id}">${label}</option>`).join("");
+    languageSel.value = getLanguage();
+    languageSel.onchange = () => setLanguage(languageSel.value);
+  }
   if (themeSel) { themeSel.value = currentTheme(); themeSel.onchange = () => applyTheme(themeSel.value); }
   if (densitySel) { densitySel.value = localStorage.getItem("towerforge:density") || "comfortable"; densitySel.onchange = () => applyDensity(densitySel.value); }
+}
+
+function setupAiSettings() {
+  ensureAiInitialized();
+  const connections = $("ai-connections-list");
+  if (connections) connections.onclick = async (event) => {
+    const connect = event.target.closest?.("[data-ai-connect]");
+    if (connect) {
+      connect.disabled = true;
+      await aiRuntimeConnect(connect.dataset.aiConnect);
+      return;
+    }
+    const disconnect = event.target.closest?.("[data-ai-disconnect]");
+    if (disconnect) {
+      disconnect.disabled = true;
+      await aiRuntimeDisconnect(disconnect.dataset.aiDisconnect);
+      return;
+    }
+    const saveKey = event.target.closest?.("[data-ai-save-key]");
+    if (saveKey) {
+      const provider = saveKey.dataset.aiSaveKey;
+      const input = connections.querySelector(`[data-ai-key-input="${CSS.escape(provider)}"]`);
+      const value = input?.value.trim() || "";
+      if (!value) {
+        toast(`Enter a ${aiProviderInfo(provider).keyLabel}.`, "warn");
+        input?.focus();
+        return;
+      }
+      if (input) input.value = "";
+      aiSetKey(provider, value);
+      setAiProvider(provider, { announce: false });
+      updateAiUi();
+      toast(`${aiProviderInfo(provider).label} key saved on this device.`, "ok");
+      return;
+    }
+    const removeKey = event.target.closest?.("[data-ai-remove-key]");
+    if (removeKey) await removeAiKey(removeKey.dataset.aiRemoveKey);
+  };
+
+  const provider = $("setting-ai-provider");
+  if (provider) provider.onchange = () => setAiProvider(provider.value);
+  const model = $("setting-ai-model");
+  if (model) model.onchange = () => {
+    if (!model.value) return;
+    aiSetStoredModel(aiProvider(), model.value);
+    renderAiModelOptions(aiProvider());
+    updateAiUi();
+  };
+  const reasoning = $("setting-ai-reasoning");
+  if (reasoning) reasoning.onchange = () => {
+    aiSetStoredReasoning(aiProvider(), reasoning.value);
+    renderAiReasoningOptions(aiProvider());
+  };
+  if ($("setting-ai-add-model")) $("setting-ai-add-model").onclick = saveAiCustomModel;
+  if ($("setting-ai-open-chat")) $("setting-ai-open-chat").onclick = () => setAiDockOpen(true);
+
+  Promise.all([
+    loadAiRuntimeStatus("codex"),
+    loadAiRuntimeStatus("claude-code")
+  ]).then(updateAiUi);
 }
 
 // ── MCP integration toggle ──────────────────────────────────────────────────
@@ -3213,7 +4699,7 @@ function renderBuildTargetsTab() {
           const result = await apiPost(`/api/build/${encodeURIComponent(tid)}`, {});
           toast("Build complete.", "ok");
           setStatus("Build complete");
-          showBuildResult(tid, result.output);
+          showBuildResult(tid, result.output, result.previewUrl);
         } catch (e) {
           toast("Build failed: " + e.message, "err");
           setStatus("Build failed");
@@ -3254,7 +4740,7 @@ function renderBuildTargetsTab() {
   }
 }
 
-function showBuildResult(targetId, output) {
+function showBuildResult(targetId, output, previewUrl = null) {
   const overlay = $("validation-overlay");
   const div     = $("validation-results");
   const title   = $("val-title");
@@ -3263,9 +4749,24 @@ function showBuildResult(targetId, output) {
   title.textContent = `Build: ${targetId}`;
   icon.innerHTML = ICO.check;
   div.innerHTML = `<div class="val-item ok">${ICO.check}<span>Build completed.</span></div>
-    <pre class="build-output">${esc(output || "No build output.")}</pre>`;
+    <pre class="build-output">${esc(output || "No build output.")}</pre>
+    ${previewUrl ? `<div class="validation-actions"><button id="build-open-preview" class="btn btn-primary" type="button">Open preview</button></div>` : ""}`;
+  $("build-open-preview")?.addEventListener("click", () => {
+    overlay.classList.add("hidden");
+    $("build-preview-title").textContent = `Preview: ${targetId}`;
+    $("build-preview-frame").src = `${previewUrl}${previewUrl.includes("?") ? "&" : "?"}build=${Date.now()}`;
+    $("build-preview-overlay").classList.remove("hidden");
+  });
   overlay.classList.remove("hidden");
 }
+
+function closeBuildPreview() {
+  $("build-preview-overlay")?.classList.add("hidden");
+  const frame = $("build-preview-frame");
+  if (frame) frame.src = "about:blank";
+}
+$("build-preview-close")?.addEventListener("click", closeBuildPreview);
+$("build-preview-overlay")?.addEventListener("click", (event) => { if (event.target === $("build-preview-overlay")) closeBuildPreview(); });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VALIDATE / SIM
@@ -3275,10 +4776,15 @@ async function validateProject() {
   showOverlayLoading("validation-overlay", "validation-results", "Running full validation…", "val-title", "Validating");
   try {
     const result = await apiGet("/api/validate");
+    S.serverValidation = result;
     showValidation(result);
     const ec = result.issues.filter(i => i.severity === "error").length;
+    const wc = result.issues.filter(i => i.severity === "warning").length;
+    recordActivity("Project validation", ec ? "error" : wc ? "warning" : "ok", `${ec} errors, ${wc} warnings`);
+    renderWorkbench();
     setStatus(ec === 0 ? "Validation: OK" : `Validation: ${ec} error(s)`);
   } catch (e) {
+    recordActivity("Project validation", "error", e.message);
     toast("Validation error: " + e.message, "err");
     setStatus("Validation error");
   }
@@ -3309,7 +4815,16 @@ function showValidation(result) {
     const ico = i.severity === "error" ? ICO.err : ICO.warn;
     html += `<div class="val-item ${i.severity}">${ico}<span>${esc(i.message)}</span></div>`;
   }
+  const aiLabel = result.ok ? "Ask AI to review" : "Ask AI to fix";
+  html += `<div class="validation-actions"><button id="validation-ask-ai" class="btn btn-outline" type="button">${aiLabel}</button></div>`;
   div.innerHTML = html;
+  $("validation-ask-ai")?.addEventListener("click", () => {
+    const issueText = result.issues.length
+      ? result.issues.map((issue) => `[${issue.severity}] ${issue.code ? `${issue.code}: ` : ""}${issue.message}`).join("\n")
+      : "No validation issues were reported.";
+    overlay.classList.add("hidden");
+    openAiWithPrompt(`Review the current TowerForge project validation result. Explain root causes and the smallest safe next steps. Do not edit yet.\n\n${issueText}`, { mode: "ask" });
+  });
   overlay.classList.remove("hidden");
 }
 
@@ -3322,8 +4837,10 @@ async function simulateSelectedMission() {
   showOverlayLoading("sim-overlay", "sim-results", "Running headless simulation…", "sim-title", "Simulating");
   try {
     const result = await apiGet(`/api/sim/${encodeURIComponent(missionId)}`);
+    S.lastSimulation = result;
+    recordActivity("Mission simulation", result.outcome === "victory" ? "ok" : "warning", `${missionId}: ${result.outcome}, core ${result.coreHp}/${result.maxCoreHp}`);
     showSimResult(result);
-  } catch (e) { toast("Sim error: " + e.message, "err"); $("sim-overlay")?.classList.add("hidden"); }
+  } catch (e) { recordActivity("Mission simulation", "error", `${missionId}: ${e.message}`); toast("Sim error: " + e.message, "err"); $("sim-overlay")?.classList.add("hidden"); }
 }
 $("btn-sim")?.addEventListener("click", () => runStudioCommand("project.simulate"));
 
@@ -3394,6 +4911,8 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     $("validation-overlay")?.classList.add("hidden");
     $("sim-overlay")?.classList.add("hidden");
+    closeRecipePicker();
+    closeBuildPreview();
   }
   if (ctrl && (e.key === "r" || e.key === "R")) {
     if (S.dirty && !confirm("You have unsaved changes. Reload anyway?")) { e.preventDefault(); return; }
@@ -3406,7 +4925,7 @@ document.addEventListener("keydown", e => {
 // ─────────────────────────────────────────────────────────────────────────────
 $("btn-save")?.addEventListener("click", () => runStudioCommand("file.save"));
 document.querySelectorAll(".nav-tab").forEach(btn => {
-  btn.addEventListener("click", () => runStudioCommand(`navigate.${btn.dataset.tab}`));
+  if (btn.dataset.tab) btn.addEventListener("click", () => runStudioCommand(`navigate.${btn.dataset.tab}`));
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -3573,6 +5092,7 @@ function refreshValidationUI() {
       pill.title = "No reference issues in the unsaved project";
     }
   }
+  renderWorkbench();
   markEntityErrors();
 }
 function markEntityErrors() {
@@ -3602,7 +5122,7 @@ function showClientValidation() {
   div.querySelectorAll("[data-jk]").forEach(el => el.addEventListener("click", () => { jumpToEntity(el.dataset.jk, el.dataset.ji); overlay.classList.add("hidden"); }));
   overlay.classList.remove("hidden");
 }
-$("error-pill")?.addEventListener("click", () => { if ((S.clientIssues ?? []).length) showClientValidation(); });
+$("error-pill")?.addEventListener("click", () => setWorkbench(true, "problems"));
 
 // ═════════════════════════════════════════════════════════════════════════════
 // SIM VISUALIZATION (zero-dependency SVG charts)
@@ -3641,14 +5161,22 @@ function svgCurve(waveStats, key, unit) {
 // ═════════════════════════════════════════════════════════════════════════════
 // LIVE PLAYTEST
 // ═════════════════════════════════════════════════════════════════════════════
-const PT = { mod: null, rmod: null, content: null, game: null, renderer: null, raf: null, towerId: null, missionId: null, dirty: true, lastFrame: 0, error: null };
-const PT_KIND_COLOR = { single: "#e8a44a", pulse: "#a07ec8", sniper: "#7eb87e", antiair: "#e8c84a", splash: "#6ea8d8", support: "#7ec8b8", support_buff: "#c87e9c" };
+const PT = {
+  mod: null, rmod: null, content: null, game: null, renderer: null, raf: null,
+  towerId: null, missionId: null, difficultyId: null, keyboardCoord: null, dirty: true, lastFrame: 0, error: null,
+  events: [], selectedDebug: null, resumeSpeed: 1, lastDebugRender: 0
+};
+const PT_KIND_COLOR = { single: "#e8a44a", pulse: "#a07ec8", sniper: "#7eb87e", antiair: "#e8c84a", splash: "#6ea8d8", support: "#7ec8b8", support_buff: "#c87e9c", pipeline: "#79c8d3" };
+const PT_TARGET_MODES = [["first", "First"], ["last", "Last"], ["closest", "Closest"], ["furthest", "Furthest"], ["strongest", "Strongest"], ["weakest", "Weakest"]];
 
 function assembleBalance() {
   const P = S.project;
   return {
     constants: P.constants ?? {},
     currencies: projCurrencies(),
+    defaultDifficultyId: P.defaultDifficultyId ?? P.difficulties?.[0]?.id ?? "normal",
+    difficulties: P.difficulties ?? [{ id: "normal", label: "Normal" }],
+    metaProgression: P.metaProgression ?? { currencies: [], upgrades: {}, rewardsByMission: {} },
     defaultMissionId: P.defaultMissionId ?? Object.keys(P.missions ?? {})[0] ?? "",
     abilities: P.abilities ?? {}, enemies: P.enemies ?? {}, towers: P.towers ?? {},
     waveSets: P.waveSets ?? {}, missions: P.missions ?? {}
@@ -3670,6 +5198,7 @@ function buildPlaytestContent() {
       balance: assembleBalance(),
       maps: S.project.maps ?? {},
       worldMap: S.project.worldMap ?? { width: 800, height: 600, regions: [], missionNodes: [] },
+      scripts: S.project.scripts ?? {},
       visuals: S.project.visuals ?? {}
     });
     return true;
@@ -3687,11 +5216,18 @@ function newPlaytestGame() {
   if (!PT.missionId || !PT.content.missions[PT.missionId])
     PT.missionId = (PT.content.defaultMissionId && PT.content.missions[PT.content.defaultMissionId]) ? PT.content.defaultMissionId : ids[0];
   if (!PT.missionId) { PT.error = "No playable missions in this project."; PT.game = null; return null; }
-  try { PT.game = new PT.mod.TowerDefenseGame({ missionId: PT.missionId, content: PT.content }); }
+  const difficultyIds = PT.content.difficulties.map((item) => item.id);
+  if (!difficultyIds.includes(PT.difficultyId)) PT.difficultyId = PT.content.defaultDifficultyId;
+  try { PT.game = new PT.mod.TowerDefenseGame({ missionId: PT.missionId, content: PT.content, difficultyId: PT.difficultyId }); }
   catch (e) { PT.error = "Cannot start mission: " + e.message; PT.game = null; return null; }
   const m = PT.content.missions[PT.missionId];
   const tids = (m.buildTowerIds?.length ? m.buildTowerIds : Object.keys(PT.content.towers));
   PT.towerId = tids[0] ?? null;
+  PT.events = [];
+  PT.selectedDebug = null;
+  PT.keyboardCoord = null;
+  syncPlaytestKeyboardCoord(ensurePlaytestKeyboardCoord());
+  renderPlaytestDebugger(PT.game.getSnapshot());
   return PT.game;
 }
 async function renderPlaytestTab() {
@@ -3702,14 +5238,15 @@ async function renderPlaytestTab() {
     PT.error = null;
     try { await refreshPlaytestMaps(); }
     catch (e) { PT.error = "Cannot preview current map sources: " + e.message; }
-    if (!PT.error && buildPlaytestContent()) newPlaytestGame();
+    if (!PT.error && buildPlaytestContent()) { PT.renderer = null; newPlaytestGame(); }
     PT.dirty = false;
   }
   if (PT.error || !PT.game) return fail(PT.error ?? "No playable mission.");
   empty.style.display = "none"; stage.style.display = "flex"; side.style.display = "flex";
   const canvas = $("playtest-canvas");
-  if (!PT.renderer) PT.renderer = PT.rmod.createCanvasRenderer({ canvas, content: PT.content, assetBase: "/project-file/" });
+  if (!PT.renderer) PT.renderer = PT.rmod.createCanvasRenderer({ canvas, content: PT.content, assetBase: "/project-file/", theme: PT.content.visuals?.theme?.renderer });
   else PT.renderer.content = PT.content;
+  syncPlaytestKeyboardCoord(ensurePlaytestKeyboardCoord());
   if (PT.amod) {
     if (!PT.audio) PT.audio = PT.amod.createAudioPlayer({ audio: PT.content.visuals?.audio, assetBase: "/project-file/" });
     else PT.audio.setCatalog(PT.content.visuals?.audio, "/project-file/");
@@ -3717,6 +5254,11 @@ async function renderPlaytestTab() {
   PT.renderer.resize();
   const sel = $("pt-mission");
   if (sel) { sel.innerHTML = Object.keys(PT.content.missions).map(id => `<option value="${esc(id)}"${id === PT.missionId ? " selected" : ""}>${esc(PT.content.missions[id]?.label || id)}</option>`).join(""); sel.value = PT.missionId; }
+  const difficulty = $("pt-difficulty");
+  if (difficulty) {
+    difficulty.innerHTML = PT.content.difficulties.map(item => `<option value="${esc(item.id)}">${esc(item.label)}</option>`).join("");
+    difficulty.value = PT.difficultyId;
+  }
   renderPlaytestPalette();
   startPlaytestLoop();
 }
@@ -3732,7 +5274,7 @@ function renderPlaytestPalette() {
     const btn = document.createElement("button");
     btn.className = "pt-tower" + (tid === PT.towerId && !PT.armed ? " active" : "");
     btn.innerHTML = `<span class="sw" style="background:${PT_KIND_COLOR[t.attack?.kind] ?? "#7eb87e"}"></span><span class="pt-tname">${esc(t.label || tid)}</span><span class="pt-tcost">${t.cost?.coins ?? 0}c</span>`;
-    btn.addEventListener("click", () => { PT.towerId = tid; PT.armed = null; renderPlaytestPalette(); });
+    btn.addEventListener("click", () => { PT.towerId = tid; PT.armed = null; if ($("pt-interaction-mode")) $("pt-interaction-mode").value = "build"; renderPlaytestPalette(); });
     list.appendChild(btn);
   }
   // Mission abilities — click to arm, then click the map to use.
@@ -3749,12 +5291,92 @@ function renderPlaytestPalette() {
       btn.innerHTML = `<span class="sw" style="background:#8db0ff"></span><span class="pt-tname">✦ ${esc(a.label || a.id)}</span><span class="pt-tcost">r${a.radius}</span>`;
       btn.addEventListener("click", () => {
         PT.armed = PT.armed === a.id ? null : a.id;
+        if ($("pt-interaction-mode")) $("pt-interaction-mode").value = "build";
         renderPlaytestPalette();
         const el = $("pt-msg"); if (el) el.textContent = PT.armed ? `Click the map to use ${a.label || a.id}.` : "Ability disarmed.";
       });
       list.appendChild(btn);
     }
   }
+}
+
+function playtestEventTarget(event) {
+  if (event.towerId) return { kind: "tower", id: event.towerId };
+  if (event.enemyId) return { kind: "enemy", id: event.enemyId };
+  if (event.towerIds?.[0]) return { kind: "tower", id: event.towerIds[0] };
+  if (event.enemyIds?.[0]) return { kind: "enemy", id: event.enemyIds[0] };
+  return null;
+}
+
+function recordPlaytestEvents(events, snapshot) {
+  for (const event of events) {
+    PT.events.unshift({ time: snapshot.missionElapsed, type: event.type, target: playtestEventTarget(event), event: deep(event) });
+  }
+  if (PT.events.length > 120) PT.events.length = 120;
+}
+
+function renderPlaytestDebugger(snapshot = PT.game?.getSnapshot()) {
+  const inspector = $("pt-inspector");
+  const timeline = $("pt-event-timeline");
+  if (!inspector || !timeline || !snapshot) return;
+  const selected = PT.selectedDebug;
+  if (!selected) inspector.innerHTML = "Click Inspect, then choose a tower or enemy.";
+  else if (selected.kind === "tower") {
+    const tower = snapshot.towers.find((item) => item.id === selected.id);
+    const type = tower && PT.content?.towers?.[tower.typeId];
+    const refund = tower ? PT.game?.getTowerSellRefund(tower) : null;
+    const targetMode = tower?.targetMode;
+    const targetOptions = targetMode
+      ? [...PT_TARGET_MODES, ...(!PT_TARGET_MODES.some(([mode]) => mode === targetMode) ? [[targetMode, targetMode]] : [])]
+        .map(([mode, label]) => `<option value="${esc(mode)}"${mode === targetMode ? " selected" : ""}>${esc(label)}</option>`).join("")
+      : "";
+    inspector.innerHTML = tower
+      ? `<div class="pt-inspector-head"><span><strong>${esc(type?.label || tower.typeId)}</strong> <code>${esc(tower.id)}</code></span><button class="btn btn-danger" type="button" data-pt-sell>Sell ${esc(Object.entries(refund ?? {}).filter(([, value]) => value > 0).map(([resourceId, value]) => `${value} ${resourceId}`).join(" + ") || "tower")}</button></div><div>level ${tower.level} · cooldown ${tower.cooldown.toFixed(2)}${tower.hp != null ? ` · HP ${Math.ceil(tower.hp)}/${type?.maxHp ?? "?"}` : ""}${tower.disabledFor ? ` · disabled ${tower.disabledFor.toFixed(1)}` : ""}</div>${targetMode ? `<label class="pt-target-mode">Target priority<select data-pt-target-mode>${targetOptions}</select></label>` : ""}`
+      : `<code>${esc(selected.id)}</code> is no longer active.`;
+    inspector.querySelector("[data-pt-sell]")?.addEventListener("click", () => {
+      const result = PT.game?.sellTower(selected.id) ?? { ok: false, reason: "No active game." };
+      ptMsg(result, "Tower sold.");
+      if (result.ok) PT.selectedDebug = null;
+      renderPlaytestDebugger(PT.game?.getSnapshot());
+    });
+    inspector.querySelector("[data-pt-target-mode]")?.addEventListener("change", (event) => {
+      const result = PT.game?.setTowerTargetMode(selected.id, event.target.value) ?? { ok: false, reason: "No active game." };
+      ptMsg(result, `Target priority: ${event.target.selectedOptions[0]?.textContent ?? event.target.value}.`);
+      renderPlaytestDebugger(PT.game?.getSnapshot());
+    });
+  } else {
+    const enemy = snapshot.enemies.find((item) => item.id === selected.id);
+    const type = enemy && PT.content?.enemies?.[enemy.typeId];
+    const statuses = enemy ? Object.entries(enemy.statuses ?? {}).filter(([, value]) => value && value.remaining > 0).map(([name, value]) => `${name} ${value.remaining.toFixed(1)}`).join(", ") : "";
+    inspector.innerHTML = enemy
+      ? `<strong>${esc(type?.label || enemy.typeId)}</strong> <code>${esc(enemy.id)}</code><br>HP ${Math.ceil(enemy.hp)}/${type?.maxHp ?? "?"} · progress ${enemy.pathProgress.toFixed(2)}${statuses ? ` · ${esc(statuses)}` : ""}`
+      : `<code>${esc(selected.id)}</code> is no longer active.`;
+  }
+  timeline.innerHTML = PT.events.length ? PT.events.map((item, index) => {
+    const tag = item.target ? "button" : "div";
+    return `<${tag} class="pt-event-row"${item.target ? ` type="button" data-pt-event-index="${index}"` : ""}><span class="pt-event-time">${item.time.toFixed(2)}</span><span class="pt-event-type" title="${esc(JSON.stringify(item.event))}">${esc(item.type)}</span></${tag}>`;
+  }).join("") : `<div class="pt-event-row"><span class="pt-event-time">0.00</span><span class="pt-event-type">No events yet</span></div>`;
+}
+
+function presentPlaytestSnapshot(snapshot, events) {
+  recordPlaytestEvents(events, snapshot);
+  snapshot.lastEvents = events;
+  PT.renderer.drawSnapshot(snapshot);
+  if (PT.audio && $("pt-sound")?.checked) PT.audio.handleEvents(events);
+  updatePlaytestHud(snapshot);
+  const now = performance.now();
+  if (events.length || (PT.selectedDebug && now - PT.lastDebugRender > 200)) {
+    renderPlaytestDebugger(snapshot);
+    PT.lastDebugRender = now;
+  }
+}
+
+function syncPlaytestPauseButton() {
+  const paused = Number($("pt-speed")?.value) === 0;
+  const button = $("pt-pause");
+  button?.setAttribute("aria-pressed", String(paused));
+  button?.setAttribute("aria-label", paused ? "Resume" : "Pause");
+  if (button) button.title = paused ? "Resume" : "Pause";
 }
 function startPlaytestLoop() {
   stopPlaytestLoop();
@@ -3776,9 +5398,7 @@ function startPlaytestLoop() {
     const events = ticked ? pending.concat(rsnap.lastEvents) : pending;
     PT.game.lastEvents = []; // consumed this frame — clear so nothing replays next frame
     rsnap.lastEvents = events;
-    PT.renderer.drawSnapshot(rsnap);
-    if (PT.audio && $("pt-sound")?.checked) PT.audio.handleEvents(events);
-    updatePlaytestHud(rsnap);
+    presentPlaytestSnapshot(rsnap, events);
     PT.raf = requestAnimationFrame(loop);
   };
   PT.raf = requestAnimationFrame(loop);
@@ -3793,6 +5413,12 @@ function updatePlaytestHud(s = PT.game.getSnapshot()) {
   set("pt-wave", `${s.startedWaveCount}/${s.totalWaves} ${s.waveState}`);
   set("pt-enemies", String(s.enemies.length));
   set("pt-towers-count", String(s.towers.length));
+  set("pt-kills-leaks", `${s.killCount ?? 0} / ${s.leakCount ?? 0}`);
+  const objectives = s.objectiveProgress ?? [];
+  const objectiveCount = objectives.filter((item) => item.complete).length;
+  const stars = s.stars ?? [];
+  const starCount = stars.filter((item) => item.achieved).length;
+  set("pt-objectives", `${objectiveCount}/${objectives.length}${stars.length ? ` | ${starCount}/${stars.length} stars` : ""}`);
   for (const btn of document.querySelectorAll(".pt-ability")) {
     const a = s.abilities?.[btn.dataset.aid];
     const cd = Math.ceil(a?.cooldownRemaining ?? 0);
@@ -3802,19 +5428,101 @@ function updatePlaytestHud(s = PT.game.getSnapshot()) {
     if (btn.disabled && PT.armed === btn.dataset.aid) { PT.armed = null; btn.classList.remove("active"); }
   }
 }
-function ptMsg(result) { const el = $("pt-msg"); if (el) el.textContent = result.ok ? "Tower planted." : (result.reason || "Action rejected."); }
+function ptMsg(result, success = "Action completed.") { const el = $("pt-msg"); if (el) el.textContent = result.ok ? success : (result.reason || "Action rejected."); }
 $("pt-mission")?.addEventListener("change", () => { PT.missionId = $("pt-mission").value; newPlaytestGame(); renderPlaytestPalette(); const el = $("pt-msg"); if (el) el.textContent = "Mission loaded — place towers and start a wave."; });
-$("pt-start")?.addEventListener("click", () => { PT.audio?.resume(); if (PT.game) ptMsg(PT.game.startNextWave()); });
+$("pt-difficulty")?.addEventListener("change", () => { PT.difficultyId = $("pt-difficulty").value; newPlaytestGame(); renderPlaytestPalette(); const el = $("pt-msg"); if (el) el.textContent = `Difficulty: ${PT.game?.getSnapshot().difficultyLabel ?? PT.difficultyId}.`; });
+$("pt-start")?.addEventListener("click", () => { PT.audio?.resume(); if (PT.game) ptMsg(PT.game.startNextWave(), "Wave started."); });
 $("pt-reset")?.addEventListener("click", () => { if (buildPlaytestContent()) { newPlaytestGame(); renderPlaytestPalette(); } const el = $("pt-msg"); if (el) el.textContent = "Run reset."; });
-$("pt-speed")?.addEventListener("input", () => { const o = $("pt-speed-out"); if (o) o.textContent = $("pt-speed").value + "×"; });
+$("pt-speed")?.addEventListener("input", () => { const o = $("pt-speed-out"); if (o) o.textContent = $("pt-speed").value + "×"; if (Number($("pt-speed").value) > 0) PT.resumeSpeed = Number($("pt-speed").value); syncPlaytestPauseButton(); });
+$("pt-pause")?.addEventListener("click", () => {
+  const speed = $("pt-speed");
+  if (!speed) return;
+  if (Number(speed.value) === 0) speed.value = String(PT.resumeSpeed || 1);
+  else { PT.resumeSpeed = Number(speed.value); speed.value = "0"; }
+  speed.dispatchEvent(new Event("input"));
+});
+$("pt-step")?.addEventListener("click", () => {
+  if (!PT.game || PT.game.getSnapshot().outcome !== "playing") return;
+  const speed = $("pt-speed");
+  if (speed) { speed.value = "0"; speed.dispatchEvent(new Event("input")); }
+  const pending = PT.game.getRenderSnapshot().lastEvents;
+  PT.game.tick(0.1);
+  const snapshot = PT.game.getRenderSnapshot();
+  const events = pending.concat(snapshot.lastEvents);
+  PT.game.lastEvents = [];
+  presentPlaytestSnapshot(snapshot, events);
+});
+$("pt-interaction-mode")?.addEventListener("change", () => {
+  PT.armed = null;
+  renderPlaytestPalette();
+  const el = $("pt-msg");
+  if (el) el.textContent = $("pt-interaction-mode").value === "inspect" ? "Click a tower or enemy to inspect it." : "Build mode active.";
+});
 $("pt-sound")?.addEventListener("change", () => { if ($("pt-sound").checked) PT.audio?.resume(); });
+$("pt-event-timeline")?.addEventListener("click", (event) => {
+  const row = event.target.closest?.("[data-pt-event-index]");
+  const item = row && PT.events[Number(row.dataset.ptEventIndex)];
+  if (!item?.target) return;
+  PT.selectedDebug = item.target;
+  renderPlaytestDebugger();
+});
+function actAtPlaytestCoord(coord) {
+  if (!coord || !PT.game) return;
+  syncPlaytestKeyboardCoord(coord);
+  if ($("pt-interaction-mode")?.value === "inspect") {
+    const snapshot = PT.game.getSnapshot();
+    const tower = snapshot.towers.find((item) => item.coord.q === coord.q && item.coord.r === coord.r);
+    const enemy = snapshot.enemies.find((item) => { const at = PT.game.enemyCoord(item); return at.q === coord.q && at.r === coord.r; });
+    PT.selectedDebug = tower ? { kind: "tower", id: tower.id } : enemy ? { kind: "enemy", id: enemy.id } : null;
+    renderPlaytestDebugger(snapshot);
+    const el = $("pt-msg"); if (el) el.textContent = PT.selectedDebug ? `${PT.selectedDebug.kind} selected.` : "Nothing active on this tile.";
+    return;
+  }
+  if (PT.armed) { const result = PT.game.useAbility(PT.armed, coord); ptMsg(result, "Ability used."); if (result.ok) PT.armed = null; renderPlaytestPalette(); return; }
+  if (PT.towerId) ptMsg(PT.game.placeTower(PT.towerId, coord), "Tower planted.");
+}
+
+function ensurePlaytestKeyboardCoord() {
+  const tiles = PT.game?.getSnapshot().tiles ?? [];
+  if (PT.keyboardCoord && tiles.some(tile => tile.q === PT.keyboardCoord.q && tile.r === PT.keyboardCoord.r)) return PT.keyboardCoord;
+  const tile = tiles.find(item => item.terrain === "buildable") ?? tiles[0];
+  return tile ? { q: tile.q, r: tile.r } : null;
+}
+
+function syncPlaytestKeyboardCoord(coord) {
+  PT.keyboardCoord = coord ? { q: coord.q, r: coord.r } : null;
+  PT.renderer?.setFocusCoord(PT.keyboardCoord);
+  const tile = PT.keyboardCoord && PT.game?.getSnapshot().tiles.find(item => item.q === PT.keyboardCoord.q && item.r === PT.keyboardCoord.r);
+  $("playtest-canvas")?.setAttribute("aria-label", tile
+    ? `Hex battlefield. Selected tile q ${tile.q}, r ${tile.r}, ${tile.terrain}. Arrow keys move; Enter acts; Escape cancels.`
+    : "Hex battlefield. Arrow keys move between tiles; Enter acts; Escape cancels.");
+}
+
+function movePlaytestKeyboardCoord(dq, dr) {
+  const current = ensurePlaytestKeyboardCoord();
+  if (!current) return;
+  const target = PT.game.getSnapshot().tiles.find(tile => tile.q === current.q + dq && tile.r === current.r + dr);
+  if (target) syncPlaytestKeyboardCoord(target);
+}
+
+$("playtest-canvas")?.addEventListener("focus", () => syncPlaytestKeyboardCoord(ensurePlaytestKeyboardCoord()));
+$("playtest-canvas")?.addEventListener("keydown", event => {
+  const moves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+  if (moves[event.key]) { event.preventDefault(); movePlaytestKeyboardCoord(...moves[event.key]); }
+  else if (event.key === "Enter") { event.preventDefault(); actAtPlaytestCoord(ensurePlaytestKeyboardCoord()); }
+  else if (event.key === "Escape") {
+    event.preventDefault();
+    PT.armed = null;
+    renderPlaytestPalette();
+    const el = $("pt-msg"); if (el) el.textContent = "Build action cancelled.";
+  }
+});
 $("playtest-canvas")?.addEventListener("click", e => {
   PT.audio?.resume();
   if (!PT.game) return;
   const coord = PT.renderer.pickTile(e, PT.game.getSnapshot().tiles);
   if (!coord) return;
-  if (PT.armed) { const r = PT.game.useAbility(PT.armed, coord); ptMsg(r); return; }
-  if (PT.towerId) ptMsg(PT.game.placeTower(PT.towerId, coord));
+  actAtPlaytestCoord(coord);
 });
 window.addEventListener("resize", () => { if (S.activeTab === "playtest" && PT.renderer) PT.renderer.resize(); });
 
@@ -3875,6 +5583,7 @@ const ATTACK_HELP = {
   sniper: "Long-range single-target sniper — the only weapon that fully pierces pierce-only armor.",
   antiair: "Anti-air. Hits multiple flying targets per volley (count scales by level).",
   splash: "Splash + slow. Damages nearby enemies and slows them; chips armored enemies.",
+  pipeline: "Universal data-driven tower: targeting selects enemies, delivery expands the target set, and ordered effects apply damage, status, or resources.",
   support: "Aura tower. Unlocks dependent towers placed within its radius (no direct damage).",
   support_buff: "Aura tower. Multiplies the fire rate of affected towers within range."
 };
@@ -3939,10 +5648,14 @@ let cmdkActive = 0;
 function buildCmdkItems() {
   const items = [];
   for (const [t, label] of STUDIO_TABS) items.push({ kind: "Go", label: "Go to " + label, run: () => runStudioCommand(`navigate.${t}`) });
+  items.push({ kind: "Go", label: "Open AI Chat", run: () => runStudioCommand("project.ai_designer") });
   items.push({ kind: "Run", label: "Run balance analysis", run: () => runStudioCommand("project.balance") });
   items.push({ kind: "New", label: "Add enemy", run: () => { switchTab("enemies"); $("btn-add-enemy")?.click(); } });
   items.push({ kind: "New", label: "Add tower", run: () => { switchTab("towers"); $("btn-add-tower")?.click(); } });
   items.push({ kind: "New", label: "Add mission", run: () => { switchTab("missions"); $("btn-add-mission")?.click(); } });
+  if (S.selectedEnemyId) items.push({ kind: "Edit", label: "Duplicate selected enemy", sub: S.selectedEnemyId, run: () => runStudioCommand("entity.duplicate", { collection: "enemies", id: S.selectedEnemyId }) });
+  if (S.selectedTowerId) items.push({ kind: "Edit", label: "Duplicate selected tower", sub: S.selectedTowerId, run: () => runStudioCommand("entity.duplicate", { collection: "towers", id: S.selectedTowerId }) });
+  if (S.selectedMissionEdId) items.push({ kind: "Edit", label: "Duplicate selected mission", sub: S.selectedMissionEdId, run: () => runStudioCommand("entity.duplicate", { collection: "missions", id: S.selectedMissionEdId }) });
   items.push({ kind: "Run", label: "Validate project", hint: "⌘⇧V", run: () => runStudioCommand("project.validate") });
   items.push({ kind: "Run", label: "Run simulation", run: () => runStudioCommand("project.simulate") });
   items.push({ kind: "Run", label: "Save project", hint: "⌘S", run: () => runStudioCommand("file.save") });
@@ -4041,8 +5754,7 @@ function diffSection(base, cur) {
   for (const k of Object.keys(base)) if (!cur[k]) removed++;
   return { added, removed, changed, total: added + removed + changed };
 }
-function showChangeReview() {
-  const base = S.serverSnapshot || {}, cur = S.project || {};
+function changeReviewRows(base, cur) {
   const mapSections = [["enemies", "Enemies"], ["towers", "Towers"], ["waveSets", "Wave sets"], ["missions", "Missions"], ["abilities", "Abilities"], ["maps", "Maps"], ["mapSources", "Map sources"]];
   const scalarSections = [["constants", "Constants"], ["currencies", "Currencies"], ["worldMap", "World map"], ["visuals", "Visuals"], ["buildTargets", "Build targets"], ["manifest", "Manifest"], ["defaultMissionId", "Default mission"]];
   let rows = "";
@@ -4052,12 +5764,20 @@ function showChangeReview() {
   }
   for (const [key, label] of scalarSections)
     if (JSON.stringify(base[key]) !== JSON.stringify(cur[key])) rows += `<div class="change-item"><span>${esc(label)}</span><span class="ch-counts ch-chg">changed</span></div>`;
+  return rows;
+}
+
+function showChangeReviewBetween(base, cur, title = "Changes") {
   const overlay = $("validation-overlay"), div = $("validation-results");
   div.className = "overlay-body";
-  $("val-title").textContent = "Unsaved changes since load";
+  $("val-title").textContent = title;
   $("val-icon").innerHTML = ICO.warn;
-  div.innerHTML = rows || `<div class="val-item ok">${ICO.check} No differences from the last load.</div>`;
+  div.innerHTML = changeReviewRows(base, cur) || `<div class="val-item ok">${ICO.check} No content differences detected.</div>`;
   overlay.classList.remove("hidden");
+}
+
+function showChangeReview() {
+  showChangeReviewBetween(S.serverSnapshot || {}, S.project || {}, "Unsaved changes since load");
 }
 $("dirty-badge")?.addEventListener("click", () => { if (S.dirty) showChangeReview(); });
 
@@ -4067,6 +5787,12 @@ $("dirty-badge")?.addEventListener("click", () => { if (S.dirty) showChangeRevie
 function renderBalanceTab() {
   const btn = $("btn-run-balance");
   if (btn && !btn.dataset.wired) { btn.dataset.wired = "1"; btn.addEventListener("click", () => runStudioCommand("project.balance")); }
+  const mission = $("balance-mission");
+  if (mission) {
+    const selected = mission.value;
+    mission.innerHTML = `<option value="">All missions</option>${Object.entries(S.project?.missions ?? {}).map(([id, value]) => `<option value="${esc(id)}">${esc(value.label || id)}</option>`).join("")}`;
+    mission.value = S.project?.missions?.[selected] ? selected : "";
+  }
   const box = $("balance-results");
   if (!box) return;
   if (S.balanceReport) renderBalanceReport(S.balanceReport);
@@ -4079,19 +5805,61 @@ function renderBalanceTab() {
 
 async function runBalance() {
   const btn = $("btn-run-balance"), box = $("balance-results");
+  if (S.dirty && !(await save())) return;
+  if (passiveBalanceTimer) clearTimeout(passiveBalanceTimer);
+  passiveBalanceTimer = null;
+  balanceRequestSerial += 1;
   if (box) { box.innerHTML = `<div class="empty-state"><span class="spinner"></span><p>Simulating strategies across every mission…</p></div>`; }
   await withButtonSpinner(btn, async () => {
     try {
-      const report = await apiGet("/api/balance");
+      const params = new URLSearchParams();
+      if ($("balance-mission")?.value) params.set("mission", $("balance-mission").value);
+      if ($("balance-seconds")?.value) params.set("seconds", $("balance-seconds").value);
+      const report = await apiGet(`/api/balance?${params}`);
+      S.previousBalanceReport = S.balanceReport;
       S.balanceReport = report;
+      S.balanceReportRevision = S.contentHash;
       renderBalanceReport(report);
+      updateBalanceWarningUi();
       const flagged = report.summary.flagged;
+      recordActivity("Balance analysis", flagged ? "warning" : "ok", `${report.summary.missions} missions, ${flagged} flagged`);
+      renderWorkbench();
       toast(flagged ? `Balance: ${flagged} mission(s) flagged.` : "Balance: no issues found.", flagged ? "warn" : "ok");
     } catch (e) {
+      recordActivity("Balance analysis", "error", e.message);
       if (box) box.innerHTML = `<div class="val-item error">${ICO.err}<span>${esc(e.message)}</span></div>`;
       toast("Balance run failed: " + e.message, "err");
     }
   });
+}
+
+function balanceInsights(mission) {
+  const results = mission.results ?? [];
+  const insights = [];
+  const nearWon = results.some((result) => result.strategy?.placement === "near_path" && result.win);
+  const farLost = results.some((result) => result.strategy?.placement === "far_path" && !result.win);
+  if (nearWon && farLost) insights.push("Placement-sensitive: near path wins, far path loses");
+  const flat = results.find((result) => result.strategyId === "all_flat");
+  const upgraded = results.find((result) => result.strategyId === "all_upgrade");
+  if (flat && upgraded) {
+    if (!flat.win && upgraded.win) insights.push("Upgrades are required for a reliable win");
+    else if (flat.win && upgraded.win && upgraded.towersBuilt < flat.towersBuilt) insights.push("Upgrades reduce required tower count");
+    else if (flat.win && !upgraded.win) insights.push("Upgrade economy is counterproductive");
+  }
+  if (mission.soloWinners?.length === 1) insights.push(`Only ${mission.soloWinners[0]} wins solo`);
+  else if ((mission.soloWinners?.length ?? 0) > 1) insights.push(`${mission.soloWinners.length} towers can win solo`);
+  const leaks = results.map((result) => result.leaks ?? 0);
+  if (leaks.length && Math.max(...leaks) > 0) insights.push(`Leak range: ${Math.min(...leaks)}-${Math.max(...leaks)}`);
+  return insights;
+}
+
+function missionBalanceSignals(mission) {
+  const flags = [...(mission.flags ?? [])];
+  const knownMessages = new Set(flags.map((flag) => flag.message));
+  for (const message of balanceInsights(mission)) {
+    if (!knownMessages.has(message)) flags.push({ code: "STRATEGY_INSIGHT", severity: "warning", message });
+  }
+  return flags;
 }
 
 function renderBalanceReport(report) {
@@ -4105,8 +5873,20 @@ function renderBalanceReport(report) {
     const cls = pct >= 70 ? "good" : pct >= 40 ? "warn" : "bad";
     const usage = Object.entries(m.towerUsage);
     const maxBuilt = Math.max(1, ...usage.map(([, u]) => u.built));
+    const previous = S.previousBalanceReport?.missions?.find((item) => item.missionId === m.missionId);
+    const delta = previous ? pct - Math.round(previous.winRate * 100) : null;
+    const insights = balanceInsights(m);
+    const strategyRows = (m.results ?? []).map((result) => `<tr>
+      <td title="${esc(result.label)}">${esc(result.label)}</td>
+      <td>${esc(result.strategy?.placement ?? "-")}</td>
+      <td>${result.strategy?.upgrade ? "yes" : "no"}</td>
+      <td class="${result.win ? "victory" : "defeat"}">${esc(result.outcome)}</td>
+      <td>${Math.round((result.coreHpRemaining ?? 0) * 100)}%</td>
+      <td>${result.leaks ?? 0}</td>
+      <td>${result.elapsed ?? "-"}u</td>
+    </tr>`).join("");
     html += `<div class="bal-card">
-      <div class="bal-head"><span class="bal-name">${esc(m.label)}</span><span class="bal-id">${esc(m.missionId)}</span></div>
+      <div class="bal-head"><span class="bal-name">${esc(m.label)}</span><span class="bal-id">${esc(m.missionId)}</span>${delta == null ? "" : `<span class="bal-delta ${delta > 0 ? "up" : delta < 0 ? "down" : "flat"}">${delta > 0 ? "+" : ""}${delta}pp vs previous</span>`}</div>
       <div class="bal-winrate"><div class="bal-bar ${cls}"><span style="width:${pct}%"></span></div><span class="bal-winpct">${pct}%</span></div>
       <div class="bal-meta">
         <span>core left <b>${Math.round(m.avgCoreHpRemaining * 100)}%</b></span>
@@ -4117,11 +5897,21 @@ function renderBalanceReport(report) {
       ${usage.length ? `<div class="bal-towers">${usage.map(([id, u]) =>
         `<div class="bal-tower"><span class="tname">${esc(towerLabel(id))}</span><span class="tbar"><span style="width:${Math.round(u.built / maxBuilt * 100)}%"></span></span><span class="mono text-muted" style="font-size:10.5px">${u.inWins}/${u.built} in wins</span></div>`
       ).join("")}</div>` : ""}
+      ${insights.length ? `<div class="bal-insights">${insights.map((insight) => `<span class="bal-insight">${esc(insight)}</span>`).join("")}</div>` : ""}
       ${m.flags.length ? m.flags.map(flagHtml).join("") : `<div class="bal-flag ok">${ICO.check}<span>No balance issues detected.</span></div>`}
+      <details class="bal-strategies"><summary>${m.strategyCount} strategy runs · inputs and outcomes</summary>
+        <table class="bal-strategy-table"><thead><tr><th style="width:28%">Strategy</th><th>Placement</th><th>Upgrade</th><th>Outcome</th><th>Core</th><th>Leaks</th><th>Time</th></tr></thead><tbody>${strategyRows}</tbody></table>
+      </details>
+      <div class="bal-card-actions"><button class="btn btn-outline" type="button" data-ai-balance-mission="${esc(m.missionId)}">Ask AI</button></div>
     </div>`;
   }
   box.innerHTML = html;
   box.querySelectorAll("[data-jump-tower]").forEach(el => el.addEventListener("click", () => jumpToEntity("tower", el.dataset.jumpTower)));
+  box.querySelectorAll("[data-ai-balance-mission]").forEach((button) => button.addEventListener("click", () => {
+    const mission = report.missions.find((item) => item.missionId === button.dataset.aiBalanceMission);
+    if (!mission) return;
+    openAiWithPrompt(`Review balance for ${mission.missionId}: ${Math.round(mission.winRate * 100)}% win rate, ${Math.round(mission.avgCoreHpRemaining * 100)}% average core HP, flags: ${mission.flags.map((flag) => flag.message).join("; ") || "none"}. Explain the most useful next change and verify it with the balance tools. Do not edit yet.`, { mode: "ask" });
+  }));
 }
 
 function flagHtml(flag) {
@@ -4234,11 +6024,19 @@ function scheduleDesktopUiSync(delay = 80) {
         dirty: Boolean(S.dirty),
         canUndo: Boolean(H.undo.length),
         canRedo: Boolean(H.redo.length),
-        activeTab: S.activeTab
+        activeTab: S.activeTab,
+        language: getLanguage()
       }
     }).catch(error => console.warn("Desktop state sync failed:", error));
   }, delay);
 }
+
+window.addEventListener("towerforge:languagechange", () => {
+  renderActiveTab();
+  updateSidebarCollapseUi();
+  applyTheme(currentTheme());
+  scheduleDesktopUiSync(0);
+});
 
 function unsavedChangesDialog() {
   const overlay = $("unsaved-overlay");
@@ -4358,7 +6156,8 @@ const STUDIO_COMMANDS = new Map([
   ["project.balance", async () => { switchTab("balance"); await runBalance(); }],
   ["project.playtest", () => switchTab("playtest")],
   ["project.build_targets", () => switchTab("buildtargets")],
-  ["project.ai_designer", () => switchTab("ai")],
+  ["project.ai_designer", () => setAiDockOpen(true)],
+  ["entity.duplicate", payload => duplicateStudioEntity(payload.collection, payload.id)],
   ["help.getting_started", () => showWelcome()],
   ["help.keyboard_shortcuts", () => showWelcome()],
   ["help.about", () => showAbout()],
@@ -4367,6 +6166,10 @@ const STUDIO_COMMANDS = new Map([
 async function runStudioCommand(id, payload = {}) {
   if (id.startsWith("navigate.")) {
     const tab = id.slice("navigate.".length);
+    if (tab === "ai") {
+      setAiDockOpen(true);
+      return;
+    }
     if (STUDIO_TABS.some(([candidate]) => candidate === tab)) switchTab(tab);
     return;
   }
@@ -4396,6 +6199,7 @@ document.addEventListener("keydown", event => {
   if (!$("unsaved-overlay")?.classList.contains("hidden")) closeUnsavedDialog("cancel");
   if (!$("new-project-overlay")?.classList.contains("hidden")) closeNewProjectDialog();
   if (!$("about-overlay")?.classList.contains("hidden")) closeAbout();
+  else if (AI.dockOpen) setAiDockOpen(false);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4403,5 +6207,6 @@ document.addEventListener("keydown", event => {
 // ─────────────────────────────────────────────────────────────────────────────
 setupDesktopBridge().catch(error => console.warn("Desktop bridge setup failed:", error));
 setupSidebar();
+setupAiDock();
 loadAppInfo();
 load();

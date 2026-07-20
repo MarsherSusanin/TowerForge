@@ -1,6 +1,6 @@
 {
   "name": "towerforge",
-  "description": "TowerForge tower-defense game constructor: MCP tools to author, validate, simulate, balance, build, and package .tdproj games, plus a /towerforge command teaching the safe authoring loop.",
+  "description": "TowerForge game constructor: validated MCP authoring for universal tower effects, deterministic TowerScript, progression, maps, themes, assets, simulation, balance, build, and packaging.",
   "version": "0.1.0",
   "author": { "name": "TowerForge" },
   "mcpServers": {

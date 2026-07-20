@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru" data-ai-dock="closed">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TowerForge Editor</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <script src="/bootstrap.js"></script>
   <link rel="stylesheet" href="/styles.css">
 </head>
@@ -12,7 +13,7 @@
 <!-- ── Top bar ─────────────────────────────────────────────────────────────── -->
 <header id="topbar">
   <div class="topbar-logo">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+    <img src="/brand/towerforge-mark.svg" alt="" width="22" height="22">
     TowerForge Editor
   </div>
   <div class="topbar-sep"></div>
@@ -22,6 +23,9 @@
   <button id="error-pill" class="error-pill" title="Validation issues — click for details" aria-label="Validation issues">
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     <span id="error-pill-count">0</span>
+  </button>
+  <button id="btn-activity" class="btn-icon" type="button" title="Problems and activity" aria-label="Problems and activity" aria-controls="workbench-drawer" aria-expanded="false">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V9M10 19V5M16 19v-7M22 19V3"/></svg>
   </button>
   <button id="btn-validate" class="btn btn-outline" title="Validate project (Ctrl+Shift+V)">
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
@@ -34,6 +38,11 @@
   <button id="btn-save" class="btn btn-save" title="Save all changes (Ctrl+S)" disabled>
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
     Save
+  </button>
+  <button id="btn-ai-chat" class="btn btn-outline ai-chat-toggle" type="button" title="Open AI Chat" aria-controls="ai-dock" aria-expanded="false">
+    <span id="ai-chat-status-dot" class="ai-chat-status-dot" aria-hidden="true"></span>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 9h8M8 13h5"/></svg>
+    AI Chat
   </button>
   <button id="btn-theme" class="btn-icon" title="Toggle light / dark theme" aria-label="Toggle theme"></button>
   <button id="btn-help" class="btn-icon" title="Help &amp; keyboard shortcuts" aria-label="Help">
@@ -49,7 +58,11 @@
     <div class="sidebar-scroll">
     <div class="nav-group">
       <div class="nav-group-label">Content</div>
-      <button class="nav-tab active" data-tab="waves" role="tab" aria-selected="true">
+      <button class="nav-tab active" data-tab="home" role="tab" aria-selected="true">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 9-8 9 8v9a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1v-9Z"/></svg>
+        <span>Home</span>
+      </button>
+      <button class="nav-tab" data-tab="waves" role="tab">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
         <span>Waves</span>
       </button>
@@ -80,14 +93,19 @@
       <button class="nav-tab" data-tab="balance" role="tab">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8a6 6 0 1 1-11.4 0"/><path d="M13 12.5 16 9"/></svg>
         <span>Balance</span>
+        <b id="balance-warning-count" class="nav-count hidden" aria-label="Balance warnings">0</b>
       </button>
-      <button class="nav-tab" data-tab="ai" role="tab">
+      <button id="sidebar-ai-chat" class="nav-tab nav-command" type="button" aria-controls="ai-dock" aria-expanded="false">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"/><path d="M5 17l.8 2.2L8 20l-2.2.8L5 23l-.8-2.2L2 20l2.2-.8L5 17z"/></svg>
-        <span>AI Designer</span>
+        <span>AI Chat</span>
       </button>
     </div>
     <div class="nav-group">
       <div class="nav-group-label">Project</div>
+      <button class="nav-tab" data-tab="scripts" role="tab">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <span>Scripts</span>
+      </button>
       <button class="nav-tab" data-tab="assets" role="tab">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
         <span>Assets</span>
@@ -117,8 +135,16 @@
   <!-- ── Main content area ──────────────────────────────────────────────────── -->
   <main id="main-content">
 
+    <section id="tab-home" class="tab-panel active" role="tabpanel">
+      <div class="panel-header">
+        <h2>Project Home</h2>
+        <button id="btn-release-doctor" class="btn btn-outline" type="button">Run Release Doctor</button>
+      </div>
+      <div id="project-home-body" class="detail-panel project-home-body"></div>
+    </section>
+
     <!-- ── WAVES TAB ─────────────────────────────────────────────────────────── -->
-    <section id="tab-waves" class="tab-panel active" role="tabpanel">
+    <section id="tab-waves" class="tab-panel" role="tabpanel">
       <div class="panel-header">
         <h2>Wave Editor</h2>
         <button id="btn-add-wave" class="btn btn-outline">
@@ -326,6 +352,40 @@
       </div>
     </section>
 
+    <!-- ── SCRIPTS TAB ──────────────────────────────────────────────────────── -->
+    <section id="tab-scripts" class="tab-panel" role="tabpanel">
+      <div class="panel-header script-panel-header">
+        <h2>Project &amp; Scripts</h2>
+        <button id="btn-script-new" class="btn btn-outline" type="button">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Script
+        </button>
+        <button id="btn-script-folder" class="btn btn-outline" type="button">New Folder</button>
+        <button id="btn-script-rename" class="btn btn-outline" type="button" disabled>Rename</button>
+        <button id="btn-script-delete" class="btn-icon danger" type="button" title="Delete selected script entry" aria-label="Delete selected script entry" disabled>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>
+        </button>
+        <button id="btn-script-refresh" class="btn-icon" type="button" title="Refresh project tree" aria-label="Refresh project tree">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.13-3.36L23 10M1 14l5.36 4.36A9 9 0 0 0 20.49 15"/></svg>
+        </button>
+      </div>
+      <div class="script-workbench">
+        <aside class="project-tree-pane" aria-label="Project tree">
+          <div class="pane-label">Project</div>
+          <div id="project-tree" class="project-tree" role="tree"></div>
+        </aside>
+        <div class="script-editor-pane">
+          <div class="script-editor-bar">
+            <span id="script-editor-path" class="mono" data-i18n>Select a file</span>
+            <span id="script-editor-state" class="script-editor-state"></span>
+            <button id="btn-script-save" class="btn btn-save" type="button" disabled>Save Script</button>
+          </div>
+          <textarea id="script-editor" class="script-code-editor mono" spellcheck="false" aria-label="TowerScript source" disabled></textarea>
+          <div id="script-diagnostics" class="script-diagnostics" aria-live="polite"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ── ASSETS TAB ───────────────────────────────────────────────────────── -->
     <section id="tab-assets" class="tab-panel" role="tabpanel">
       <div class="panel-header">
@@ -334,6 +394,11 @@
       <div class="detail-panel">
         <div class="asset-grid">
           <section class="tool-card">
+            <div class="form-section-title">Themed Asset Packs</div>
+            <p class="text-muted" style="font-size:11.5px;margin:0 0 10px">Preview a coordinated battlefield background and renderer palette, then apply it to every mission with validation and rollback.</p>
+            <div id="theme-packs-panel" class="theme-pack-grid" aria-live="polite"></div>
+          </section>
+          <section class="tool-card">
             <div class="form-section-title">Import Project Asset</div>
             <div class="form-row">
               <div class="field"><label>Source path</label><input id="asset-source-path" class="mono" placeholder="imports/tower.png"></div>
@@ -341,7 +406,7 @@
             </div>
             <div class="form-row">
               <div class="field"><label>ID</label><input id="asset-id" class="mono" placeholder="tower"></div>
-              <div class="field"><label>Kind</label><select id="asset-kind"><option value="sprite">sprite</option><option value="atlas">atlas</option><option value="sound">sound</option></select></div>
+              <div class="field"><label>Kind</label><select id="asset-kind"><option value="sprite">sprite</option><option value="atlas">atlas</option><option value="sound">sound</option><option value="music">music</option></select></div>
               <button id="btn-import-asset" class="btn btn-outline" style="align-self:flex-end">Import</button>
             </div>
           </section>
@@ -351,6 +416,11 @@
             <div id="sound-bindings"></div>
           </section>
           <section class="tool-card">
+            <div class="form-section-title">Mission Music</div>
+            <p class="text-muted" style="font-size:11.5px;margin:0 0 10px">Import a music file, then assign one looping track per mission. Players control music and SFX separately.</p>
+            <div id="music-bindings"></div>
+          </section>
+          <section class="tool-card">
             <div class="form-section-title">Sprite Frames (from atlas)</div>
             <p class="text-muted" style="font-size:11.5px;margin:0 0 10px">Slice one atlas image into named sprites. Import an atlas above (Kind = atlas), pick a frame rectangle, then bind the sprite to a tower/enemy in the Visual Catalog JSON.</p>
             <div id="atlas-frames-panel"></div>
@@ -358,6 +428,16 @@
           <section class="tool-card">
             <div class="form-section-title">Visual Catalog JSON</div>
             <textarea id="visuals-json" class="mono json-editor" spellcheck="false"></textarea>
+          </section>
+          <section class="tool-card">
+            <div class="form-section-title">Story Comics JSON</div>
+            <p class="text-muted" style="font-size:11.5px;margin:0 0 10px">Mission-linked panels shown before a mission or after victory. Panel artwork references a sprite ID from the visual catalog.</p>
+            <textarea id="story-comics-json" class="mono json-editor" spellcheck="false"></textarea>
+          </section>
+          <section class="tool-card">
+            <div class="form-section-title">Battle Backgrounds JSON</div>
+            <p class="text-muted" style="font-size:11.5px;margin:0 0 10px">Set a mission color and optional standalone sprite backdrop. Definitions are keyed by mission ID.</p>
+            <textarea id="battle-backgrounds-json" class="mono json-editor" spellcheck="false"></textarea>
           </section>
         </div>
       </div>
@@ -369,7 +449,7 @@
         <h2>Constants &amp; Settings</h2>
       </div>
       <div class="detail-panel">
-        <div style="max-width:680px">
+        <div class="settings-content">
           <div class="form-section">
             <div class="form-section-title">Global Game Constants</div>
             <table class="constants-table" id="constants-table"></table>
@@ -379,6 +459,24 @@
             <p class="text-muted" style="font-size:12px;margin:0 0 8px">Spendable currencies for tower costs, enemy rewards, and starting resources. <b>coins</b> is the primary currency and cannot be removed.</p>
             <div id="currencies-panel"></div>
             <button id="btn-add-currency" class="btn btn-outline" style="margin-top:8px">+ Add currency</button>
+          </div>
+          <div class="form-section">
+            <div class="form-section-title">Difficulty &amp; Meta Progression</div>
+            <p class="text-muted" style="font-size:12px;margin:0 0 10px">Difficulty modifies a run without rewriting mission data. Meta progression is saved by the generated player and passed into the pure simulation at launch.</p>
+            <div class="field" style="max-width:320px;margin-bottom:10px">
+              <label>Default Difficulty</label>
+              <select id="setting-default-difficulty"></select>
+            </div>
+            <div class="field">
+              <label>Difficulties JSON</label>
+              <textarea id="setting-difficulties-json" class="mono json-editor" rows="10" spellcheck="false"></textarea>
+              <span id="setting-difficulties-status" class="text-muted" style="font-size:11px"></span>
+            </div>
+            <div class="field" style="margin-top:10px">
+              <label>Meta Progression JSON</label>
+              <textarea id="setting-meta-json" class="mono json-editor" rows="14" spellcheck="false"></textarea>
+              <span id="setting-meta-status" class="text-muted" style="font-size:11px"></span>
+            </div>
           </div>
           <div class="form-section">
             <div class="form-section-title">Project Manifest</div>
@@ -400,6 +498,12 @@
           <div class="form-section">
             <div class="form-section-title">Appearance</div>
             <div class="appearance-row">
+              <div class="field"><label>Language</label>
+                <select id="setting-language">
+                  <option value="ru">Русский</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
               <div class="field"><label>Theme</label>
                 <select id="setting-theme">
                   <option value="dark">Dark</option>
@@ -413,6 +517,33 @@
                   <option value="compact">Compact</option>
                 </select>
               </div>
+            </div>
+          </div>
+          <div class="form-section">
+            <div class="form-section-title">AI Connections</div>
+            <p class="text-muted settings-intro">Connect an official account runtime or save a direct API key on this device. Prompts, selected attachments, and required tool results go only to the provider you choose.</p>
+            <div id="ai-connections-list" class="ai-connections-list"></div>
+          </div>
+          <div class="form-section">
+            <div class="form-section-title">AI Chat Defaults</div>
+            <div class="ai-defaults-grid">
+              <div class="field">
+                <label for="setting-ai-provider">Provider</label>
+                <select id="setting-ai-provider"></select>
+              </div>
+              <div class="field">
+                <label for="setting-ai-model">Model</label>
+                <select id="setting-ai-model"></select>
+              </div>
+              <div class="field">
+                <label for="setting-ai-reasoning">Reasoning</label>
+                <select id="setting-ai-reasoning"></select>
+              </div>
+            </div>
+            <div class="ai-custom-model-settings">
+              <input id="setting-ai-custom-model" class="mono" type="text" placeholder="Custom provider/model-id" autocomplete="off" spellcheck="false">
+              <button id="setting-ai-add-model" class="btn btn-outline" type="button">Add model</button>
+              <button id="setting-ai-open-chat" class="btn btn-primary" type="button">Open AI Chat</button>
             </div>
           </div>
           <div class="form-section">
@@ -468,15 +599,24 @@
         <div class="playtest-stage" id="playtest-stage" style="display:none">
           <div class="playtest-toolbar">
             <label>Mission <select id="pt-mission"></select></label>
+            <label>Difficulty <select id="pt-difficulty"></select></label>
             <button id="pt-start" class="btn btn-primary">Start wave</button>
             <button id="pt-reset" class="btn btn-outline">Reset</button>
+            <button id="pt-pause" class="btn-icon" type="button" title="Pause" aria-label="Pause" aria-pressed="false">
+              <svg class="pt-icon-pause" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 5v14M16 5v14"/></svg>
+              <svg class="pt-icon-resume" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="m7 4 13 8-13 8V4Z"/></svg>
+            </button>
+            <button id="pt-step" class="btn-icon" type="button" title="Step simulation" aria-label="Step simulation">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 4 10 8-10 8V4ZM19 5v14"/></svg>
+            </button>
+            <label>Mode <select id="pt-interaction-mode"><option value="build">Build</option><option value="inspect">Inspect</option></select></label>
             <label class="pt-speed">Speed
               <input id="pt-speed" type="range" min="0" max="4" step="0.5" value="1">
               <output id="pt-speed-out">1×</output>
             </label>
             <label style="display:flex;align-items:center;gap:5px;margin:0;color:var(--text-muted)"><input type="checkbox" id="pt-sound" checked> Sound</label>
           </div>
-          <canvas id="playtest-canvas"></canvas>
+          <canvas id="playtest-canvas" tabindex="0" role="application" aria-label="Hex battlefield. Arrow keys move between tiles; Enter acts; Escape cancels."></canvas>
         </div>
         <aside class="playtest-side" id="playtest-side" style="display:none">
           <div class="pt-stat"><span class="k">Outcome</span><span class="v" id="pt-outcome">—</span></div>
@@ -485,6 +625,12 @@
           <div class="pt-stat"><span class="k">Wave</span><span class="v" id="pt-wave">—</span></div>
           <div class="pt-stat"><span class="k">Enemies</span><span class="v" id="pt-enemies">—</span></div>
           <div class="pt-stat"><span class="k">Towers</span><span class="v" id="pt-towers-count">—</span></div>
+          <div class="pt-stat"><span class="k">Kills / Leaks</span><span class="v" id="pt-kills-leaks">—</span></div>
+          <div class="pt-stat"><span class="k">Objectives</span><span class="v" id="pt-objectives">—</span></div>
+          <div class="form-section-title pt-debug-title">Inspector</div>
+          <div id="pt-inspector" class="pt-inspector">Click Inspect, then choose a tower or enemy.</div>
+          <div class="form-section-title pt-debug-title">Event timeline</div>
+          <div id="pt-event-timeline" class="pt-event-timeline"></div>
           <div class="form-section-title" style="margin-top:6px">Build (click tower, then a tile)</div>
           <div class="pt-towers" id="pt-tower-list"></div>
           <div class="pt-msg" id="pt-msg">Choose a tower, click a buildable tile, then start the wave.</div>
@@ -496,72 +642,64 @@
     <section id="tab-balance" class="tab-panel" role="tabpanel">
       <div class="panel-header">
         <h2>Balance</h2>
-        <span class="text-muted" style="font-size:11.5px">Runs many strategies headlessly and grades each mission — the deterministic core an AI co-designer drives.</span>
-        <span style="flex:1"></span>
+        <label>Mission <select id="balance-mission"><option value="">All missions</option></select></label>
+        <label>Budget <select id="balance-seconds"><option value="300">300u</option><option value="600" selected>600u</option><option value="900">900u</option><option value="1200">1200u</option></select></label>
         <button id="btn-run-balance" class="btn btn-primary">Run analysis</button>
       </div>
       <div class="detail-panel" id="balance-results"></div>
     </section>
 
-    <section id="tab-ai" class="tab-panel" role="tabpanel">
-      <div class="panel-header">
-        <h2>AI Designer</h2>
-        <span class="text-muted" style="font-size:11.5px">Chat with a co-designer that inspects, simulates, diagnoses, and patches your project to hit a target balance.</span>
-        <span style="flex:1"></span>
-        <div class="ai-provider-controls">
-          <select id="ai-provider" class="btn btn-outline" title="AI provider" aria-label="AI provider">
-            <optgroup label="Account runtimes">
-              <option value="codex">Codex (ChatGPT)</option>
-              <option value="claude-code">Claude Code</option>
-            </optgroup>
-            <optgroup label="API keys">
-              <option value="anthropic">Anthropic API</option>
-              <option value="openai">OpenAI API</option>
-              <option value="openrouter">OpenRouter</option>
-            </optgroup>
-          </select>
-          <select id="ai-model" class="btn btn-outline" title="Model" aria-label="AI model"></select>
-          <button id="ai-model-add" class="btn-icon" type="button" title="Add custom model" aria-label="Add custom model">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-          </button>
-          <button id="ai-key-btn" class="btn btn-outline" title="Set provider API key">API key</button>
+    <section id="workbench-drawer" class="workbench-drawer" aria-label="Problems and activity" aria-hidden="true">
+      <div class="workbench-header">
+        <div class="workbench-tabs" role="tablist">
+          <button id="workbench-tab-problems" class="workbench-tab active" type="button" role="tab" aria-selected="true">Problems <span id="workbench-problem-count">0</span></button>
+          <button id="workbench-tab-activity" class="workbench-tab" type="button" role="tab" aria-selected="false">Activity <span id="workbench-activity-count">0</span></button>
         </div>
+        <button id="workbench-close" class="btn-icon" type="button" title="Close panel" aria-label="Close panel">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
       </div>
-      <div class="ai-shell">
-        <div id="ai-transcript" class="ai-transcript"></div>
-        <div id="ai-key-row" class="ai-key-row" hidden>
-          <span id="ai-key-label" class="ai-row-label">API key</span>
-          <input id="ai-key-input" type="password" class="mono" placeholder="API key" autocomplete="new-password">
-          <button id="ai-key-save" class="btn btn-primary">Save key</button>
-          <button id="ai-key-remove" class="btn btn-danger" type="button" hidden>Remove</button>
-          <button id="ai-key-close" class="btn-icon" type="button" title="Close" aria-label="Close API key editor">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-          </button>
-        </div>
-        <div id="ai-runtime-row" class="ai-runtime-row" hidden>
-          <span id="ai-runtime-indicator" class="ai-runtime-indicator" aria-hidden="true"></span>
-          <span id="ai-runtime-status" class="ai-runtime-status">Checking account...</span>
-          <button id="ai-runtime-connect" class="btn btn-primary" type="button">Connect</button>
-          <button id="ai-runtime-disconnect" class="btn btn-outline" type="button" hidden>Disconnect</button>
-          <span class="ai-runtime-privacy">OAuth stays inside the official runtime. TowerForge never receives or stores the token.</span>
-        </div>
-        <div id="ai-model-row" class="ai-model-row" hidden>
-          <span id="ai-model-label" class="ai-row-label">Model ID</span>
-          <input id="ai-model-input" type="text" class="mono" placeholder="provider/model-id" autocomplete="off" spellcheck="false">
-          <button id="ai-model-save" class="btn btn-primary" type="button">Add model</button>
-          <button id="ai-model-close" class="btn-icon" type="button" title="Close" aria-label="Close model editor">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-          </button>
-        </div>
-        <form id="ai-form" class="ai-input-row">
-          <textarea id="ai-input" rows="2" placeholder="e.g. Make tutorial_01 winnable but not trivial — target 60–80% win-rate."></textarea>
-          <button id="ai-send" class="btn btn-primary" type="submit">Send</button>
-          <button id="ai-stop" class="btn btn-outline" type="button" hidden>Stop</button>
-        </form>
-      </div>
+      <div id="workbench-body" class="workbench-body"></div>
     </section>
 
   </main>
+
+  <aside id="ai-dock" class="ai-dock" aria-hidden="true">
+    <div class="ai-dock-header">
+      <div>
+        <div class="ai-dock-title">AI Chat</div>
+        <div id="ai-dock-status" class="ai-dock-status">Choose a provider in Settings</div>
+      </div>
+      <button id="ai-new-chat" class="btn-icon" type="button" title="New chat" aria-label="New chat">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M12 7v6M9 10h6"/></svg>
+      </button>
+      <button id="ai-dock-close" class="btn-icon" type="button" title="Close AI Chat" aria-label="Close AI Chat">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="ai-chat-controls">
+      <select id="ai-mode" title="AI permission mode" aria-label="AI permission mode">
+        <option value="ask">Ask</option>
+        <option value="plan">Plan</option>
+        <option value="act">Act</option>
+      </select>
+      <select id="ai-provider" title="AI provider" aria-label="AI provider"></select>
+      <select id="ai-model" title="Model" aria-label="AI model"></select>
+      <select id="ai-reasoning" title="Reasoning effort" aria-label="Reasoning effort"></select>
+    </div>
+    <div id="ai-transcript" class="ai-transcript"></div>
+    <div id="ai-attachments" class="ai-attachments" hidden></div>
+    <form id="ai-form" class="ai-composer">
+      <input id="ai-file-input" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/*" multiple hidden>
+      <button id="ai-attach" class="btn-icon ai-attach" type="button" title="Attach image or video" aria-label="Attach image or video">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.6-9.6a4 4 0 0 1 5.7 5.7l-9.7 9.6a2 2 0 0 1-2.8-2.8l8.9-8.9"/></svg>
+      </button>
+      <textarea id="ai-input" rows="3" placeholder="Ask about the current project..."></textarea>
+      <button id="ai-send" class="btn btn-primary" type="submit">Send</button>
+      <button id="ai-stop" class="btn btn-outline" type="button" hidden>Stop</button>
+    </form>
+    <div class="ai-privacy-note">Only this prompt, selected attachments, and required TowerForge tool results are sent. Videos are sent as locally sampled frames without audio.</div>
+  </aside>
 </div>
 
 <!-- ── Toast container ──────────────────────────────────────────────────────── -->
@@ -571,7 +709,7 @@
 <div id="welcome-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Welcome to TowerForge Editor">
   <div class="overlay-panel welcome-panel">
     <div class="overlay-header">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+      <img src="/brand/towerforge-mark.svg" alt="" width="24" height="24">
       <h3>Welcome to TowerForge Editor</h3>
       <button id="btn-close-welcome" class="btn-icon" aria-label="Close">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -605,6 +743,22 @@
     <input id="cmdk-input" type="text" placeholder="Jump to an enemy, tower, mission… or run a command" autocomplete="off" spellcheck="false" aria-label="Command palette search">
     <div id="cmdk-results" class="cmdk-results" role="listbox"></div>
     <div class="cmdk-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> run</span><span><kbd>esc</kbd> close</span></div>
+  </div>
+</div>
+
+<!-- ── Content recipe picker ───────────────────────────────────────────────── -->
+<div id="recipe-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="recipe-title">
+  <div class="overlay-panel recipe-panel">
+    <div class="overlay-header">
+      <h3 id="recipe-title">Choose a recipe</h3>
+      <button id="recipe-close" class="btn-icon" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="overlay-body">
+      <p id="recipe-intro" class="recipe-intro"></p>
+      <div id="recipe-list" class="recipe-list"></div>
+    </div>
   </div>
 </div>
 
@@ -685,7 +839,7 @@
     <div class="overlay-body about-body">
       <div class="about-product">
         <div class="about-mark" aria-hidden="true">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+          <img src="/brand/towerforge-mark.svg" alt="" width="32" height="32">
         </div>
         <div>
           <strong>TowerForge Studio</strong>
@@ -730,6 +884,19 @@
       </button>
     </div>
     <div class="overlay-body" id="sim-results"></div>
+  </div>
+</div>
+
+<!-- ── Built game preview ──────────────────────────────────────────────────── -->
+<div id="build-preview-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="build-preview-title">
+  <div class="overlay-panel build-preview-panel">
+    <div class="overlay-header">
+      <h3 id="build-preview-title">Built Game Preview</h3>
+      <button id="build-preview-close" class="btn-icon" aria-label="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <iframe id="build-preview-frame" class="build-preview-frame" title="Built game" sandbox="allow-scripts allow-pointer-lock"></iframe>
   </div>
 </div>
 

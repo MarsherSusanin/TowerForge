@@ -22,6 +22,11 @@
     "sim": "node packages/cli/sim.mjs",
     "balance": "node packages/cli/balance.mjs",
     "build": "node packages/cli/build.mjs",
+    "package:web": "node packages/cli/package.mjs --kind web",
+    "project:export": "node packages/cli/project-pack.mjs export",
+    "project:import": "node packages/cli/project-pack.mjs import",
+    "themes:list": "node packages/cli/theme-pack.mjs list",
+    "themes:apply": "node packages/cli/theme-pack.mjs apply",
     "maps:compile": "node packages/cli/maps-compile.mjs",
     "migrate": "node packages/cli/migrate.mjs",
     "build:engine": "tsc -p packages/engine/tsconfig.build.json",
@@ -33,7 +38,9 @@
     "desktop:build": "npm --workspace @towerforge/desktop run build",
     "desktop:build:mac": "npm --workspace @towerforge/desktop run build -- --bundles dmg",
     "desktop:build:win": "npm --workspace @towerforge/desktop run build -- --bundles nsis,msi",
-    "desktop:build:linux": "npm --workspace @towerforge/desktop run build -- --bundles appimage,deb,rpm"
+    "desktop:build:linux": "npm --workspace @towerforge/desktop run build -- --bundles appimage,deb,rpm",
+    "brand:build": "node scripts/build-brand-assets.mjs",
+    "brand:icons": "npm --workspace @towerforge/desktop exec tauri icon -- ../../assets/brand/towerforge-app-icon.png"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.214",

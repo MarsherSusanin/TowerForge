@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-TowerForge Studio is currently a local browser UI backed by `packages/studio/server.mjs`. That server reuses the Node-side project loader, validation, map compiler, build pipeline, MCP tools, AI Designer loop, and filesystem writes. Rewriting those APIs into a native backend would duplicate the most sensitive project contracts before the desktop product surface is proven.
+TowerForge Studio is currently a local browser UI backed by `packages/studio/server.mjs`. That server reuses the Node-side project loader, validation, map compiler, build pipeline, MCP tools, AI Chat loop, and filesystem writes. Rewriting those APIs into a native backend would duplicate the most sensitive project contracts before the desktop product surface is proven.
 
 The repository already uses Tauri v2 scaffolds for exported games, but that path packages a built game bundle under a `.tdproj`. It does not package TowerForge Studio itself.
 

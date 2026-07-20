@@ -14,18 +14,42 @@ describe("mcp tool registry", () => {
       expect(typeof tool.name).toBe("string");
       expect(typeof tool.description).toBe("string");
       expect(tool.inputSchema?.type).toBe("object");
+      expect(["read_only", "compute_only", "write_local"]).toContain(tool.riskClass);
+      expect(typeof tool.sideEffect).toBe("string");
+      expect(tool.sideEffect).not.toBe("unspecified");
     }
     const names = TOOLS.map((t) => t.name);
     expect(names).toContain("validate_project");
+    expect(names).toContain("release_readiness");
+    expect(names).toContain("export_project_pack");
+    expect(names).toContain("inspect_project_pack");
+    expect(names).toContain("list_recipes");
+    expect(names).toContain("get_recipe");
+    expect(names).toContain("get_progression");
+    expect(names).toContain("dry_run_progression_patch");
     expect(names).toContain("simulate_mission");
+    expect(names).toContain("playtest_report");
     expect(names).toContain("build_project");
+    expect(names).toContain("package_web");
     expect(names).toContain("dry_run_balance_patch");
     expect(names).toContain("apply_validated_patch");
+    expect(names).toContain("apply_progression_patch");
     expect(names).toContain("set_enemy_stat");
     expect(names).toContain("bind_sprite");
+    expect(names).toContain("list_theme_packs");
+    expect(names).toContain("preview_theme_pack");
+    expect(names).toContain("apply_theme_pack");
+    expect(names).toContain("list_project_tree");
+    expect(names).toContain("get_tower_script");
+    expect(names).toContain("upsert_tower_script");
+    expect(names).toContain("bind_mission_music");
+    expect(names).toContain("import_asset");
     expect(names).toContain("upsert_entity");
+    expect(names).toContain("duplicate_entity");
     expect(names).toContain("delete_entity");
     expect(names).toContain("write_map");
+    expect(names).toContain("upsert_story_comic");
+    expect(names).toContain("set_battle_background");
     expect(TOOLS.find((t) => t.name === "apply_validated_patch")?.riskClass).toBe("write_local");
   });
 
@@ -38,6 +62,9 @@ describe("mcp tool registry", () => {
     expect(result.counts.missions).toBeGreaterThan(0);
     expect(result.counts.towers).toBeGreaterThan(0);
     expect(result.defaultMissionId).toBe("tutorial_01");
+    expect(result.progression.defaultDifficultyId).toBe("normal");
+    expect(result.progression.difficulties.map((item) => item.id)).toEqual(["story", "normal", "veteran"]);
+    expect(result.progression.metaUpgrades.map((item) => item.id)).toContain("reinforced_core");
   });
 
   it("validates the starter project cleanly", async () => {
@@ -46,23 +73,435 @@ describe("mcp tool registry", () => {
     expect(result.errorCount).toBe(0);
   });
 
+  it("reports production readiness through stable structured checks", async () => {
+    const result = await callTool("release_readiness", { projectDir: STARTER }, {});
+    expect(result.ok).toBe(true);
+    expect(result.checks.map((check) => check.id)).toEqual(["validation", "maps", "identity", "content", "build_targets"]);
+    expect(result.checks.every((check) => ["ok", "warning", "error"].includes(check.severity))).toBe(true);
+    expect(result.projectDir).toBe(STARTER);
+  });
+
+  it("exports and verifies a confined project handoff pack", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-pack-"));
+    try {
+      fs.cpSync(STARTER, projectDir, { recursive: true });
+      const exported = await callTool("export_project_pack", { projectDir, fileName: "handoff.tdpack" }, {});
+      expect(exported).toMatchObject({ ok: true, fileName: "handoff.tdpack", relativePath: ".towerforge/exports/handoff.tdpack" });
+      expect(exported.sha256).toMatch(/^[a-f0-9]{64}$/);
+      const inspected = await callTool("inspect_project_pack", { projectDir, fileName: "handoff.tdpack" }, {});
+      expect(inspected.sha256).toBe(exported.sha256);
+      expect(inspected.files.some((entry) => entry.path === "content/balance.json")).toBe(true);
+      await expect(callTool("export_project_pack", { projectDir, fileName: "../escape.tdpack" }, {})).rejects.toThrow(/basename/);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it("lists missions", async () => {
     const result = await callTool("list_missions", {}, { defaultProjectDir: STARTER });
     expect(result.missions.some((m) => m.id === "tutorial_01")).toBe(true);
   });
 
+  it("lists visual and audio catalogs without returning the whole visuals document", async () => {
+    const sprites = await callTool("list_entities", { projectDir: STARTER, collection: "visualSprites" }, {});
+    expect(sprites.entities.some((entry) => entry.id === "frontier_before_battle")).toBe(true);
+    expect(sprites.revision).toMatch(/^[a-f0-9]{12}$/);
+    const tracks = await callTool("list_entities", { projectDir: STARTER, collection: "musicTracks" }, {});
+    expect(tracks.entities).toEqual([]);
+    expect(tracks.revision).toBe(sprites.revision);
+  });
+
+  it("returns an evidence-backed playtest diagnosis", async () => {
+    const result = await callTool("playtest_report", { projectDir: STARTER, missionId: "tutorial_01", duration: 180 }, {});
+    expect(result.outcome).toBe("victory");
+    expect(result.diagnosis).toMatchObject({
+      status: "pass",
+      metrics: { kills: 20, leaks: 0, completedWaves: 3, totalWaves: 3 }
+    });
+    expect(result.diagnosis.enemyPressure).toContainEqual(expect.objectContaining({ enemyTypeId: "basic_grunt", killed: 16 }));
+    expect(TOOLS.find((tool) => tool.name === "playtest_report")?.riskClass).toBe("compute_only");
+  });
+
   it("describes the schema with no project context at all — pure metadata", async () => {
     const result = await callTool("describe_schema", {}, {});
+    expect(result.schemaVersion).toBe(2);
     expect(Object.keys(result.attackKinds).sort()).toEqual(
-      ["antiair", "pulse", "single", "splash", "sniper", "support", "support_buff"].sort()
+      ["antiair", "pipeline", "pulse", "single", "splash", "sniper", "support", "support_buff"].sort()
     );
     expect(result.attackKinds.splash.requiredFields.some((f) => f.name === "slowFactor" && f.lessThanOne)).toBe(true);
+    expect(result.towerPipeline.deliveryKinds).toEqual(["single", "multi", "area", "chain", "aura"]);
     // Ability presets are 3 named, engine-implemented shortcuts, but the ability id space itself
     // is open — abilityEffects documents the primitives a custom (non-preset) ability composes.
     expect(Object.keys(result.abilityPresets).sort()).toEqual(["freeze", "path_water", "strike"].sort());
     expect(result.abilityEffects.damage).toBeTruthy();
     expect(result.abilityEffects.status).toBeTruthy();
     expect(result.currencyRules.primaryRequired).toBe("coins");
+    expect(result.missionEconomy.sellRefundRatio.default).toBe(0.7);
+    expect(Object.keys(result.missionObjectives.victory)).toEqual(["clearWaves", "surviveSeconds", "killCount", "accumulateResource"]);
+    expect(result.simulationActions).toContain("sellTower");
+    expect(result.towerScript.scopes).toContain("tower");
+    expect(result.towerScript.actions.emitSignal.required.signal).toBe("safe identifier");
+    expect(result.towerScript.eventFields.enemyKilled).toContain("enemyTypeId");
+    expect(result.towerScript.limits.actionsPerTransaction).toBe(512);
+    expect(result.difficulty.multiplierFields.enemyHpMultiplier).toBe(">0 optional");
+    expect(result.metaProgression.effects.towerDamage).toBeTruthy();
+  });
+
+  it("returns focused schema domains for progressive discovery", async () => {
+    const scripts = await callTool("describe_schema", { domain: "scripts" }, {});
+    expect(scripts.requestedDomain).toBe("scripts");
+    expect(scripts.towerScript.actions.spawnEnemy).toBeTruthy();
+    expect(scripts).not.toHaveProperty("attackKinds");
+
+    const assets = await callTool("describe_schema", { domain: "assets" }, {});
+    expect(assets.assetAuthoring.bindings).toContain("bind_sprite");
+    expect(assets).not.toHaveProperty("metaProgression");
+  });
+
+  it("previews and applies a bundled theme through a guarded local write", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-theme-"));
+    try {
+      fs.cpSync(STARTER, projectDir, { recursive: true });
+      const listed = await callTool("list_theme_packs", {}, {});
+      expect(listed.packs.map((pack) => pack.id)).toEqual(expect.arrayContaining(["verdant-frontier", "frostbound-citadel"]));
+      const preview = await callTool("preview_theme_pack", { projectDir, packId: "frostbound-citadel" }, {});
+      expect(preview).toMatchObject({ ok: true, dryRun: true, pack: { id: "frostbound-citadel" } });
+      const applied = await callTool("apply_theme_pack", { projectDir, packId: "frostbound-citadel", ifRevision: preview.revision }, {});
+      expect(applied).toMatchObject({ ok: true, dryRun: false, pack: { id: "frostbound-citadel" } });
+      expect(fs.existsSync(path.join(projectDir, "assets/themes/frostbound-citadel/battle-background.png"))).toBe(true);
+      const visuals = JSON.parse(fs.readFileSync(path.join(projectDir, "content/visuals.json"), "utf8"));
+      expect(visuals.theme.id).toBe("frostbound-citadel");
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it("previews and applies difficulty/meta progression through a scoped guarded tool", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-progression-"));
+    try {
+      fs.cpSync(STARTER, projectDir, { recursive: true });
+      const current = await callTool("get_progression", { projectDir }, {});
+      expect(current.metaProgression.upgrades.reinforced_core).toBeTruthy();
+      const difficulties = current.difficulties.map((difficulty) => ({
+        ...difficulty,
+        ...(difficulty.id === "normal" ? { description: "Updated through MCP." } : {})
+      }));
+      const preview = await callTool("dry_run_progression_patch", { projectDir, difficulties }, {});
+      expect(preview).toMatchObject({ ok: true, dryRun: true, applied: ["difficulties"] });
+      expect(preview.diff.changes).toContainEqual(expect.objectContaining({ path: "difficulties[1].description", after: "Updated through MCP." }));
+
+      const applied = await callTool("apply_progression_patch", {
+        projectDir, difficulties, ifRevision: current.revision
+      }, {});
+      expect(applied).toMatchObject({ ok: true, written: true });
+      const balance = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8"));
+      expect(balance.difficulties.find((difficulty) => difficulty.id === "normal").description).toBe("Updated through MCP.");
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it("shares curated content recipes with agents and binds project references", async () => {
+    const listed = await callTool("list_recipes", { collection: "towers" }, {});
+    expect(listed.recipes.map((recipe) => recipe.id)).toContain("sniper");
+    expect(listed.recipes.map((recipe) => recipe.id)).toContain("pipeline_chain");
+
+    const pipeline = await callTool("get_recipe", {
+      projectDir: STARTER,
+      collection: "towers",
+      recipeId: "pipeline_chain"
+    }, {});
+    expect(pipeline.recipe.entity.attack).toMatchObject({
+      kind: "pipeline",
+      delivery: { kind: "chain" },
+      effects: [{ kind: "damage" }, { kind: "status" }]
+    });
+
+    const result = await callTool("get_recipe", {
+      projectDir: STARTER,
+      collection: "missions",
+      recipeId: "survival"
+    }, {});
+    expect(result.recipe.entity).toMatchObject({
+      id: "survival",
+      mapId: "tutorial_map",
+      waveSetId: "tutorial_waves",
+      objectives: { victory: [{ kind: "surviveSeconds", seconds: 180 }] }
+    });
+    expect(result.recipe.entity.buildTowerIds).toEqual(expect.arrayContaining(["arrow_tower", "cannon_tower"]));
+    expect(result.revision).toMatch(/^[a-f0-9]{12}$/);
+    expect(TOOLS.find((tool) => tool.name === "get_recipe")?.riskClass).toBe("read_only");
+  });
+});
+
+describe("mcp TowerScript tools", () => {
+  let projectDir;
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-scripts-"));
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+    fs.writeFileSync(path.join(projectDir, ".env"), "TOKEN=private\n");
+  });
+  afterEach(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+
+  it("lists a redacted project tree and reads a script by id", async () => {
+    const tree = await callTool("list_project_tree", { projectDir }, {});
+    expect(JSON.stringify(tree.nodes)).toContain("starter-gameplay.tower.json");
+    expect(JSON.stringify(tree.nodes)).not.toContain(".env");
+    const script = await callTool("get_tower_script", { projectDir, scriptId: "starter_gameplay" }, {});
+    expect(script.path).toBe("scripts/gameplay/starter-gameplay.tower.json");
+    expect(script.script.handlers.waveStarted).toHaveLength(1);
+  });
+
+  it("dry-runs and commits one guarded validated script", async () => {
+    const summary = await callTool("get_project_summary", { projectDir }, {});
+    const script = {
+      schemaVersion: 1, id: "kill_bonus", enabled: true,
+      bindings: [{ scope: "global" }],
+      handlers: { enemyKilled: [{ actions: [{ action: "grantResource", resourceId: "coins", amount: 1 }] }] }
+    };
+    const preview = await callTool("upsert_tower_script", {
+      projectDir, path: "scripts/gameplay/kill-bonus.tower.json", script, dryRun: true, ifRevision: summary.revisions.scripts
+    }, {});
+    expect(preview).toMatchObject({ ok: true, dryRun: true, written: false });
+    const committed = await callTool("upsert_tower_script", {
+      projectDir, path: "scripts/gameplay/kill-bonus.tower.json", script, ifRevision: preview.revision
+    }, {});
+    expect(committed).toMatchObject({ ok: true, written: true, scriptId: "kill_bonus" });
+    expect(fs.existsSync(path.join(projectDir, "scripts", "gameplay", "kill-bonus.tower.json"))).toBe(true);
+    const stale = await callTool("upsert_tower_script", {
+      projectDir, path: "scripts/gameplay/kill-bonus.tower.json", script, ifRevision: preview.revision
+    }, {});
+    expect(stale).toMatchObject({ ok: false, conflict: true, written: false });
+  });
+});
+
+describe("mcp entity reads", () => {
+  it("lists compact entity summaries without returning the full collection", async () => {
+    const result = await callTool("list_entities", {
+      projectDir: STARTER,
+      collection: "enemies"
+    }, {});
+    expect(result.collection).toBe("enemies");
+    expect(result.entities).toContainEqual(expect.objectContaining({ id: "basic_grunt" }));
+    expect(result.entities.find((entity) => entity.id === "basic_grunt")).not.toHaveProperty("reward");
+    expect(result.revision).toMatch(/^[a-f0-9]{12}$/);
+  });
+
+  it("reads the normalized effective entity and its guarded-write revision", async () => {
+    const result = await callTool("get_entity", {
+      projectDir: STARTER,
+      collection: "enemies",
+      id: "basic_grunt"
+    }, {});
+    expect(result).toMatchObject({
+      collection: "enemies",
+      id: "basic_grunt",
+      source: "normalized_effective",
+      entity: { id: "basic_grunt" }
+    });
+    expect(result.entity.maxHp).toBeGreaterThan(0);
+    expect(result.revision).toMatch(/^[a-f0-9]{12}$/);
+  });
+
+  it("reads map sources by source filename", async () => {
+    const result = await callTool("get_entity", {
+      projectDir: STARTER,
+      collection: "mapSources",
+      id: "tutorial_map.tmj"
+    }, {});
+    expect(result.entity).toMatchObject({ width: 15, height: 20 });
+    expect(result.revision).toBeNull();
+  });
+
+  it("reads compact narrative entities with independent revisions", async () => {
+    const stories = await callTool("list_entities", { projectDir: STARTER, collection: "storyComics" }, {});
+    expect(stories.entities).toContainEqual(expect.objectContaining({ id: "frontier_briefing", missionId: "tutorial_01", panelCount: 2 }));
+    expect(stories.revision).toMatch(/^[a-f0-9]{12}$/);
+    const backgrounds = await callTool("get_entity", { projectDir: STARTER, collection: "battleBackgrounds", id: "tutorial_01" }, {});
+    expect(backgrounds.entity).toMatchObject({ spriteId: "frontier_before_battle" });
+    expect(backgrounds.revision).toMatch(/^[a-f0-9]{12}$/);
+  });
+
+  it("rejects unknown collections and missing ids", async () => {
+    await expect(callTool("list_entities", { projectDir: STARTER, collection: "secrets" }, {}))
+      .rejects.toThrow(/Unknown entity collection/);
+    await expect(callTool("get_entity", { projectDir: STARTER, collection: "towers", id: "missing" }, {}))
+      .rejects.toThrow(/was not found/);
+  });
+});
+
+describe("mcp narrative writes", () => {
+  it("previews and commits narrow validated story/background changes", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-narrative-"));
+    try {
+      fs.cpSync(STARTER, projectDir, { recursive: true });
+      const summary = await callTool("get_project_summary", { projectDir }, {});
+      const comic = {
+        missionId: "tutorial_01",
+        trigger: "afterVictory",
+        replay: "once",
+        panels: [{ speaker: "Commander", text: "The frontier is secure." }]
+      };
+      const preview = await callTool("upsert_story_comic", {
+        projectDir,
+        comicId: "frontier_victory",
+        comic,
+        dryRun: true,
+        ifRevision: summary.revisions.storyComics
+      }, {});
+      expect(preview).toMatchObject({ ok: true, written: false, dryRun: true });
+      expect(preview.diff.changes.some((change) => change.path.includes("frontier_victory"))).toBe(true);
+
+      const committed = await callTool("upsert_story_comic", {
+        projectDir,
+        comicId: "frontier_victory",
+        comic,
+        ifRevision: preview.revision
+      }, {});
+      expect(committed).toMatchObject({ ok: true, written: true, rolledBack: false });
+      expect(JSON.parse(fs.readFileSync(path.join(projectDir, "content", "story-comics.json"), "utf8")).comics.frontier_victory).toMatchObject(comic);
+
+      const backgroundPreview = await callTool("set_battle_background", {
+        projectDir,
+        missionId: "tutorial_01",
+        background: { color: "#162016", opacity: 0.5 },
+        dryRun: true
+      }, {});
+      expect(backgroundPreview).toMatchObject({ ok: true, written: false, dryRun: true });
+      const backgroundCommit = await callTool("set_battle_background", {
+        projectDir,
+        missionId: "tutorial_01",
+        background: { color: "#162016", opacity: 0.5 },
+        ifRevision: backgroundPreview.revision
+      }, {});
+      expect(backgroundCommit).toMatchObject({ ok: true, written: true });
+
+      const beforeInvalid = fs.readFileSync(path.join(projectDir, "content", "story-comics.json"), "utf8");
+      const invalid = await callTool("upsert_story_comic", {
+        projectDir,
+        comicId: "broken",
+        comic: { missionId: "missing", panels: [] },
+        ifRevision: committed.revision
+      }, {});
+      expect(invalid).toMatchObject({ ok: false, written: false });
+      expect(fs.readFileSync(path.join(projectDir, "content", "story-comics.json"), "utf8")).toBe(beforeInvalid);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("mcp duplicate_entity", () => {
+  let projectDir;
+
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-duplicate-"));
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+  });
+
+  afterEach(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+
+  it("duplicates one authored entity through the guarded write pipeline", async () => {
+    const summary = await callTool("get_project_summary", { projectDir }, {});
+    const result = await callTool("duplicate_entity", {
+      projectDir,
+      collection: "towers",
+      sourceId: "arrow_tower",
+      targetId: "arrow_tower_mk2",
+      label: "Arrow Tower Mk II",
+      ifRevision: summary.revisions.balance
+    }, {});
+    expect(result).toMatchObject({ ok: true, written: true, duplicated: { sourceId: "arrow_tower", targetId: "arrow_tower_mk2" } });
+    const duplicate = await callTool("get_entity", { projectDir, collection: "towers", id: "arrow_tower_mk2" }, {});
+    expect(duplicate.entity).toMatchObject({ id: "arrow_tower_mk2", label: "Arrow Tower Mk II", attack: { kind: "single" } });
+    expect(result.backupPath).toBeTruthy();
+  });
+
+  it("refuses collisions without touching the project", async () => {
+    const before = fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8");
+    await expect(callTool("duplicate_entity", {
+      projectDir, collection: "enemies", sourceId: "basic_grunt", targetId: "swift_runner"
+    }, {})).rejects.toThrow(/already exists/);
+    expect(fs.readFileSync(path.join(projectDir, "content", "balance.json"), "utf8")).toBe(before);
+  });
+});
+
+describe("mcp import_asset", () => {
+  let projectDir;
+
+  beforeEach(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-asset-"));
+    fs.cpSync(STARTER, projectDir, { recursive: true });
+    fs.mkdirSync(path.join(projectDir, "imports"), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, "imports", "tower.png"), "mcp asset", "utf8");
+    fs.writeFileSync(path.join(projectDir, "imports", "frontier.ogg"), "mcp music", "utf8");
+  });
+
+  afterEach(() => fs.rmSync(projectDir, { recursive: true, force: true }));
+
+  it("imports only a project-local file and returns a guarded visuals diff", async () => {
+    const summary = await callTool("get_project_summary", { projectDir }, {});
+    const result = await callTool("import_asset", {
+      projectDir,
+      sourcePath: "imports/tower.png",
+      targetPath: "mcp/tower.png",
+      id: "mcp_tower",
+      kind: "sprite",
+      ifRevision: summary.revisions.visuals
+    }, {});
+    expect(result).toMatchObject({ ok: true, written: true, asset: { id: "mcp_tower", kind: "sprite", path: "assets/mcp/tower.png" } });
+    expect(result.diff.changes.some((change) => change.path.includes("sprites.mcp_tower"))).toBe(true);
+    expect(fs.readFileSync(path.join(projectDir, "assets", "mcp", "tower.png"), "utf8")).toBe("mcp asset");
+  });
+
+  it("rejects traversal before creating an asset", async () => {
+    await expect(callTool("import_asset", {
+      projectDir, sourcePath: "../outside.png", targetPath: "bad.png", kind: "sprite"
+    }, {})).rejects.toThrow(/must not contain/);
+    expect(fs.existsSync(path.join(projectDir, "assets", "bad.png"))).toBe(false);
+  });
+
+  it("imports and dry-runs a mission music binding before a guarded commit", async () => {
+    const summary = await callTool("get_project_summary", { projectDir }, {});
+    const imported = await callTool("import_asset", {
+      projectDir,
+      sourcePath: "imports/frontier.ogg",
+      targetPath: "music/frontier.ogg",
+      id: "frontier",
+      kind: "music",
+      volume: 0.4,
+      ifRevision: summary.revisions.visuals
+    }, {});
+    expect(imported).toMatchObject({ ok: true, written: true, asset: { id: "frontier", kind: "music" } });
+
+    const preview = await callTool("bind_mission_music", {
+      projectDir,
+      missionId: "tutorial_01",
+      trackId: "frontier",
+      dryRun: true,
+      ifRevision: imported.revision
+    }, {});
+    expect(preview).toMatchObject({ ok: true, written: false, dryRun: true, binding: { missionId: "tutorial_01", trackId: "frontier" } });
+    expect(preview.diff.changes.some((change) => change.path.includes("musicByMission.tutorial_01"))).toBe(true);
+
+    const committed = await callTool("bind_mission_music", {
+      projectDir,
+      missionId: "tutorial_01",
+      trackId: "frontier",
+      ifRevision: preview.revision
+    }, {});
+    expect(committed).toMatchObject({ ok: true, written: true, binding: { missionId: "tutorial_01", trackId: "frontier" } });
+    const visuals = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "visuals.json"), "utf8"));
+    expect(visuals.audio.musicByMission.tutorial_01).toBe("frontier");
+  });
+
+  it("rejects unknown music tracks without touching visuals", async () => {
+    const visualsPath = path.join(projectDir, "content", "visuals.json");
+    const before = fs.readFileSync(visualsPath, "utf8");
+    await expect(callTool("bind_mission_music", {
+      projectDir, missionId: "tutorial_01", trackId: "missing"
+    }, {})).rejects.toThrow(/not found/);
+    expect(fs.readFileSync(visualsPath, "utf8")).toBe(before);
   });
 });
 

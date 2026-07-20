@@ -1,15 +1,18 @@
 import { type GameContentRegistry } from "../content/registry.js";
 import { TowerDefenseGame } from "./TowerDefenseGame.js";
 import type { ActionResult, GameSnapshot, HexCoord, MissionAbilityId, TowerTargetMode } from "./types.js";
+import type { TowerScriptJson } from "../scripting/types.js";
 
 export type SimulationAction =
   | { type: "tick"; units: number }
   | { type: "startWave" }
   | { type: "placeTower"; towerTypeId: string; coord: HexCoord }
   | { type: "moveTower"; towerId: string; coord: HexCoord }
+  | { type: "sellTower"; towerId: string }
   | { type: "upgradeTower"; towerId: string }
   | { type: "setTargetMode"; towerId: string; mode: TowerTargetMode }
-  | { type: "useAbility"; abilityId: MissionAbilityId; center: HexCoord };
+  | { type: "useAbility"; abilityId: MissionAbilityId; center: HexCoord }
+  | { type: "emitSignal"; signal: string; payload?: TowerScriptJson };
 
 export interface SimulationActionResult {
   action: SimulationAction;
@@ -44,6 +47,9 @@ export function applySimulationAction(game: TowerDefenseGame, action: Simulation
   if (action.type === "moveTower") {
     return game.moveTower(action.towerId, action.coord);
   }
+  if (action.type === "sellTower") {
+    return game.sellTower(action.towerId);
+  }
   if (action.type === "upgradeTower") {
     return game.upgradeTower(action.towerId);
   }
@@ -52,6 +58,9 @@ export function applySimulationAction(game: TowerDefenseGame, action: Simulation
   }
   if (action.type === "useAbility") {
     return game.useAbility(action.abilityId, action.center);
+  }
+  if (action.type === "emitSignal") {
+    return game.emitScriptSignal(action.signal, action.payload);
   }
   return { ok: false, reason: "Unknown simulation action." };
 }

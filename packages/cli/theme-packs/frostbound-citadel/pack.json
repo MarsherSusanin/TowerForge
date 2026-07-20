@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "id": "frostbound-citadel",
+  "label": "Frostbound Citadel",
+  "description": "An icy fortress battlefield balanced by charcoal stone and warm brass highlights.",
+  "provenance": {
+    "kind": "generated",
+    "generator": "OpenAI image generation",
+    "created": "2026-07-20",
+    "thirdPartySource": false
+  },
+  "asset": {
+    "source": "assets/battle-background.png",
+    "spriteId": "theme_frostbound_citadel_background"
+  },
+  "background": {
+    "color": "#101923",
+    "opacity": 0.48
+  },
+  "theme": {
+    "ui": {
+      "bg": "#0f151b",
+      "surface": "#182129",
+      "panel": "#202b34",
+      "border": "#455664",
+      "text": "#f2f6f7",
+      "muted": "#a8b7c0",
+      "accent": "#79c8d3",
+      "path": "#596a76",
+      "danger": "#d66f62",
+      "water": "#4d9cb2"
+    },
+    "renderer": {
+      "bg": "#0f151b",
+      "buildable": "#24343b",
+      "path": "#596a76",
+      "water": "#4d9cb2",
+      "blocked": "#283039",
+      "spawn": "#9a7838",
+      "core": "#3d8790",
+      "tower": "#79c8d3",
+      "towerStroke": "#f2f6f7",
+      "danger": "#d66f62"
+    }
+  }
+}
