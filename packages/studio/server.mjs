@@ -84,7 +84,7 @@ function loadAppInfo() {
       name: "TowerForge Studio",
       version: packageInfo.version || "0.1.0",
       studioName: packageInfo.towerforge?.studioName || "Lindforge Studios",
-      sourceUrl: String(repository || "https://github.com/MarsherSusanin/TowerForge").replace(/^git\+/, "").replace(/\.git$/, ""),
+      sourceUrl: String(repository || "https://github.com/Lindforge-Studios/TowerForge").replace(/^git\+/, "").replace(/\.git$/, ""),
       siteUrl: packageInfo.homepage || "https://lindforge.com",
       telegramUrl: packageInfo.towerforge?.telegram || "https://t.me/lindforge"
     };
@@ -93,7 +93,7 @@ function loadAppInfo() {
       name: "TowerForge Studio",
       version: "0.1.0",
       studioName: "Lindforge Studios",
-      sourceUrl: "https://github.com/MarsherSusanin/TowerForge",
+      sourceUrl: "https://github.com/Lindforge-Studios/TowerForge",
       siteUrl: "https://lindforge.com",
       telegramUrl: "https://t.me/lindforge"
     };

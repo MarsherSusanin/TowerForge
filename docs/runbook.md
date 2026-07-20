@@ -85,7 +85,7 @@ For a no-server handoff, run `npm run build -- --single-file` and open `dist/ind
 | `OPENAI_BASE_URL` | no | Overrides the AI Chat OpenAI base URL, default `https://api.openai.com/v1`. |
 | `OPENROUTER_BASE_URL` | no | Overrides the AI Chat OpenRouter base URL, default `https://openrouter.ai/api/v1`. |
 
-Packaged Studio builds set internal desktop variables such as `TOWERFORGE_DESKTOP`, `TOWERFORGE_RUNTIME_ROOT`, `TOWERFORGE_USER_DATA_DIR`, and `TOWERFORGE_SESSION_TOKEN`. These are runtime diagnostics only; normal users should not need to set them manually.
+Packaged Studio builds set internal desktop variables such as `TOWERFORGE_DESKTOP`, `TOWERFORGE_BUNDLED_RUNTIME`, `TOWERFORGE_RUNTIME_ROOT`, `TOWERFORGE_USER_DATA_DIR`, and `TOWERFORGE_SESSION_TOKEN`. `TOWERFORGE_DESKTOP` enables loopback/session security, while `TOWERFORGE_BUNDLED_RUNTIME` requires the precompiled engine shipped in the app. These are runtime diagnostics only; normal users should not need to set them manually.
 
 Configure AI under `Settings > AI Connections`; provider, model, and reasoning defaults are under `Settings > AI Chat Defaults`. Open the right-side chat from the top bar, sidebar, command palette, or native `Project > AI Chat` command. AI Chat has two authentication paths:
 
@@ -125,21 +125,16 @@ Deployable web-game artifacts are the static bundle from `npm run build`, its op
 - macOS: `packages/desktop/src-tauri/target/release/bundle/dmg/*.dmg`
 - Linux: `packages/desktop/src-tauri/target/release/bundle/appimage/*.AppImage`, `packages/desktop/src-tauri/target/release/bundle/deb/*.deb`, and `packages/desktop/src-tauri/target/release/bundle/rpm/*.rpm`
 
-CI is configured in `.github/workflows/ci.yml` for local-alpha quality gates. `.github/workflows/desktop-release.yml` builds unsigned desktop artifacts on Windows, macOS, and Ubuntu. Production macOS distribution requires Developer ID signing plus notarization; production Windows distribution requires a code-signing certificate.
+CI is configured in `.github/workflows/ci.yml` for local-alpha quality gates. `.github/workflows/desktop-release.yml` builds unsigned desktop artifacts on Windows, macOS, and Ubuntu. A manual run uploads a consolidated `towerforge-release-candidate` Actions artifact. Pushing a matching `vX.Y.Z` tag additionally publishes that candidate as a GitHub pre-release after version, installer, and checksum validation. Production macOS distribution requires Developer ID signing plus notarization; production Windows distribution requires a code-signing certificate.
 
-Public desktop releases follow [the desktop release policy](releasing.md). Until signing is configured, publish them as GitHub pre-releases with `Unsigned build` in the title. After building from the committed source and writing the final hash into both `SHA256SUMS` and the release notes, publish with:
+Public desktop releases follow [the desktop release policy](releasing.md). Until signing is configured, they remain GitHub pre-releases with `Unsigned build` in the title. To inspect a cross-platform candidate without publishing, run **Actions > Unsigned Desktop Builds > Run workflow** against the intended commit. To publish, merge the release commit, then create and push an annotated tag whose version matches all desktop manifests:
 
 ```bash
-gh release create <tag> \
-  <installer-path> \
-  <sha256sums-path> \
-  --repo MarsherSusanin/TowerForge \
-  --prerelease \
-  --title "TowerForge <tag> - Unsigned build" \
-  --notes-file <release-notes-path>
+git tag -a vX.Y.Z -m "TowerForge vX.Y.Z"
+git push origin vX.Y.Z
 ```
 
-The release operator must then download both GitHub-hosted assets, recalculate the installer checksum, and verify the tag and source links. GitHub Actions artifacts are not a substitute for a GitHub Release.
+The workflow refuses to overwrite an existing release. After publication, the release operator must download all GitHub-hosted installers and `SHA256SUMS`, recalculate every checksum, run `hdiutil verify` for the DMG on macOS, and verify the tag, commit, and source links. GitHub Actions artifacts are build evidence, not a substitute for the published GitHub Release.
 
 ## Rollback
 

@@ -8,6 +8,7 @@ import { expect, test } from "@playwright/test";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../..");
+const appVersion = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version;
 const studioPort = 5184;
 const playerPort = 5185;
 const studioUrl = `http://127.0.0.1:${studioPort}`;
@@ -409,12 +410,12 @@ test("sidebar exposes app info and persists its collapsed state", async ({ page 
   });
   await page.goto(studioUrl);
 
-  await expect(page.locator("#sidebar-version")).toHaveText("v0.1.0");
+  await expect(page.locator("#sidebar-version")).toHaveText(`v${appVersion}`);
   await expect(page.locator(".sidebar-copyright")).toHaveText("© Lindforge Studios");
   await page.locator("#sidebar-about").click();
   await expect(page.locator("#about-overlay")).toBeVisible();
-  await expect(page.locator("#about-version")).toHaveText("Version 0.1.0");
-  await expect(page.locator("#about-source-link")).toHaveAttribute("href", "https://github.com/MarsherSusanin/TowerForge");
+  await expect(page.locator("#about-version")).toHaveText(`Version ${appVersion}`);
+  await expect(page.locator("#about-source-link")).toHaveAttribute("href", "https://github.com/Lindforge-Studios/TowerForge");
   await expect(page.locator("#about-site-link")).toHaveAttribute("href", "https://lindforge.com");
   await expect(page.locator("#about-telegram-link")).toHaveAttribute("href", "https://t.me/lindforge");
   await page.locator("#about-close").click();

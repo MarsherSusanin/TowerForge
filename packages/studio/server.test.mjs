@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../..");
+const rootPackage = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 const PORT = 5197;
 const BASE = `http://127.0.0.1:${PORT}`;
 
@@ -49,12 +50,12 @@ describe("studio server origin/host guard", () => {
     expect(res.status).toBe(200);
     expect(info).toMatchObject({
       name: "TowerForge Studio",
-      version: "0.1.0",
+      version: rootPackage.version,
       studioName: "Lindforge Studios",
       siteUrl: "https://lindforge.com",
       telegramUrl: "https://t.me/lindforge"
     });
-    expect(info.sourceUrl).toBe("https://github.com/MarsherSusanin/TowerForge");
+    expect(info.sourceUrl).toBe("https://github.com/Lindforge-Studios/TowerForge");
   });
 
   it("allows a same-origin request that also sends a matching Origin header", async () => {

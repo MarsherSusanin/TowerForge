@@ -17,7 +17,7 @@ TowerForge is an open-source, content-agnostic constructor for 2D hex tower-defe
 
 ## Downloads
 
-Desktop builds are published on [GitHub Releases](https://github.com/MarsherSusanin/TowerForge/releases). Current alpha builds are explicitly marked **Unsigned build**. Verify the downloaded installer against the attached `SHA256SUMS` file before opening it. macOS installation notes and the unsigned-distribution policy live in [docs/releasing.md](docs/releasing.md).
+Desktop builds are published on [GitHub Releases](https://github.com/Lindforge-Studios/TowerForge/releases). Current alpha builds are explicitly marked **Unsigned build**. Verify the downloaded installer against the attached `SHA256SUMS` file before opening it. macOS installation notes and the unsigned-distribution policy live in [docs/releasing.md](docs/releasing.md).
 
 ## Product surface
 

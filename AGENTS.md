@@ -57,7 +57,7 @@ Run the relevant checks before declaring work complete:
 
 - MUST tag the exact source commit used to build every published desktop artifact.
 - MUST mark macOS releases as `Unsigned build` and GitHub pre-releases until Developer ID signing and notarization are configured.
-- MUST attach both the installer and `SHA256SUMS`, and MUST repeat each SHA-256 value in the release notes.
+- MUST attach every platform installer and `SHA256SUMS`, and MUST repeat each SHA-256 value in the release notes.
 - MUST link the release to its git tag and tagged source tree.
 - MUST NOT recommend `xattr -d`, disabling Gatekeeper, or lowering system security. Direct macOS users only to System Settings > Privacy & Security > Open Anyway.
 - MUST follow `docs/releasing.md` for asset names, verification, publication, rollback, and incident handling.

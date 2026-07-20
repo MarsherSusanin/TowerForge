@@ -178,6 +178,7 @@ fn start_studio(
     command = command.args(args);
     command = command.env("PORT", "0");
     command = command.env("TOWERFORGE_DESKTOP", "1");
+    command = command.env("TOWERFORGE_BUNDLED_RUNTIME", "1");
     command = command.env(
         "TOWERFORGE_RUNTIME_ROOT",
         runtime_root.to_string_lossy().to_string(),
@@ -1186,7 +1187,7 @@ mod tests {
     #[test]
     fn allows_only_expected_https_link_hosts() {
         assert!(is_allowed_external_url(
-            "https://github.com/MarsherSusanin/TowerForge"
+            "https://github.com/Lindforge-Studios/TowerForge"
         ));
         assert!(is_allowed_external_url("https://lindforge.com"));
         assert!(is_allowed_external_url("https://t.me/lindforge"));

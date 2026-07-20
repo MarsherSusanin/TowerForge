@@ -12,7 +12,9 @@ import { readTowerScriptFiles } from "./project-scripts.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const repoRoot = path.resolve(process.env["TOWERFORGE_RUNTIME_ROOT"] || path.resolve(__dirname, "../../.."));
-const BUNDLED_RUNTIME = process.env["TOWERFORGE_DESKTOP"] === "1" || process.env["TOWERFORGE_BUNDLED_RUNTIME"] === "1";
+// Desktop security mode is also used by source-level integration tests. Only the explicit
+// bundled-runtime flag may disable engine compilation and require the packaged engine dist.
+const BUNDLED_RUNTIME = process.env["TOWERFORGE_BUNDLED_RUNTIME"] === "1";
 
 export function resolveProjectDir(explicitDir, args = process.argv.slice(2)) {
   if (explicitDir) return path.resolve(explicitDir);
