@@ -52,6 +52,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run build:engine
       - run: npm run validate
+      - name: Smoke-test release assembler import
+        run: node -e "import('./packages/desktop/scripts/prepare-release.mjs')"
       - run: npm run test
 
       - name: Build desktop bundles
