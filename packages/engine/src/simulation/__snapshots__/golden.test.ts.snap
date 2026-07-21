@@ -23,6 +23,10 @@ exports[`determinism (Wave A safety net) > matches the committed golden snapshot
   "difficultyId": "normal",
   "difficultyLabel": "Normal",
   "enemies": [],
+  "grid": {
+    "kind": "hex",
+    "layout": "odd-r",
+  },
   "killCount": 4,
   "killCountByEnemyType": {
     "frost": 2,
@@ -30,6 +34,7 @@ exports[`determinism (Wave A safety net) > matches the committed golden snapshot
   },
   "lastEvents": [],
   "leakCount": 0,
+  "mapId": "lane",
   "maxCoreHp": 30,
   "missionElapsed": 8.099999999999984,
   "missionId": "golden",
@@ -145,6 +150,7 @@ exports[`determinism (Wave A safety net) > matches the committed golden snapshot
   "startedWaveCount": 2,
   "sunlightTiles": [],
   "temporaryWaterTiles": [],
+  "terrainOverrides": [],
   "tiles": [
     {
       "q": 0,

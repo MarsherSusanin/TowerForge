@@ -25,6 +25,7 @@ import {
 import { importProjectAsset } from "../cli/lib/assets.mjs";
 import { compileMapSources, writeCompiledMaps, writeMapSource } from "../cli/lib/map-compiler.mjs";
 import { normalizeVisuals } from "../cli/lib/project-schema.mjs";
+import { previewTiledTilesetImport } from "../cli/lib/tileset-importer.mjs";
 import { agentClientConfigs, writeProjectClientConfig } from "../cli/lib/agent-connect.mjs";
 import { writeRunTrace } from "../cli/lib/trace.mjs";
 import { contentRecipeContext, listContentRecipes, materializeContentRecipe } from "../cli/lib/content-recipes.mjs";
@@ -116,6 +117,12 @@ function writeJsonAtomic(filePath, data) {
   fs.renameSync(tmp, filePath);
 }
 
+function writeBytesAtomic(filePath, bytes) {
+  const tmp = filePath + ".tmp." + process.pid;
+  fs.writeFileSync(tmp, bytes);
+  fs.renameSync(tmp, filePath);
+}
+
 /** Content-hash guard: SHA-256 of the raw file bytes. */
 function fileHash(filePath) {
   try {
@@ -163,6 +170,78 @@ function backupFile(filePath) {
   ensureDir(SESSION_DIR);
   const dest = path.join(SESSION_DIR, path.basename(filePath) + ".bak");
   try { fs.copyFileSync(filePath, dest); } catch { /* ignore */ }
+}
+
+function projectAssetPath(assetsRoot, imagePath) {
+  const root = String(assetsRoot || "assets").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const image = String(imagePath || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  return image === root || image.startsWith(`${root}/`) ? image : `${root}/${image}`;
+}
+
+function resolveTilesetImagePath(relativePath, { createParent = false } = {}) {
+  const projectRoot = path.resolve(PROJECT_DIR);
+  const absolute = path.resolve(projectRoot, ...String(relativePath).split("/"));
+  const projectPrefix = `${projectRoot}${path.sep}`;
+  if (!absolute.startsWith(projectPrefix)) throw new Error("Tileset image escapes the active project.");
+  const relative = path.relative(projectRoot, absolute);
+  let cursor = projectRoot;
+  for (const segment of path.dirname(relative).split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, segment);
+    if (fs.existsSync(cursor) && fs.lstatSync(cursor).isSymbolicLink()) throw new Error("Tileset image path contains a symlink.");
+  }
+  if (createParent) ensureDir(path.dirname(absolute));
+  if (fs.existsSync(path.dirname(absolute))) {
+    const realParent = fs.realpathSync(path.dirname(absolute));
+    const realProject = fs.realpathSync(projectRoot);
+    if (realParent !== realProject && !realParent.startsWith(`${realProject}${path.sep}`)) throw new Error("Tileset image parent escapes the active project.");
+  }
+  if (fs.existsSync(absolute) && fs.lstatSync(absolute).isSymbolicLink()) throw new Error("Tileset image must not be a symlink.");
+  return absolute;
+}
+
+function pngDimensions(bytes) {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (bytes.length < 24 || !bytes.subarray(0, 8).equals(signature) || bytes.toString("ascii", 12, 16) !== "IHDR") {
+    throw new Error("Tileset image is not a valid PNG file.");
+  }
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  if (width < 1 || height < 1 || width > 16384 || height > 16384 || width * height > 64_000_000) {
+    throw new Error("Tileset PNG dimensions are outside the supported limits.");
+  }
+  return { width, height };
+}
+
+function decodeTilesetImage(image, expectedName) {
+  if (image === undefined || image === null) return null;
+  if (!image || typeof image !== "object" || Array.isArray(image)) throw new Error("Tileset image upload must be an object.");
+  const name = String(image.name ?? "");
+  if (path.basename(name) !== name || !/\.png$/i.test(name)) throw new Error("Tileset image upload must have a simple .png filename.");
+  if (path.basename(expectedName) !== name) throw new Error(`Selected PNG must be named ${path.basename(expectedName)} to match the Tiled descriptor.`);
+  if (image.mimeType && image.mimeType !== "image/png") throw new Error("Tileset image upload must use image/png.");
+  const data = String(image.data ?? "");
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new Error("Tileset image upload is not valid base64.");
+  const bytes = Buffer.from(data, "base64");
+  if (bytes.length === 0 || bytes.length > 10 * 1024 * 1024) throw new Error("Tileset PNG must be between 1 byte and 10 MB.");
+  return { bytes, ...pngDimensions(bytes) };
+}
+
+function validateTilesetImageGeometry(preview, state) {
+  if (!state?.exists && !state?.uploaded) return;
+  if (state.width < preview.source.expectedWidth || state.height < preview.source.expectedHeight) {
+    throw new Error(`Tileset PNG is ${state.width}x${state.height}, but slicing requires at least ${preview.source.expectedWidth}x${preview.source.expectedHeight}.`);
+  }
+  if (preview.source.declaredImageWidth && preview.source.declaredImageWidth !== state.width) throw new Error("Tileset PNG width does not match the Tiled descriptor.");
+  if (preview.source.declaredImageHeight && preview.source.declaredImageHeight !== state.height) throw new Error("Tileset PNG height does not match the Tiled descriptor.");
+}
+
+function inspectLocalTilesetImage(relativePath) {
+  const absolute = resolveTilesetImagePath(relativePath);
+  if (!fs.existsSync(absolute)) return { exists: false };
+  const stat = fs.statSync(absolute);
+  if (!stat.isFile() || !/\.png$/i.test(absolute)) throw new Error("Tileset image must be a local PNG file.");
+  const bytes = fs.readFileSync(absolute);
+  return { exists: true, bytes: stat.size, ...pngDimensions(bytes) };
 }
 
 // ── Project loader ────────────────────────────────────────────────────────────
@@ -1227,7 +1306,7 @@ const server = http.createServer(async (req, res) => {
       const balance      = fs.existsSync(balancePath)  ? readJson(balancePath)  : {};
       let balanceChanged = false;
 
-      const balanceKeys = ["enemies", "towers", "waveSets", "missions", "abilities", "constants", "defaultMissionId", "currencies", "defaultDifficultyId", "difficulties", "metaProgression"];
+      const balanceKeys = ["enemies", "towers", "waveSets", "missions", "abilities", "constants", "defaultMissionId", "currencies", "defaultDifficultyId", "difficulties", "metaProgression", "terrainTypes"];
       for (const key of balanceKeys) {
         if (body[key] !== undefined) { balance[key] = body[key]; balanceChanged = true; }
       }
@@ -1355,7 +1434,8 @@ const server = http.createServer(async (req, res) => {
     if (!body.mapSources || typeof body.mapSources !== "object" || Array.isArray(body.mapSources)) {
       return jsonResp(res, 400, { error: "mapSources must be an object." });
     }
-    const result = compileMapSources(body.mapSources);
+    const files = loadProjectFiles(PROJECT_DIR);
+    const result = compileMapSources(body.mapSources, files.balance?.terrainTypes ?? {});
     if (!result.ok) return jsonResp(res, 422, result);
     return jsonResp(res, 200, { ok: true, maps: result.maps, issues: result.issues });
   }
@@ -1363,7 +1443,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && pathname === "/api/maps/compile") {
     try {
       const files = loadProjectFiles(PROJECT_DIR);
-      const result = compileMapSources(files.mapSources ?? {});
+      const result = compileMapSources(files.mapSources ?? {}, files.balance?.terrainTypes ?? {});
       if (!result.ok) {
         writeRunTrace(PROJECT_DIR, { source: "studio", action: "maps:compile", status: "error", issues: result.issues });
         return jsonResp(res, 422, result);
@@ -1375,6 +1455,75 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       writeRunTrace(PROJECT_DIR, { source: "studio", action: "maps:compile", status: "error", error: e.message });
       return jsonResp(res, 500, { error: e.message });
+    }
+  }
+
+  // ── POST /api/tilesets/* ──────────────────────────────────────────────────
+  if (req.method === "POST" && pathname === "/api/tilesets/preview") {
+    let body;
+    try { body = await readBody(req); }
+    catch { return jsonResp(res, 400, { error: "Invalid JSON body" }); }
+    try {
+      const preview = previewTiledTilesetImport(body ?? {});
+      const files = loadProjectFiles(PROJECT_DIR);
+      preview.atlas.src = projectAssetPath(files.visuals.assetsRoot, preview.atlas.src);
+      const upload = decodeTilesetImage(body?.image, preview.source.image);
+      const assetState = upload ? { uploaded: true, bytes: upload.bytes.length, width: upload.width, height: upload.height } : inspectLocalTilesetImage(preview.atlas.src);
+      validateTilesetImageGeometry(preview, assetState);
+      if (!assetState.exists) preview.warnings.push(`Image is not in the project yet: ${preview.atlas.src}`);
+      if (assetState.uploaded) preview.warnings = preview.warnings.filter((warning) => !warning.startsWith("Image is not in the project yet:"));
+      return jsonResp(res, 200, { ok: true, preview, image: { ...assetState, uploadedBytes: undefined }, revision: projectHash() });
+    } catch (error) {
+      return jsonResp(res, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  if (req.method === "POST" && pathname === "/api/tilesets/apply") {
+    let body;
+    try { body = await readBody(req); }
+    catch { return jsonResp(res, 400, { error: "Invalid JSON body" }); }
+    if (body?.ifRevision && body.ifRevision !== projectHash()) return jsonResp(res, 409, { error: "Project changed since tileset preview. Preview it again." });
+    const visualsPath = path.join(CONTENT_DIR, "visuals.json");
+    const balancePath = path.join(CONTENT_DIR, "balance.json");
+    const originals = new Map([[visualsPath, fs.readFileSync(visualsPath)], [balancePath, fs.readFileSync(balancePath)]]);
+    let imagePath = null;
+    try {
+      const preview = previewTiledTilesetImport(body ?? {});
+      const files = loadProjectFiles(PROJECT_DIR);
+      preview.atlas.src = projectAssetPath(files.visuals.assetsRoot, preview.atlas.src);
+      const upload = decodeTilesetImage(body?.image, preview.source.image);
+      imagePath = resolveTilesetImagePath(preview.atlas.src, { createParent: Boolean(upload) });
+      if (upload) {
+        originals.set(imagePath, fs.existsSync(imagePath) ? fs.readFileSync(imagePath) : null);
+        if (fs.existsSync(imagePath)) backupFile(imagePath);
+        writeBytesAtomic(imagePath, upload.bytes);
+      }
+      const assetState = inspectLocalTilesetImage(preview.atlas.src);
+      if (!assetState.exists) throw new Error(`Import the PNG into the project first: ${preview.atlas.src}`);
+      validateTilesetImageGeometry(preview, assetState);
+      const visuals = normalizeVisuals(files.visuals);
+      visuals.atlases[preview.atlas.id] = { src: preview.atlas.src };
+      Object.assign(visuals.sprites, preview.sprites);
+      visuals.tileSets[preview.tileSet.id] = preview.tileSet;
+      visuals.bindings.tileSets.grids[preview.tileSet.topology] = preview.tileSet.id;
+      const balance = readJson(balancePath);
+      balance.terrainTypes = { ...(balance.terrainTypes ?? {}), ...preview.terrainTypes };
+      backupFile(visualsPath);
+      backupFile(balancePath);
+      writeJsonAtomic(visualsPath, visuals);
+      writeJsonAtomic(balancePath, balance);
+      const validation = await validateProjectDir(PROJECT_DIR);
+      if (!validation.result.ok) throw new Error(validation.result.issues.filter((issue) => issue.severity === "error").slice(0, 4).map((issue) => issue.message).join(" "));
+      return jsonResp(res, 200, { ok: true, tileSetId: preview.tileSet.id, imagePath: preview.atlas.src, newHash: projectHash(), validation: validation.result });
+    } catch (error) {
+      for (const [filePath, bytes] of originals) {
+        if (bytes === null) {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        } else {
+          writeBytesAtomic(filePath, bytes);
+        }
+      }
+      return jsonResp(res, 422, { error: error instanceof Error ? error.message : String(error), rolledBack: true });
     }
   }
 

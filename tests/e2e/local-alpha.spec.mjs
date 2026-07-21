@@ -134,8 +134,22 @@ test("local alpha constructor flow", async ({ page, request, browser }) => {
   await page.locator("#map-path-field").fill(JSON.stringify(originalPath));
   await page.locator("#map-path-field").blur();
   await expect.poll(async () => JSON.parse(await page.locator("#map-path-field").inputValue())).toEqual(originalPath);
+
+  await page.locator("#new-map-grid").selectOption("square");
+  await page.getByRole("button", { name: "Add Map" }).click();
+  await expect(page.locator("#map-grid-field")).toHaveValue("square");
+  const squareMapId = await page.locator("#map-id-field").inputValue();
+  await expect.poll(async () => JSON.parse(await page.locator("#map-path-field").inputValue())).toEqual([
+    { q: 2, r: 0 }, { q: 2, r: 1 }, { q: 2, r: 2 },
+    { q: 2, r: 3 }, { q: 2, r: 4 }, { q: 2, r: 5 }
+  ]);
   await page.getByRole("button", { name: "Compile Maps" }).click();
   await expect(page.getByText("Maps compiled.")).toBeVisible();
+
+  await page.reload();
+  await page.getByRole("tab", { name: /Maps/ }).click();
+  await page.locator("#map-source-list .entity-item").filter({ hasText: squareMapId }).click();
+  await expect(page.locator("#map-grid-field")).toHaveValue("square");
 
   await page.getByRole("tab", { name: /Playtest/ }).click();
   await expect(page.locator("#playtest-canvas")).toBeVisible();
@@ -315,6 +329,52 @@ test("single-file build runs directly from file URL", async ({ page }) => {
   await page.locator("#start-wave").click();
   await expect(page.locator("#stat-wave")).not.toHaveText("-");
   expect(errors).toEqual([]);
+});
+
+test("Tileset Workbench previews slicing, requires re-preview, and uploads PNG atomically", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("towerforge:welcomed", "1");
+    localStorage.setItem("towerforge:language", "en");
+  });
+  await page.goto(studioUrl);
+  await page.getByRole("tab", { name: /Assets/ }).click();
+  const descriptor = Buffer.from(JSON.stringify({
+    type: "tileset",
+    name: "e2e_square",
+    image: "tilesets/e2e.png",
+    tilewidth: 64,
+    tileheight: 64,
+    tilecount: 1,
+    columns: 1,
+    properties: [{ name: "towerforge.terrainId", value: "buildable" }]
+  }));
+  await page.locator("#tileset-descriptor").setInputFiles({ name: "e2e-square.tsj", mimeType: "application/json", buffer: descriptor });
+  await page.locator("#tileset-image").setInputFiles({
+    name: "e2e.png",
+    mimeType: "image/png",
+    buffer: fs.readFileSync(path.join(repoRoot, "packages", "cli", "theme-packs", "verdant-frontier", "assets", "tiles-square.png"))
+  });
+  await page.locator("#tileset-topology").selectOption("square");
+  await page.getByRole("button", { name: "Preview tileset" }).click();
+  await expect(page.locator("#tileset-workbench-report")).toContainText("e2e_square");
+  await expect(page.locator("#tileset-workbench-report")).toContainText("64x64px minimum");
+  await expect(page.locator("#tileset-coverage-matrix")).toContainText("buildable");
+  await expect(page.locator("#btn-apply-tileset")).toBeEnabled();
+
+  const materials = JSON.parse(await page.locator("#tileset-materials").inputValue());
+  materials.buildable.signatures.random[0].weight = 2;
+  await page.locator("#tileset-materials").fill(JSON.stringify(materials, null, 2));
+  await expect(page.locator("#btn-apply-tileset")).toBeDisabled();
+  await expect(page.locator("#tileset-workbench-report")).toContainText("Preview again");
+  await page.getByRole("button", { name: "Preview tileset" }).click();
+  await expect(page.locator("#btn-apply-tileset")).toBeEnabled();
+  await page.locator("#btn-apply-tileset").click();
+  await expect(page.getByText('Tileset "e2e_square" imported.')).toBeVisible();
+
+  expect(fs.existsSync(path.join(projectDir, "assets", "tilesets", "e2e.png"))).toBe(true);
+  const visuals = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "visuals.json"), "utf8"));
+  expect(visuals.tileSets.e2e_square.materials.buildable.signatures.random[0].weight).toBe(2);
+  expect(visuals.bindings.tileSets.grids.square).toBe("e2e_square");
 });
 
 test("desktop command bridge drives navigation and guards unsaved changes", async ({ page }) => {

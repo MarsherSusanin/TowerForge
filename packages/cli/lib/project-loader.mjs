@@ -112,12 +112,20 @@ export function projectSummary(files) {
     defaultDifficultyId: files.balance.defaultDifficultyId,
     difficulties: files.balance.difficulties,
     metaProgression: files.balance.metaProgression,
+    terrainTypes: files.balance.terrainTypes,
     defaultMissionId: files.balance.defaultMissionId,
     abilities: files.balance.abilities,
     enemies: files.balance.enemies,
     towers: files.balance.towers,
     waveSets: files.balance.waveSets,
     missions: files.balance.missions,
+    maps: Object.fromEntries(Object.entries(files.maps).map(([id, map]) => [id, {
+      id,
+      grid: map.grid,
+      width: map.width,
+      height: map.height,
+      routeCount: map.pathRoutes?.length ?? 1
+    }])),
     worldMap: files.worldMap,
     visuals: files.visuals,
     storyComics: files.storyComics,
@@ -356,6 +364,7 @@ function normalizeBalance(input) {
   balance.currencies = normalizeCurrencies(balance.currencies);
   balance.constants.startingResources ??= { coins: balance.constants.startingCoins ?? 0 };
   balance.constants.moveTowerCost ??= { coins: 0 };
+  balance.terrainTypes = normalizeTerrainTypes(balance.terrainTypes, balance.constants.waterGroundSpeedFactor);
   balance.abilities ??= {};
   balance.enemies ??= {};
   balance.towers ??= {};
@@ -470,10 +479,34 @@ function normalizeMaps(input) {
     map.id ??= mapId;
     map.label ??= mapId;
     map.defaultTerrain ??= "buildable";
+    map.grid = map.grid?.kind === "square"
+      ? { kind: "square", adjacency: "cardinal" }
+      : { kind: "hex", layout: "odd-r" };
     map.pathRoutes ??= [];
     map.terrainOverrides ??= [];
   }
   return maps;
+}
+
+function normalizeTerrainTypes(input, waterSpeed = 0.6) {
+  const defaults = {
+    buildable: { id: "buildable", label: "Buildable", buildable: true, walkable: true, groundSpeedMultiplier: 1, tags: ["ground"] },
+    path: { id: "path", label: "Path", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["path"] },
+    blocked: { id: "blocked", label: "Blocked", buildable: false, walkable: false, groundSpeedMultiplier: 1, tags: ["blocked"] },
+    core: { id: "core", label: "Core", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["objective"] },
+    spawn: { id: "spawn", label: "Spawn", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["spawn"] },
+    water: { id: "water", label: "Water", buildable: false, walkable: true, groundSpeedMultiplier: Number.isFinite(waterSpeed) ? waterSpeed : 0.6, tags: ["water"] }
+  };
+  for (const [id, value] of Object.entries(input && typeof input === "object" ? input : {})) {
+    const base = defaults[id] ?? { id, label: id, buildable: false, walkable: false, groundSpeedMultiplier: 1, tags: [] };
+    defaults[id] = {
+      ...base,
+      ...value,
+      id,
+      tags: Array.isArray(value?.tags) ? [...new Set(value.tags.filter((tag) => typeof tag === "string"))] : [...base.tags]
+    };
+  }
+  return defaults;
 }
 
 function normalizeWorldMap(input) {
@@ -547,7 +580,7 @@ function autoPlaceInitialTowers(game, towerIds) {
       const snapshot = game.getSnapshot();
       const candidates = snapshot.tiles
         .filter((tile) => tile.terrain === "buildable" && !tile.occupiedBy)
-        .sort((a, b) => distanceToPath(a, snapshot.pathCenterline) - distanceToPath(b, snapshot.pathCenterline));
+        .sort((a, b) => distanceToPath(a, snapshot.pathCenterline, snapshot.grid) - distanceToPath(b, snapshot.pathCenterline, snapshot.grid));
       for (const tile of candidates) {
         const result = game.placeTower(towerId, { q: tile.q, r: tile.r });
         if (result.ok) {
@@ -561,8 +594,21 @@ function autoPlaceInitialTowers(game, towerIds) {
   return placements;
 }
 
-function distanceToPath(tile, pathCenterline) {
-  return Math.min(...pathCenterline.map((coord) => Math.abs(coord.q - tile.q) + Math.abs(coord.r - tile.r)));
+function distanceToPath(tile, pathCenterline, grid) {
+  const distance = grid?.kind === "square" ? manhattanDistance : oddRHexDistance;
+  return Math.min(...pathCenterline.map((coord) => distance(coord, tile)));
+}
+
+function manhattanDistance(a, b) { return Math.abs(a.q - b.q) + Math.abs(a.r - b.r); }
+function oddRHexDistance(a, b) {
+  const ac = oddRToCube(a);
+  const bc = oddRToCube(b);
+  return Math.max(Math.abs(ac.x - bc.x), Math.abs(ac.y - bc.y), Math.abs(ac.z - bc.z));
+}
+function oddRToCube(coord) {
+  const x = coord.q - (coord.r - (coord.r & 1)) / 2;
+  const z = coord.r;
+  return { x, z, y: -x - z };
 }
 
 function summarizeWaves(waves, enemies) {

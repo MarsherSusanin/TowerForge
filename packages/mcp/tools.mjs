@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { PNG } from "pngjs";
 import {
   loadEngine,
   loadProjectFiles,
@@ -25,11 +26,14 @@ import { commitProjectAssetImport, planProjectAssetImport } from "../cli/lib/ass
 import { exportProjectPack, inspectProjectPack } from "../cli/lib/project-pack.mjs";
 import { packageProject } from "../cli/lib/packaging.mjs";
 import { validateProjectSchemas } from "../cli/lib/project-schema.mjs";
+import { previewTiledTilesetImport } from "../cli/lib/tileset-importer.mjs";
+import { inspectTileSetCoverage, TILE_PRESETS } from "../renderer/src/autotile.mjs";
 import { applyThemePack, listThemePacks, previewThemePack } from "../cli/lib/theme-packs.mjs";
 import { listProjectTree } from "../cli/lib/project-tree.mjs";
 import { resolveTowerScriptPath, restoreTowerScriptWrite, scriptFileRevision, writeTowerScriptAtomic } from "../cli/lib/project-scripts.mjs";
 import { findEntityReferences } from "../cli/lib/references.mjs";
 import { mergeValidationResults } from "../cli/lib/trace.mjs";
+import { projectTileCoverage } from "../cli/lib/tile-coverage.mjs";
 import {
   CONTENT_RECIPE_COLLECTIONS,
   contentRecipeContext,
@@ -40,9 +44,9 @@ import { TOWERFORGE_AGENT_GUIDE_VERSION } from "./agent-instructions.mjs";
 
 const BALANCE_PATCH_KEYS = [
   "enemies", "towers", "waveSets", "missions", "abilities", "constants", "currencies", "defaultMissionId",
-  "defaultDifficultyId", "difficulties", "metaProgression"
+  "defaultDifficultyId", "difficulties", "metaProgression", "terrainTypes"
 ];
-const SCHEMA_DOMAINS = Object.freeze(["all", "combat", "missions", "progression", "scripts", "assets"]);
+const SCHEMA_DOMAINS = Object.freeze(["all", "combat", "missions", "progression", "scripts", "assets", "maps", "terrain", "tiles"]);
 
 // Maps an upsert_entity/delete_entity `collection` to (a) the balance.json key, (b) the shape
 // (a map keyed by id, or an array of {id,...} items — currencies only), and (c) the
@@ -69,7 +73,9 @@ const READ_ENTITY_COLLECTIONS = Object.freeze([
   "audioSounds",
   "musicTracks",
   "storyComics",
-  "battleBackgrounds"
+  "battleBackgrounds",
+  "terrainTypes",
+  "tileSets"
 ]);
 
 function entityEntries(files, collection) {
@@ -81,6 +87,8 @@ function entityEntries(files, collection) {
   if (collection === "storyComics") return Object.entries(files.storyComics?.comics ?? {});
   if (collection === "battleBackgrounds") return Object.entries(files.battleBackgrounds?.definitions ?? {});
   if (collection === "visualSprites") return Object.entries(files.visuals?.sprites ?? {});
+  if (collection === "tileSets") return Object.entries(files.visuals?.tileSets ?? {});
+  if (collection === "terrainTypes") return Object.entries(files.balance?.terrainTypes ?? {});
   if (collection === "audioSounds") return Object.entries(files.visuals?.audio?.sounds ?? {});
   if (collection === "musicTracks") return Object.entries(files.visuals?.audio?.musicTracks ?? {});
   const value = files.balance?.[collection];
@@ -101,6 +109,8 @@ function entityListItem(collection, id, value) {
   if (collection === "storyComics") return { id, missionId: value.missionId ?? null, trigger: value.trigger ?? "beforeMission", panelCount: value.panels?.length ?? 0 };
   if (collection === "battleBackgrounds") return { id, missionId: value.missionId ?? id, color: value.color ?? null, spriteId: value.spriteId ?? null };
   if (collection === "visualSprites") return { id, src: value.src ?? null, atlas: value.atlas ?? null, frame: value.frame ?? null };
+  if (collection === "tileSets") return { id, topology: value.topology, ruleKind: value.ruleKind, materialCount: Object.keys(value.materials ?? {}).length };
+  if (collection === "terrainTypes") return { id, label: value.label ?? id, buildable: value.buildable, walkable: value.walkable, groundSpeedMultiplier: value.groundSpeedMultiplier, tags: value.tags ?? [] };
   if (collection === "audioSounds") return { id, src: value.src ?? null };
   if (collection === "musicTracks") return { id, src: value.src ?? null, volume: value.volume ?? 1 };
   return { id, width: value.width ?? null, height: value.height ?? null, type: value.type ?? null };
@@ -108,7 +118,7 @@ function entityListItem(collection, id, value) {
 
 function entityRevision(files, collection) {
   if (["maps", "mapSources"].includes(collection)) return null;
-  if (["visualSprites", "audioSounds", "musicTracks"].includes(collection)) return computeRevision(files.visuals);
+  if (["visualSprites", "audioSounds", "musicTracks", "tileSets"].includes(collection)) return computeRevision(files.visuals);
   if (collection === "storyComics") return computeRevision(files.storyComics);
   if (collection === "battleBackgrounds") return computeRevision(files.battleBackgrounds);
   return computeRevision(files.balance);
@@ -148,6 +158,50 @@ const EXPLAIN_CURATED = {
 const IF_REVISION_PROPERTY = {
   type: "string",
   description: "Optional. The revision hash last read (from get_project_summary/validate_project/a prior write's response). If the file has since changed, the write is rejected with {conflict:true} instead of clobbering it."
+};
+
+const TILESET_SLICING_SCHEMA = {
+  type: "object",
+  properties: {
+    tileWidth: { type: "integer", minimum: 1 }, tileHeight: { type: "integer", minimum: 1 },
+    columns: { type: "integer", minimum: 1 }, margin: { type: "integer", minimum: 0 }, spacing: { type: "integer", minimum: 0 }
+  },
+  additionalProperties: false
+};
+const TILESET_TRANSFORMATIONS_SCHEMA = {
+  type: "object",
+  properties: { hflip: { type: "boolean" }, vflip: { type: "boolean" }, rotate: { type: "boolean" }, preferUntransformed: { type: "boolean" } },
+  additionalProperties: false
+};
+const TILESET_VARIANT_SCHEMA = {
+  type: "object",
+  properties: {
+    spriteId: { type: "string" }, weight: { type: "number", exclusiveMinimum: 0 },
+    transform: { type: "object", properties: { flipX: { type: "boolean" }, flipY: { type: "boolean" }, rotate: { type: "integer", enum: [0, 90, 180, 270] } }, additionalProperties: false }
+  },
+  required: ["spriteId"], additionalProperties: false
+};
+const TILESET_MATERIAL_OVERRIDES_SCHEMA = {
+  type: "object",
+  additionalProperties: {
+    type: "object",
+    properties: {
+      connectGroup: { type: "string" }, connectionSource: { type: "string", enum: ["neighbors", "pathRoutes"] },
+      signatures: { type: "object", additionalProperties: { type: "array", minItems: 1, maxItems: 64, items: TILESET_VARIANT_SCHEMA } }
+    },
+    required: ["signatures"], additionalProperties: false
+  }
+};
+const TERRAIN_TYPE_OVERRIDES_SCHEMA = {
+  type: "object",
+  additionalProperties: {
+    type: "object",
+    properties: {
+      id: { type: "string" }, label: { type: "string" }, buildable: { type: "boolean" }, walkable: { type: "boolean" },
+      groundSpeedMultiplier: { type: "number", exclusiveMinimum: 0 }, tags: { type: "array", maxItems: 64, items: { type: "string" } }
+    },
+    additionalProperties: false
+  }
 };
 
 /** Tool definitions advertised over `tools/list`. */
@@ -325,6 +379,86 @@ export const TOOLS = [
         duration: { type: "number", description: "Simulation duration in time units (default 180, capped at 3600)." }
       },
       additionalProperties: false
+    }
+  },
+  {
+    name: "list_tile_presets",
+    description: "List canonical random, Wang/autotile, dual-grid, and sector presets with their required signatures.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "inspect_tileset",
+    description: "Inspect one tileset, its bindings, materials, signature counts, and current map coverage.",
+    inputSchema: {
+      type: "object",
+      properties: { projectDir: { type: "string" }, tileSetId: { type: "string" } },
+      required: ["tileSetId"], additionalProperties: false
+    }
+  },
+  {
+    name: "preview_tileset_import",
+    description: "Parse an untrusted local Tiled TSJ/TSX descriptor in memory. Returns atlas frames, Wang materials, typed terrain properties, warnings, and a visuals revision; writes nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string" }, descriptor: { type: "string" }, sourceName: { type: "string" },
+        tileSetId: { type: "string" }, atlasId: { type: "string" }, topology: { type: "string", enum: ["hex", "square"] },
+        slicing: TILESET_SLICING_SCHEMA, transformations: TILESET_TRANSFORMATIONS_SCHEMA,
+        materialOverrides: TILESET_MATERIAL_OVERRIDES_SCHEMA, terrainTypeOverrides: TERRAIN_TYPE_OVERRIDES_SCHEMA
+      },
+      required: ["descriptor", "sourceName", "topology"], additionalProperties: false
+    }
+  },
+  {
+    name: "apply_tileset_import",
+    description: "Commit a previously previewable TSJ/TSX tileset. Requires a project-local PNG, validates the complete project, uses revision guard, backup, and automatic rollback.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string" }, descriptor: { type: "string" }, sourceName: { type: "string" },
+        tileSetId: { type: "string" }, atlasId: { type: "string" }, topology: { type: "string", enum: ["hex", "square"] },
+        slicing: TILESET_SLICING_SCHEMA, transformations: TILESET_TRANSFORMATIONS_SCHEMA,
+        materialOverrides: TILESET_MATERIAL_OVERRIDES_SCHEMA, terrainTypeOverrides: TERRAIN_TYPE_OVERRIDES_SCHEMA,
+        ifRevision: IF_REVISION_PROPERTY
+      },
+      required: ["descriptor", "sourceName", "topology", "ifRevision"], additionalProperties: false
+    }
+  },
+  {
+    name: "upsert_terrain_type",
+    description: "Create or update one typed terrain definition through full validation and a guarded balance write.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectDir: { type: "string" }, terrainId: { type: "string" }, ifRevision: IF_REVISION_PROPERTY,
+        terrain: { type: "object", properties: { label: { type: "string" }, buildable: { type: "boolean" }, walkable: { type: "boolean" }, groundSpeedMultiplier: { type: "number", minimum: 0 }, tags: { type: "array", items: { type: "string" } } }, required: ["label", "buildable", "walkable", "groundSpeedMultiplier", "tags"], additionalProperties: false }
+      },
+      required: ["terrainId", "terrain", "ifRevision"], additionalProperties: false
+    }
+  },
+  {
+    name: "preview_tile_binding",
+    description: "Preview map/grid tileset binding and return structured reachable-signature coverage without writing.",
+    inputSchema: {
+      type: "object",
+      properties: { projectDir: { type: "string" }, tileSetId: { type: "string" }, mapId: { type: "string" }, gridKind: { type: "string", enum: ["hex", "square"] } },
+      required: ["tileSetId"], additionalProperties: false
+    }
+  },
+  {
+    name: "bind_map_tileset",
+    description: "Bind a tileset to one map or a grid topology. Supports dry-run, guarded commit, backup, validation, and rollback.",
+    inputSchema: {
+      type: "object",
+      properties: { projectDir: { type: "string" }, tileSetId: { type: "string" }, mapId: { type: "string" }, gridKind: { type: "string", enum: ["hex", "square"] }, dryRun: { type: "boolean" }, ifRevision: IF_REVISION_PROPERTY },
+      required: ["tileSetId"], additionalProperties: false
+    }
+  },
+  {
+    name: "render_tileset_preview",
+    description: "Return a deterministic PNG contact sheet plus structured coverage for visual seam inspection.",
+    inputSchema: {
+      type: "object", properties: { projectDir: { type: "string" }, tileSetId: { type: "string" }, mapId: { type: "string" } }, required: ["tileSetId", "mapId"], additionalProperties: false
     }
   },
   {
@@ -763,11 +897,12 @@ export const TOOLS = [
         mapId: { type: "string", description: "Map id; also the source filename (<mapId>.tmj)." },
         width: { type: "integer", description: "Positive integer." },
         height: { type: "integer", description: "Positive integer." },
+        gridKind: { type: "string", enum: ["hex", "square"], description: "Per-map topology. Omit for legacy hex/odd-r." },
         spawnCoord: { type: "object", properties: { q: { type: "number" }, r: { type: "number" } }, required: ["q", "r"] },
         coreCoord: { type: "object", properties: { q: { type: "number" }, r: { type: "number" } }, required: ["q", "r"] },
         pathCenterline: {
           type: "array",
-          description: "At least 2 hex coords {q,r} from spawn to core.",
+          description: "At least 2 adjacent grid coords {q,r} from spawn to core; square routes are cardinal only.",
           items: { type: "object", properties: { q: { type: "number" }, r: { type: "number" } }, required: ["q", "r"] }
         },
         pathRoutes: {
@@ -844,6 +979,14 @@ const TOOL_RISK = {
   export_project_pack: { riskClass: "write_local", sideEffect: "writes one .tdpack under .towerforge/exports" },
   simulate_mission: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
   playtest_report: { riskClass: "compute_only", sideEffect: "builds engine dist if stale" },
+  list_tile_presets: { riskClass: "read_only", sideEffect: "none" },
+  inspect_tileset: { riskClass: "read_only", sideEffect: "none" },
+  preview_tileset_import: { riskClass: "compute_only", sideEffect: "none" },
+  apply_tileset_import: { riskClass: "write_local", sideEffect: "writes visuals and terrain registry with backup, validation, and rollback" },
+  upsert_terrain_type: { riskClass: "write_local", sideEffect: "writes one terrain definition through guarded balance validation" },
+  preview_tile_binding: { riskClass: "compute_only", sideEffect: "none" },
+  bind_map_tileset: { riskClass: "write_local", sideEffect: "optionally writes one map/grid tileset binding with backup and rollback" },
+  render_tileset_preview: { riskClass: "compute_only", sideEffect: "none" },
   compile_maps_dry_run: { riskClass: "compute_only", sideEffect: "none" },
   compile_maps: { riskClass: "write_local", sideEffect: "writes maps/compiled/maps.json" },
   build_project: { riskClass: "write_local", sideEffect: "writes build output directory" },
@@ -930,7 +1073,10 @@ export async function callTool(name, args = {}, ctx = {}) {
           bindings: ["bind_sprite", "bind_mission_music", "upsert_story_comic", "set_battle_background"],
           pathRule: "Project-relative paths only; absolute paths, external URLs, traversal, and symlink escapes are rejected."
         }
-      } : {})
+      } : {}),
+      ...(includes("maps") ? { maps: { gridPerMap: true, grids: { hex: { layout: "odd-r", directions: 6 }, square: { adjacency: "cardinal", metric: "Manhattan", directions: 4 } }, coordinates: "{q,r} for both grids", routeRule: "every pathRoutes segment must be adjacent and walkable" } } : {}),
+      ...(includes("terrain") ? { terrain: { fields: ["id", "label", "buildable", "walkable", "groundSpeedMultiplier", "tags"], runtimeActions: ["setTileTerrain", "restoreTileTerrain"], limits: engine.TOWER_SCRIPT_LIMITS } } : {}),
+      ...(includes("tiles") ? { tiles: { presets: TILE_PRESETS, bindingPriority: ["map", "grid", "legacy tiles", "color fallback"], importFormats: ["PNG spritesheet + TSJ", "PNG spritesheet + TSX"], productionRule: "reachable missing signatures block release readiness" } } : {})
     };
   }
 
@@ -941,6 +1087,8 @@ export async function callTool(name, args = {}, ctx = {}) {
   if (name === "list_theme_packs") {
     return { packs: listThemePacks() };
   }
+
+  if (name === "list_tile_presets") return { presets: Object.values(TILE_PRESETS) };
 
   if (name === "explain_validation") {
     if (args.code !== undefined && typeof args.code !== "string") {
@@ -968,6 +1116,48 @@ export async function callTool(name, args = {}, ctx = {}) {
   const projectDir = resolveDir(args.projectDir, ctx.defaultProjectDir);
 
   switch (name) {
+    case "inspect_tileset": {
+      const files = loadProjectFiles(projectDir);
+      const tileSet = files.visuals?.tileSets?.[args.tileSetId];
+      if (!tileSet) throw new Error(`Tileset "${args.tileSetId}" not found.`);
+      const maps = Object.values(files.maps ?? {}).filter((map) => {
+        const binding = files.visuals.bindings?.tileSets;
+        return binding?.maps?.[map.id] === args.tileSetId || binding?.grids?.[map.grid?.kind ?? "hex"] === args.tileSetId;
+      });
+      return {
+        projectDir, tileSetId: args.tileSetId, tileSet,
+        bindings: files.visuals.bindings?.tileSets ?? { grids: {}, maps: {} },
+        coverage: maps.map((map) => ({ mapId: map.id, ...tileCoverage(files, map) })),
+        revision: computeRevision(files.visuals)
+      };
+    }
+    case "preview_tileset_import": {
+      const files = loadProjectFiles(projectDir);
+      const preview = previewTiledTilesetImport(args);
+      preview.atlas.src = normalizeImportedAssetPath(files.visuals.assetsRoot, preview.atlas.src);
+      const image = inspectLocalPng(projectDir, preview.atlas.src, preview, { required: false });
+      if (!image.exists) preview.warnings.push(`Image is not in the project yet: ${preview.atlas.src}`);
+      return { projectDir, preview, image, revision: computeRevision({ visuals: files.visuals, balance: files.balance }), nextValidActions: ["import_asset for the PNG if missing", "apply_tileset_import with ifRevision", "preview_tile_binding"] };
+    }
+    case "apply_tileset_import":
+      return applyTilesetImport(projectDir, args);
+    case "upsert_terrain_type": {
+      const raw = readRawProjectFiles(projectDir);
+      const terrainTypes = { ...(raw.balance.terrainTypes ?? {}), [args.terrainId]: { ...args.terrain, id: args.terrainId } };
+      return applyValidatedBalancePatch(projectDir, { terrainTypes }, { ifRevision: args.ifRevision });
+    }
+    case "preview_tile_binding":
+      return previewTileBinding(projectDir, args);
+    case "bind_map_tileset":
+      return bindMapTileset(projectDir, args);
+    case "render_tileset_preview": {
+      const files = loadProjectFiles(projectDir);
+      const map = files.maps?.[args.mapId];
+      if (!map) throw new Error(`Map "${args.mapId}" not found.`);
+      if (!files.visuals?.tileSets?.[args.tileSetId]) throw new Error(`Tileset "${args.tileSetId}" not found.`);
+      const preview = previewTileBinding(projectDir, { tileSetId: args.tileSetId, mapId: args.mapId });
+      return { ...preview, contactSheet: tilesetContactSheetPng(projectDir, files, args.tileSetId, preview.coverage) };
+    }
     case "get_project_summary": {
       const files = loadProjectFiles(projectDir);
       const summary = projectSummary(files);
@@ -1078,7 +1268,8 @@ export async function callTool(name, args = {}, ctx = {}) {
     case "release_readiness": {
       const files = loadProjectFiles(projectDir);
       const { result: validation } = await validateProjectDir(projectDir);
-      const mapCompile = compileMapSources(files.mapSources ?? {});
+      const mapCompile = compileMapSources(files.mapSources ?? {}, files.balance?.terrainTypes ?? {});
+      const tiles = projectTileCoverage(files);
       const targets = Object.values(files.buildTargets?.targets ?? {});
       const checks = [
         {
@@ -1110,6 +1301,12 @@ export async function callTool(name, args = {}, ctx = {}) {
           label: "Build targets",
           severity: targets.length ? "ok" : "warning",
           message: targets.length ? `${targets.length} configured target(s): ${targets.map((target) => target.id).join(", ")}` : "No build target is configured."
+        },
+        {
+          id: "tile_coverage",
+          label: "Reachable tileset coverage",
+          severity: tiles.ok ? "ok" : "error",
+          message: tiles.ok ? `${tiles.maps.length} bound map(s) have complete reachable signatures.` : `${tiles.missingCount} reachable signature(s) are missing; Studio fallback is draft-only.`
         }
       ];
       return {
@@ -1118,6 +1315,7 @@ export async function callTool(name, args = {}, ctx = {}) {
         checks,
         validation,
         mapIssues: mapCompile.issues ?? [],
+        tileCoverage: tiles,
         revisions: { balance: computeRevision(files.balance) }
       };
     }
@@ -1198,7 +1396,8 @@ export async function callTool(name, args = {}, ctx = {}) {
         // maps/compiled/maps.json with {} — almost certainly a typo'd projectDir, not intent.
         throw new Error(`No map sources found in ${path.join(projectDir, "maps", "src")} — refusing to overwrite maps/compiled/maps.json with an empty set. Use write_map to author a map first.`);
       }
-      const result = compileMapSources(sources);
+      const files = loadProjectFiles(projectDir);
+      const result = compileMapSources(sources, files.balance?.terrainTypes ?? {});
       if (!result.ok) {
         return { projectDir, ok: false, issues: result.issues };
       }
@@ -1209,7 +1408,8 @@ export async function callTool(name, args = {}, ctx = {}) {
     case "compile_maps_dry_run": {
       assertProjectDir(projectDir);
       const sources = readMapSources(projectDir);
-      const result = compileMapSources(sources);
+      const files = loadProjectFiles(projectDir);
+      const result = compileMapSources(sources, files.balance?.terrainTypes ?? {});
       return {
         projectDir,
         ok: result.ok,
@@ -1549,6 +1749,285 @@ async function addWaveGroup(projectDir, args) {
   if (!found) throw new Error(`Wave "${waveId}" not found in wave set "${waveSetId}".`);
   const waveSets = { ...raw.balance.waveSets, [waveSetId]: nextWaves };
   return applyValidatedBalancePatch(projectDir, { waveSets }, { ifRevision });
+}
+
+function normalizeImportedAssetPath(assetsRoot, imagePath) {
+  const root = String(assetsRoot || "assets").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const image = String(imagePath || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  return image.startsWith(`${root}/`) ? image : `${root}/${image}`;
+}
+
+function inspectLocalPng(projectDir, relativePath, preview, { required = true } = {}) {
+  const projectRoot = path.resolve(projectDir);
+  const absolute = path.resolve(projectRoot, ...String(relativePath).split("/"));
+  if (!absolute.startsWith(`${projectRoot}${path.sep}`)) throw new Error("Tileset PNG escapes the active project.");
+  if (!fs.existsSync(absolute)) {
+    if (required) throw new Error(`Tileset PNG is missing: ${relativePath}`);
+    return { exists: false };
+  }
+  const real = fs.realpathSync(absolute);
+  const realProject = fs.realpathSync(projectRoot);
+  if (!real.startsWith(`${realProject}${path.sep}`)) throw new Error("Tileset PNG symlink escapes the active project.");
+  const stat = fs.statSync(real);
+  if (!stat.isFile() || !/\.png$/i.test(real)) throw new Error("Tileset image must be a project-local PNG file.");
+  if (stat.size < 1 || stat.size > 10 * 1024 * 1024) throw new Error("Tileset PNG must be between 1 byte and 10 MB.");
+  const bytes = fs.readFileSync(real);
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (bytes.length < 24 || !bytes.subarray(0, 8).equals(signature) || bytes.toString("ascii", 12, 16) !== "IHDR") throw new Error("Tileset image is not a valid PNG file.");
+  const width = bytes.readUInt32BE(16);
+  const height = bytes.readUInt32BE(20);
+  if (width < 1 || height < 1 || width > 16384 || height > 16384 || width * height > 64_000_000) throw new Error("Tileset PNG dimensions are outside the supported limits.");
+  if (preview && (width < preview.source.expectedWidth || height < preview.source.expectedHeight)) throw new Error(`Tileset PNG is ${width}x${height}, but slicing requires at least ${preview.source.expectedWidth}x${preview.source.expectedHeight}.`);
+  if (preview?.source.declaredImageWidth && preview.source.declaredImageWidth !== width) throw new Error("Tileset PNG width does not match the Tiled descriptor.");
+  if (preview?.source.declaredImageHeight && preview.source.declaredImageHeight !== height) throw new Error("Tileset PNG height does not match the Tiled descriptor.");
+  return { exists: true, bytes: stat.size, width, height };
+}
+
+function mapRenderModel(map) {
+  const overrides = new Map((map.terrainOverrides ?? []).map((entry) => [`${entry.q},${entry.r}`, entry.terrain]));
+  const tiles = [];
+  for (let r = 0; r < map.height; r += 1) {
+    for (let q = 0; q < map.width; q += 1) {
+      let terrain = overrides.get(`${q},${r}`) ?? map.defaultTerrain;
+      if (map.spawnCoord?.q === q && map.spawnCoord?.r === r) terrain = "spawn";
+      if (map.coreCoord?.q === q && map.coreCoord?.r === r) terrain = "core";
+      tiles.push({ q, r, terrain });
+    }
+  }
+  return { ...map, grid: map.grid ?? { kind: "hex", layout: "odd-r" }, tiles };
+}
+
+function tileCoverage(files, map, visuals = files.visuals) {
+  return inspectTileSetCoverage({ map: mapRenderModel(map), visuals });
+}
+
+function previewTileBinding(projectDir, args) {
+  const files = loadProjectFiles(projectDir);
+  const tileSet = files.visuals?.tileSets?.[args.tileSetId];
+  if (!tileSet) throw new Error(`Tileset "${args.tileSetId}" not found.`);
+  if (Boolean(args.mapId) === Boolean(args.gridKind)) throw new Error("Provide exactly one of mapId or gridKind.");
+  if (args.mapId && !files.maps?.[args.mapId]) throw new Error(`Map "${args.mapId}" not found.`);
+  const visuals = structuredCloneCompat(files.visuals);
+  visuals.bindings.tileSets ??= { grids: {}, maps: {} };
+  if (args.mapId) visuals.bindings.tileSets.maps[args.mapId] = args.tileSetId;
+  else visuals.bindings.tileSets.grids[args.gridKind] = args.tileSetId;
+  const maps = args.mapId
+    ? [files.maps[args.mapId]]
+    : Object.values(files.maps).filter((map) => (map.grid?.kind ?? "hex") === args.gridKind);
+  const coverage = maps.map((map) => ({ mapId: map.id, ...tileCoverage(files, map, visuals) }));
+  return {
+    projectDir,
+    ok: coverage.every((entry) => entry.ok),
+    binding: args.mapId ? { mapId: args.mapId, tileSetId: args.tileSetId } : { gridKind: args.gridKind, tileSetId: args.tileSetId },
+    coverage,
+    revision: computeRevision(files.visuals),
+    nextValidActions: coverage.every((entry) => entry.ok) ? ["bind_map_tileset with ifRevision", "render_tileset_preview"] : ["inspect_tileset", "fill every missing signature before production build"]
+  };
+}
+
+async function bindMapTileset(projectDir, args) {
+  const preview = previewTileBinding(projectDir, args);
+  if (args.dryRun) return { ...preview, dryRun: true, written: false };
+  if (args.ifRevision && args.ifRevision !== preview.revision) return { projectDir, ok: false, conflict: true, written: false, expectedRevision: args.ifRevision, actualRevision: preview.revision };
+  const raw = readRawProjectFiles(projectDir);
+  const visuals = structuredCloneCompat(raw.visuals ?? {});
+  visuals.bindings ??= {};
+  visuals.bindings.tileSets ??= { grids: {}, maps: {} };
+  visuals.bindings.tileSets.grids ??= {};
+  visuals.bindings.tileSets.maps ??= {};
+  if (args.mapId) visuals.bindings.tileSets.maps[args.mapId] = args.tileSetId;
+  else visuals.bindings.tileSets.grids[args.gridKind] = args.tileSetId;
+  const candidate = normalizeProjectFiles({ ...raw, visuals });
+  const validation = await validateCandidateFiles(candidate);
+  if (!validation.ok) return { projectDir, ok: false, written: false, validation: validationSummary(validation) };
+  const currentRevision = computeRevision(loadProjectFiles(projectDir).visuals);
+  if (currentRevision !== preview.revision) return { projectDir, ok: false, conflict: true, written: false, expectedRevision: preview.revision, actualRevision: currentRevision };
+  const visualsPath = path.join(projectDir, "content", "visuals.json");
+  const original = fs.readFileSync(visualsPath, "utf8");
+  const backupPath = backupFile(projectDir, visualsPath);
+  writeJsonAtomic(visualsPath, visuals);
+  const post = await validateProjectDir(projectDir);
+  if (!post.result.ok) {
+    writeTextAtomic(visualsPath, original);
+    return { projectDir, ok: false, written: false, rolledBack: true, backupPath, validation: validationSummary(post.result) };
+  }
+  return {
+    ...preview,
+    ok: true,
+    coverageComplete: preview.ok,
+    written: true,
+    dryRun: false,
+    backupPath,
+    revision: computeRevision(loadProjectFiles(projectDir).visuals)
+  };
+}
+
+async function applyTilesetImport(projectDir, args) {
+  const raw = readRawProjectFiles(projectDir);
+  const files = normalizeProjectFiles(raw);
+  const revision = computeRevision({ visuals: files.visuals, balance: files.balance });
+  if (args.ifRevision !== revision) return { projectDir, ok: false, conflict: true, written: false, expectedRevision: args.ifRevision, actualRevision: revision };
+  const preview = previewTiledTilesetImport(args);
+  preview.atlas.src = normalizeImportedAssetPath(files.visuals.assetsRoot, preview.atlas.src);
+  inspectLocalPng(projectDir, preview.atlas.src, preview);
+  const visuals = structuredCloneCompat(raw.visuals ?? {});
+  visuals.schemaVersion = 2;
+  visuals.atlases ??= {};
+  visuals.sprites ??= {};
+  visuals.tileSets ??= {};
+  visuals.atlases[preview.atlas.id] = { src: preview.atlas.src };
+  Object.assign(visuals.sprites, preview.sprites);
+  visuals.tileSets[preview.tileSet.id] = preview.tileSet;
+  const balance = structuredCloneCompat(raw.balance ?? {});
+  balance.terrainTypes = { ...(balance.terrainTypes ?? {}), ...preview.terrainTypes };
+  const candidate = normalizeProjectFiles({ ...raw, visuals, balance });
+  const validation = await validateCandidateFiles(candidate);
+  if (!validation.ok) return { projectDir, ok: false, written: false, validation: validationSummary(validation), revision };
+  const latest = loadProjectFiles(projectDir);
+  const currentRevision = computeRevision({ visuals: latest.visuals, balance: latest.balance });
+  if (currentRevision !== revision) return { projectDir, ok: false, conflict: true, written: false, expectedRevision: revision, actualRevision: currentRevision };
+  const visualsPath = path.join(projectDir, "content", "visuals.json");
+  const balancePath = path.join(projectDir, "content", "balance.json");
+  const originalVisuals = fs.readFileSync(visualsPath, "utf8");
+  const originalBalance = fs.readFileSync(balancePath, "utf8");
+  const backupPaths = [backupFile(projectDir, visualsPath), backupFile(projectDir, balancePath)];
+  writeJsonAtomic(visualsPath, visuals);
+  writeJsonAtomic(balancePath, balance);
+  const post = await validateProjectDir(projectDir);
+  if (!post.result.ok) {
+    writeTextAtomic(visualsPath, originalVisuals);
+    writeTextAtomic(balancePath, originalBalance);
+    return { projectDir, ok: false, written: false, rolledBack: true, backupPaths, validation: validationSummary(post.result) };
+  }
+  return { projectDir, ok: true, written: true, tileSetId: preview.tileSet.id, backupPaths, revision: computeRevision({ visuals: loadProjectFiles(projectDir).visuals, balance: loadProjectFiles(projectDir).balance }), validation: validationSummary(post.result), nextValidActions: ["preview_tile_binding", "bind_map_tileset", "render_tileset_preview"] };
+}
+
+function tilesetContactSheetPng(projectDir, files, tileSetId, coverage) {
+  const allRows = coverage.flatMap((entry) => [
+    ...entry.used.map((item) => ({ ...item, ok: true, mapId: entry.mapId })),
+    ...entry.missing.map((item) => ({ ...item, ok: false, mapId: entry.mapId }))
+  ]);
+  const maximumRows = 128;
+  const rows = allRows.slice(0, maximumRows);
+  const columns = Math.max(1, Math.min(8, rows.length));
+  const cell = 72;
+  const imageRows = Math.max(1, Math.ceil(rows.length / columns));
+  const output = new PNG({ width: columns * cell, height: imageRows * cell });
+  fillPng(output, 16, 20, 16, 255);
+  const atlases = new Map();
+  const tileSet = files.visuals.tileSets[tileSetId];
+  const metadata = rows.map((row, index) => {
+    const choices = tileSet.materials?.[row.terrain]?.signatures?.[row.signature]
+      ?? tileSet.materials?.[row.terrain]?.signatures?.["*"]
+      ?? [];
+    const variant = (Array.isArray(choices) ? choices : [choices]).find((item) => item?.spriteId);
+    const x = (index % columns) * cell;
+    const y = Math.floor(index / columns) * cell;
+    drawChecker(output, x + 4, y + 4, cell - 8, cell - 8);
+    let rendered = false;
+    if (variant) {
+      const sprite = files.visuals.sprites?.[variant.spriteId];
+      const atlas = sprite?.atlas ? files.visuals.atlases?.[sprite.atlas] : null;
+      if (sprite?.frame && atlas?.src) {
+        let source = atlases.get(atlas.src);
+        if (!source) {
+          inspectLocalPng(projectDir, atlas.src);
+          const absolute = path.resolve(projectDir, ...String(atlas.src).split("/"));
+          source = PNG.sync.read(fs.readFileSync(fs.realpathSync(absolute)));
+          atlases.set(atlas.src, source);
+        }
+        drawPngFrame(output, source, sprite.frame, x + 4, y + 4, cell - 8, variant.transform);
+        rendered = true;
+      }
+    }
+    drawPngBorder(output, x + 1, y + 1, cell - 2, cell - 2, rendered && row.ok ? [138, 199, 131, 255] : [223, 106, 89, 255]);
+    if (!rendered) drawPngCross(output, x + 10, y + 10, cell - 20, [223, 106, 89, 255]);
+    return {
+      index,
+      mapId: row.mapId,
+      terrain: row.terrain,
+      signature: row.signature,
+      count: row.count,
+      missing: !row.ok,
+      spriteId: variant?.spriteId ?? null,
+      rendered
+    };
+  });
+  return {
+    mimeType: "image/png",
+    width: output.width,
+    height: output.height,
+    rows: metadata,
+    truncated: allRows.length > maximumRows,
+    data: PNG.sync.write(output).toString("base64")
+  };
+}
+
+function fillPng(image, red, green, blue, alpha) {
+  for (let index = 0; index < image.data.length; index += 4) {
+    image.data[index] = red;
+    image.data[index + 1] = green;
+    image.data[index + 2] = blue;
+    image.data[index + 3] = alpha;
+  }
+}
+
+function drawChecker(image, x, y, width, height) {
+  for (let py = 0; py < height; py += 1) {
+    for (let px = 0; px < width; px += 1) {
+      const shade = ((Math.floor(px / 8) + Math.floor(py / 8)) % 2) === 0 ? 45 : 57;
+      setPngPixel(image, x + px, y + py, [shade, shade + 4, shade, 255]);
+    }
+  }
+}
+
+function drawPngFrame(target, source, frame, x, y, size, transform = {}) {
+  const angle = ((Number(transform.rotate) || 0) % 360 + 360) % 360;
+  const radians = (-angle * Math.PI) / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  for (let py = 0; py < size; py += 1) {
+    for (let px = 0; px < size; px += 1) {
+      const dx = (px + 0.5) / size - 0.5;
+      const dy = (py + 0.5) / size - 0.5;
+      let sx = cosine * dx - sine * dy;
+      let sy = sine * dx + cosine * dy;
+      if (transform.flipX) sx = -sx;
+      if (transform.flipY) sy = -sy;
+      const sourceX = Math.floor(frame.x + (sx + 0.5) * frame.w);
+      const sourceY = Math.floor(frame.y + (sy + 0.5) * frame.h);
+      if (sourceX < frame.x || sourceY < frame.y || sourceX >= frame.x + frame.w || sourceY >= frame.y + frame.h) continue;
+      const sourceIndex = (sourceY * source.width + sourceX) * 4;
+      setPngPixel(target, x + px, y + py, [source.data[sourceIndex], source.data[sourceIndex + 1], source.data[sourceIndex + 2], source.data[sourceIndex + 3]]);
+    }
+  }
+}
+
+function drawPngBorder(image, x, y, width, height, color) {
+  for (let offset = 0; offset < width; offset += 1) {
+    setPngPixel(image, x + offset, y, color);
+    setPngPixel(image, x + offset, y + height - 1, color);
+  }
+  for (let offset = 0; offset < height; offset += 1) {
+    setPngPixel(image, x, y + offset, color);
+    setPngPixel(image, x + width - 1, y + offset, color);
+  }
+}
+
+function drawPngCross(image, x, y, size, color) {
+  for (let offset = 0; offset < size; offset += 1) {
+    setPngPixel(image, x + offset, y + offset, color);
+    setPngPixel(image, x + size - offset - 1, y + offset, color);
+  }
+}
+
+function setPngPixel(image, x, y, color) {
+  if (x < 0 || y < 0 || x >= image.width || y >= image.height) return;
+  const index = (y * image.width + x) * 4;
+  image.data[index] = color[0];
+  image.data[index + 1] = color[1];
+  image.data[index + 2] = color[2];
+  image.data[index + 3] = color[3];
 }
 
 async function bindSprite(projectDir, args) {
@@ -1918,13 +2397,16 @@ async function deleteEntity(projectDir, args) {
 
 async function writeMap(projectDir, args) {
   assertProjectDir(projectDir);
-  const { mapId, width, height, spawnCoord, coreCoord, pathCenterline, pathRoutes, terrainOverrides } = args;
+  const { mapId, width, height, gridKind = "hex", spawnCoord, coreCoord, pathCenterline, pathRoutes, terrainOverrides } = args;
   if (typeof mapId !== "string" || !mapId) throw new Error("write_map requires mapId.");
   const sourceName = `${mapId}.tmj`;
   const source = {
     id: mapId,
     width,
     height,
+    gridKind,
+    orientation: gridKind === "square" ? "orthogonal" : "hexagonal",
+    properties: [{ name: "towerforge.gridKind", type: "string", value: gridKind }],
     defaultTerrain: "buildable",
     spawnCoord,
     coreCoord,
@@ -1935,14 +2417,14 @@ async function writeMap(projectDir, args) {
 
   // Validate the map shape BEFORE writing anything, so a malformed map never touches disk.
   try {
-    compileMapSource(source, sourceName);
+    compileMapSource(source, sourceName, loadProjectFiles(projectDir).balance?.terrainTypes ?? {});
   } catch (error) {
     return { projectDir, ok: false, written: false, mapId, error: error.message };
   }
 
   writeMapSource(projectDir, sourceName, source);
   const sources = readMapSources(projectDir);
-  const result = compileMapSources(sources);
+  const result = compileMapSources(sources, loadProjectFiles(projectDir).balance?.terrainTypes ?? {});
   if (!result.ok) {
     return { projectDir, ok: false, written: true, mapId, issues: result.issues, nextValidActions: ["compile_maps_dry_run"] };
   }

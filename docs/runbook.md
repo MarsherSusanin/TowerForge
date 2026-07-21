@@ -26,6 +26,7 @@
 | List bundled themes | `npm run themes:list` | Lists local packs without reading or changing a project. |
 | Preview a theme | `npm run themes:apply -- verdant-frontier --project examples/starter.tdproj --dry-run` | Reports affected files/missions and the revision without writing. |
 | Apply a theme | `npm run themes:apply -- verdant-frontier --project examples/starter.tdproj` | Copies only bundled assets, backs up catalogs, validates, and rolls back on failure. |
+| Regenerate bundled tile sheets | `npm run tiles:build-presets` | Deterministically writes square/hex sheets for Verdant Frontier and Frostbound Citadel. |
 | Package mobile scaffold | `node packages/cli/package.mjs --project examples/starter.tdproj --kind mobile` | Builds the web bundle into a Capacitor project under `<project>/mobile`. |
 | Package desktop scaffold | `node packages/cli/package.mjs --project examples/starter.tdproj --kind desktop` | Builds the web bundle into a Tauri v2 project under `<project>/desktop`. |
 | Run packaged Studio shell | `npm run desktop:dev` | Prepares the bundled runtime and launches the Tauri desktop wrapper around Studio. |
@@ -35,7 +36,17 @@
 
 Russian is the default Studio language. Switch between Russian and English under **Settings > Appearance > Language**; the choice is stored only on the current device as `towerforge:language`. In desktop builds the same setting also rebuilds the native menu. Project content is never translated or modified by this preference.
 
-The template/renderer conformance gate is part of `npm run test` and `npm run test:e2e`: Classic, Maze, Idle, and Roguelike are built with Canvas and Phaser. The browser matrix must boot each output, expose three difficulties and meta upgrades, and place a tower through keyboard focus plus Enter.
+The template/grid/renderer conformance gate is part of `npm run test` and `npm run test:e2e`: Classic, Maze, Idle, and Roguelike are built on hex and square grids with Canvas and Phaser. The 16-output matrix must boot, render nonblank tile pixels, expose difficulty/meta UI, and place a tower through exact pointer picking and keyboard focus plus Enter.
+
+## Grid And Tileset Authoring
+
+Every map selects `hex`/`odd-r` or `square`/`cardinal`. Square routes accept only north/east/south/west neighbors; movement, ranges, auras, splash, direct-flight lines, and footprints use Manhattan topology. Run `npm run maps:compile -- --project <project>` after source edits.
+
+Open **Assets > Tileset Workbench** to import a PNG spritesheet with a Tiled `.tsj` or `.tsx` descriptor. Select both files, verify topology and slicing, inspect the mask coverage list and image grid, then edit material/signature weights or typed terrain JSON if mapping is incomplete. Any edit invalidates the commit until **Preview tileset** runs again.
+
+Supported Tiled data is limited to tileset image/slicing, Wang sets, tile probability, transformations, and `towerforge.terrainId`, `buildable`, `walkable`, `groundSpeedMultiplier`, `tags`, `connectGroup`, `connectionSource`. PNG is limited to 10 MB, descriptors to 2 MB, and 4096 tiles. Remote images, absolute/traversing paths, symlinks, non-PNG content, XML DTD/entities, unknown properties, invalid dimensions, and stale revisions fail closed. Apply writes the image and both catalogs atomically with backups and rollback.
+
+Studio may show color fallback while a tileset is incomplete. This is a draft state only: `npm run build` and MCP `release_readiness` fail when any reachable map tile needs a missing signature. Agent workflow is `describe_schema({domain:"tiles"})` -> `inspect_tileset`/`preview_tileset_import` -> `preview_tile_binding` -> `bind_map_tileset` -> `render_tileset_preview` -> `release_readiness`. The agent must inspect the PNG contact sheet returned by `render_tileset_preview`; a clean structured coverage report alone is not a visual seam check.
 
 ## TowerScript Authoring
 
@@ -44,15 +55,17 @@ Open `Project > Scripts` or the **Scripts** sidebar item. The left pane is a fil
 TowerScript files:
 
 - live under `scripts/` and end in `.tower.json`;
-- declare `schemaVersion: 1`, a unique `id`, one or more `bindings`, optional `initialState`, and lifecycle `handlers`;
-- bind to `global`, `mission`, `map`, `wave` (wave-set id), `tower` (tower-type id), `enemy` (enemy-type id), or `ability` (ability id);
+- declare `schemaVersion: 1` or `2`, a unique `id`, one or more `bindings`, optional `initialState`, and lifecycle `handlers`; use v2 for terrain events/actions;
+- bind to `global`, `mission`, `map`, `wave` (wave-set id), `tower` (tower-type id), `enemy` (enemy-type id), `ability` (ability id), or v2 `terrain` (terrain id);
 - read values with `{ "$get": "event.enemyTypeId" }` and compose conditions/math with `{ "$op": "eq", "args": [...] }`;
-- run typed actions such as resource/core/enemy changes, statuses, tower cooldown/stacks, enemy spawning, state updates, and custom signals;
+- run typed actions such as resource/core/enemy changes, statuses, tower cooldown/stacks, enemy spawning, state updates, custom signals, and v2 `setTileTerrain`/`restoreTileTerrain`;
 - can receive author-defined JSON events through the engine `emitScriptSignal` method or a headless `{ type: "emitSignal" }` action.
 
 Save validates the candidate definition and all project references before an atomic write. A stale source revision returns a conflict; invalid post-write state restores the previous file. The runtime also caps expression work, actions, events, recursion, spawns, state, and payload size. A runtime error appears in `snapshot.scriptState.diagnostics` and as a `scriptDiagnostic` event instead of crashing the game.
 
 TowerScript deliberately cannot run JavaScript, import packages, access files/network/DOM/environment, read wall-clock time, or generate randomness. Add a missing capability as a typed engine event/action with deterministic tests; do not add `eval`, `Function`, or raw host bridges.
+
+Terrain changes are runtime-only. A duration restores authored terrain; no duration keeps the override until explicit restore or run end. Scripts may change at most 64 tiles per event transaction and hold 512 active overrides. Active route cells cannot become non-walkable; changing `buildable` never deletes an existing tower.
 
 ## Desktop Studio Navigation
 
@@ -104,6 +117,7 @@ AI Chat accepts up to eight JPEG/PNG/GIF/WebP images per turn, at most 4 MB each
 - Project write conflicts: Studio returns a conflict when files changed on disk after load; reload before saving again.
 - Browser player issues: serve the normal `dist` directory over HTTP. Only the generated `index.single.html` is designed and tested for direct `file://` use.
 - Map compile issues: run `npm run maps:compile -- --project <project> --json` and inspect source map issues.
+- Tileset import issues: verify that PNG filename matches the descriptor image basename, slicing fits the decoded image, all properties are allowlisted, and the descriptor's topology matches the destination map. Use `preview_tile_binding` to distinguish missing reachable masks from unused preset masks.
 - Studio action traces: inspect `.towerforge/runs/*.jsonl` inside the active `.tdproj`.
 - MCP edits: call domain-scoped `describe_schema`, then prefer compact reads, `get_progression`, recipes, `dry_run_progression_patch`, `preview_theme_pack`, and granular commit tools such as `apply_progression_patch`, `upsert_tower_script`, `apply_theme_pack`, or entity/map/asset/narrative writes. Commits validate, accept revision guards, and keep rollback backups under `.towerforge/mcp-backups` or `.towerforge/backups`.
 - TowerScript load failures: run `npm run validate` and inspect the reported script file/field. Parse errors are associated with the source path; reference/schema errors identify the script id and field path.

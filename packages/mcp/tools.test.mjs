@@ -29,6 +29,12 @@ describe("mcp tool registry", () => {
     expect(names).toContain("dry_run_progression_patch");
     expect(names).toContain("simulate_mission");
     expect(names).toContain("playtest_report");
+    expect(names).toContain("list_tile_presets");
+    expect(names).toContain("preview_tileset_import");
+    expect(names).toContain("apply_tileset_import");
+    expect(names).toContain("preview_tile_binding");
+    expect(names).toContain("bind_map_tileset");
+    expect(names).toContain("render_tileset_preview");
     expect(names).toContain("build_project");
     expect(names).toContain("package_web");
     expect(names).toContain("dry_run_balance_patch");
@@ -76,7 +82,7 @@ describe("mcp tool registry", () => {
   it("reports production readiness through stable structured checks", async () => {
     const result = await callTool("release_readiness", { projectDir: STARTER }, {});
     expect(result.ok).toBe(true);
-    expect(result.checks.map((check) => check.id)).toEqual(["validation", "maps", "identity", "content", "build_targets"]);
+    expect(result.checks.map((check) => check.id)).toEqual(["validation", "maps", "identity", "content", "build_targets", "tile_coverage"]);
     expect(result.checks.every((check) => ["ok", "warning", "error"].includes(check.severity))).toBe(true);
     expect(result.projectDir).toBe(STARTER);
   });
@@ -156,6 +162,52 @@ describe("mcp tool registry", () => {
     const assets = await callTool("describe_schema", { domain: "assets" }, {});
     expect(assets.assetAuthoring.bindings).toContain("bind_sprite");
     expect(assets).not.toHaveProperty("metaProgression");
+
+    const tiles = await callTool("describe_schema", { domain: "tiles" }, {});
+    expect(tiles.tiles.importFormats).toEqual(["PNG spritesheet + TSJ", "PNG spritesheet + TSX"]);
+    expect(tiles.tiles.productionRule).toMatch(/block release readiness/);
+  });
+
+  it("imports and draft-binds a tileset through guarded MCP tools", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-mcp-tiles-"));
+    try {
+      fs.cpSync(STARTER, projectDir, { recursive: true });
+      fs.mkdirSync(path.join(projectDir, "assets", "tilesets"), { recursive: true });
+      fs.copyFileSync(
+        path.resolve("packages", "cli", "theme-packs", "verdant-frontier", "assets", "tiles-hex.png"),
+        path.join(projectDir, "assets", "tilesets", "agent.png")
+      );
+      const args = {
+        projectDir,
+        descriptor: JSON.stringify({
+          type: "tileset", name: "agent_hex", image: "tilesets/agent.png",
+          tilewidth: 64, tileheight: 64, tilecount: 1, columns: 1,
+          properties: [{ name: "towerforge.terrainId", value: "buildable" }]
+        }),
+        sourceName: "agent.tsj",
+        topology: "hex"
+      };
+      const preview = await callTool("preview_tileset_import", args, {});
+      expect(preview.image).toMatchObject({ exists: true, width: 1024, height: 1536 });
+      const applied = await callTool("apply_tileset_import", { ...args, ifRevision: preview.revision }, {});
+      expect(applied).toMatchObject({ ok: true, written: true, tileSetId: "agent_hex" });
+
+      const binding = await callTool("preview_tile_binding", { projectDir, tileSetId: "agent_hex", mapId: "tutorial_map" }, {});
+      expect(binding.ok).toBe(false);
+      const committed = await callTool("bind_map_tileset", { projectDir, tileSetId: "agent_hex", mapId: "tutorial_map", ifRevision: binding.revision }, {});
+      expect(committed).toMatchObject({ ok: true, written: true, coverageComplete: false });
+      const rendered = await callTool("render_tileset_preview", { projectDir, tileSetId: "agent_hex", mapId: "tutorial_map" }, {});
+      expect(rendered.contactSheet).toMatchObject({ mimeType: "image/png", truncated: false });
+      expect(rendered.contactSheet.rows.some((row) => row.rendered)).toBe(true);
+      expect(Buffer.from(rendered.contactSheet.data, "base64").subarray(0, 8)).toEqual(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      );
+      const readiness = await callTool("release_readiness", { projectDir }, {});
+      expect(readiness.ok).toBe(false);
+      expect(readiness.checks.find((check) => check.id === "tile_coverage")?.severity).toBe("error");
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   it("previews and applies a bundled theme through a guarded local write", async () => {
@@ -721,10 +773,10 @@ describe("mcp write_map", () => {
     const result = await callTool("write_map", {
       projectDir, mapId: "fork", width: 6, height: 5,
       spawnCoord: { q: 0, r: 2 }, coreCoord: { q: 5, r: 2 },
-      pathCenterline: [{ q: 0, r: 2 }, { q: 5, r: 2 }],
+      pathCenterline: [0, 1, 2, 3, 4, 5].map((q) => ({ q, r: 2 })),
       pathRoutes: [
-        { id: "top", pathCenterline: [{ q: 0, r: 2 }, { q: 3, r: 0 }, { q: 5, r: 2 }] },
-        { id: "bottom", pathCenterline: [{ q: 0, r: 2 }, { q: 3, r: 4 }, { q: 5, r: 2 }] }
+        { id: "top", pathCenterline: [{ q: 0, r: 2 }, { q: 0, r: 1 }, { q: 1, r: 0 }, { q: 2, r: 0 }, { q: 3, r: 0 }, { q: 4, r: 0 }, { q: 5, r: 0 }, { q: 5, r: 1 }, { q: 5, r: 2 }] },
+        { id: "bottom", pathCenterline: [{ q: 0, r: 2 }, { q: 0, r: 3 }, { q: 0, r: 4 }, { q: 1, r: 4 }, { q: 2, r: 4 }, { q: 3, r: 4 }, { q: 4, r: 4 }, { q: 5, r: 4 }, { q: 5, r: 3 }, { q: 5, r: 2 }] }
       ]
     }, {});
     expect(result.ok).toBe(true);

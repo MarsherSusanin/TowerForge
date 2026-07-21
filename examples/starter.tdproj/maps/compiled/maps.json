@@ -3,6 +3,10 @@
     "id": "tutorial_map",
     "width": 15,
     "height": 20,
+    "grid": {
+      "kind": "hex",
+      "layout": "odd-r"
+    },
     "defaultTerrain": "buildable",
     "spawnCoord": {
       "q": 7,

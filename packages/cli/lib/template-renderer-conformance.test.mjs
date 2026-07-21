@@ -6,16 +6,18 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createProject, TEMPLATE_NAMES } from "./create-project.mjs";
 
 const repoRoot = path.resolve(".");
-const combinations = TEMPLATE_NAMES.flatMap((template) => ["canvas", "phaser"].map((renderer) => ({ template, renderer })));
+const combinations = TEMPLATE_NAMES.flatMap((template) =>
+  ["hex", "square"].flatMap((grid) => ["canvas", "phaser"].map((renderer) => ({ template, grid, renderer })))
+);
 let tempDir;
 
 beforeAll(() => { tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "towerforge-conformance-")); });
 afterAll(() => fs.rmSync(tempDir, { recursive: true, force: true }));
 
 describe("template x renderer conformance matrix", () => {
-  it.each(combinations)("builds $template with $renderer and emits the complete product contract", ({ template, renderer }) => {
-    const name = `${template}_${renderer}`;
-    const { projectDir } = createProject({ name, parentDir: tempDir, templateName: template });
+  it.each(combinations)("builds $template/$grid with $renderer and emits the complete product contract", ({ template, grid, renderer }) => {
+    const name = `${template}_${grid}_${renderer}`;
+    const { projectDir } = createProject({ name, parentDir: tempDir, templateName: template, gridKind: grid });
     const targetsPath = path.join(projectDir, "build-targets.json");
     const targets = JSON.parse(fs.readFileSync(targetsPath, "utf8"));
     targets.targets[renderer] = {

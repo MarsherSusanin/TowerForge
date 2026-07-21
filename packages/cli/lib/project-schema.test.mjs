@@ -14,13 +14,14 @@ describe("project schema", () => {
     });
     expect(result.issues).toContainEqual(expect.objectContaining({ fieldPath: "theme.ui.accent", severity: "error" }));
   });
-  it("normalizes legacy visuals into catalog v1", () => {
+  it("normalizes legacy visuals into catalog v2", () => {
     const visuals = normalizeVisuals({ atlases: { creatures: { src: "/assets/generated/sprite-atlas.png" } } });
 
-    expect(visuals.schemaVersion).toBe(1);
+    expect(visuals.schemaVersion).toBe(2);
     expect(visuals.assetsRoot).toBe("assets");
     expect(visuals.atlases.creatures.src).toBe("assets/generated/sprite-atlas.png");
     expect(visuals.bindings.towers).toEqual({});
+    expect(visuals.bindings.tileSets).toEqual({ grids: {}, maps: {} });
   });
 
   it("normalizes sound and music catalogs and lists their assets for the build copy", () => {

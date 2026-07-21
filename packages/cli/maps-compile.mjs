@@ -1,7 +1,7 @@
 // maps-compile.mjs — Compile maps/src/*.tmj into maps/compiled/maps.json.
 import process from "node:process";
 import { compileMapSources, readMapSources, writeCompiledMaps } from "./lib/map-compiler.mjs";
-import { resolveProjectDir } from "./lib/project-loader.mjs";
+import { loadProjectFiles, resolveProjectDir } from "./lib/project-loader.mjs";
 import { parseJsonFlag, printJson } from "./lib/trace.mjs";
 
 function parseArgs() {
@@ -23,7 +23,7 @@ const PROJECT_DIR = resolveProjectDir(args.projectDir, []);
 
 try {
   const sources = readMapSources(PROJECT_DIR);
-  const result = compileMapSources(sources);
+  const result = compileMapSources(sources, loadProjectFiles(PROJECT_DIR).balance?.terrainTypes ?? {});
   if (!result.ok) {
     if (args.json) printJson({ ok: false, projectDir: PROJECT_DIR, issues: result.issues });
     else {

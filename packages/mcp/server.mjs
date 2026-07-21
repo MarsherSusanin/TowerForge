@@ -37,6 +37,19 @@ function replyError(id, code, message) {
   send({ jsonrpc: "2.0", id, error: { code, message } });
 }
 
+function toolResultContent(result) {
+  const image = result?.contactSheet?.data && result.contactSheet.mimeType
+    ? { type: "image", data: result.contactSheet.data, mimeType: result.contactSheet.mimeType }
+    : null;
+  if (!image) return [{ type: "text", text: JSON.stringify(result, null, 2) }];
+  const textResult = {
+    ...result,
+    contactSheet: { ...result.contactSheet }
+  };
+  delete textResult.contactSheet.data;
+  return [{ type: "text", text: JSON.stringify(textResult, null, 2) }, image];
+}
+
 async function handleMessage(message) {
   // JSON-RPC batch arrays and non-object frames aren't supported — say so instead of silently
   // dropping them (a client that thinks batching works would otherwise hang forever on the reply).
@@ -84,7 +97,7 @@ async function handleMessage(message) {
       const args = params?.arguments ?? {};
       try {
         const result = await callTool(name, args, { defaultProjectDir });
-        if (isRequest) reply(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
+        if (isRequest) reply(id, { content: toolResultContent(result) });
       } catch (error) {
         if (isRequest) reply(id, { content: [{ type: "text", text: String(error?.message ?? error) }], isError: true });
       }

@@ -13,7 +13,7 @@
 [![Desktop: Tauri 2](https://img.shields.io/badge/desktop-Tauri%202-E8A44A.svg)](packages/desktop)
 [![Local first](https://img.shields.io/badge/data-local--first-7EB87E.svg)](ARCHITECTURE.md)
 
-TowerForge is an open-source, content-agnostic constructor for 2D hex tower-defense games. It provides a deterministic TypeScript simulation engine, a local browser editor for `.tdproj` projects, safe project-authored TowerScripts, a CLI for validation, headless simulation, and balance analysis, and a static web build target that produces a playable browser bundle (canvas or Phaser).
+TowerForge is an open-source, content-agnostic constructor for 2D tower-defense games with per-map hex and square grids. It provides a deterministic TypeScript simulation engine, a local browser editor for `.tdproj` projects, a Wang/autotile pipeline, safe project-authored TowerScripts, a CLI for validation, headless simulation, and balance analysis, and a static web build target that produces a playable browser bundle (Canvas or Phaser).
 
 ## Downloads
 
@@ -90,7 +90,7 @@ A `.tdproj` directory is the source of a game:
 - `content/visuals.json` stores the local visual catalog, asset bindings, atlas refs, and sprite refs.
 - `content/story-comics.json` stores mission-linked narrative panels.
 - `content/battle-backgrounds.json` stores mission colors and optional sprite backdrops.
-- `maps/src/*.tmj` stores editable hex map sources.
+- `maps/src/*.tmj` stores editable hex/odd-r or square/cardinal map sources.
 - `maps/compiled/maps.json` stores runtime map definitions generated from source maps.
 - `scripts/**/*.tower.json` stores deterministic custom gameplay bound to global, mission, map, wave, tower, enemy, or ability scopes.
 - `build-targets.json` stores output targets.

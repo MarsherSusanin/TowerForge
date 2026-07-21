@@ -9,10 +9,11 @@ import type {
   TowerScriptEntityTarget,
   TowerScriptEventName,
   TowerScriptHandler,
-  TowerScriptJson
+  TowerScriptJson,
+  TowerScriptTileTarget
 } from "../scripting/types.js";
-import { coordKey, hexDistance, hexLine } from "./hex.js";
-import { HexMap } from "./map.js";
+import { coordKey } from "./hex.js";
+import { GridMap } from "./map.js";
 import { TOWER_TARGET_MODES } from "./types.js";
 import type {
   AbilityEffect,
@@ -35,6 +36,7 @@ import type {
   MissionVictoryObjective,
   ResourceBag,
   ResourceCost,
+  RuntimeTerrainOverride,
   StatusEffectSpec,
   SunlightTile,
   TemporaryWaterTile,
@@ -78,7 +80,7 @@ const SCRIPT_GAME_EVENT_NAMES = new Set<TowerScriptEventName>([
   "towerPlaced", "towerSold", "towerMoved", "towerUpgraded", "towerDestroyed", "towerTargetModeChanged",
   "towerFired", "towerResourcesGranted", "enemyHit", "enemyKilled", "enemyLeaked", "enemySpawnedOnDeath",
   "enemyPhaseSpawned", "waveStarted", "waveCleared", "resourcesGranted", "abilityUsed", "objectiveCompleted",
-  "objectiveFailed", "starEarned", "victory", "defeat"
+  "enemyEnteredTile", "terrainChanged", "objectiveFailed", "starEarned", "victory", "defeat"
 ]);
 
 export interface TowerDefenseGameOptions {
@@ -92,7 +94,7 @@ export interface TowerDefenseGameOptions {
 export class TowerDefenseGame {
   readonly content: GameContentRegistry;
   readonly mission: GameContentRegistry["missions"][string];
-  readonly map: HexMap;
+  readonly map: GridMap;
   coreHp: number;
   resources: ResourceBag;
   waveIndex = 0;
@@ -124,6 +126,7 @@ export class TowerDefenseGame {
   private nextWaveStartAt: number | null = null;
   private abilityCooldowns: Partial<Record<MissionAbilityId, number>> = {};
   private temporaryWaterTiles: TemporaryWaterTile[] = [];
+  private runtimeTerrainOverrides = new Map<string, RuntimeTerrainOverride>();
   private readonly sunlightPathKeys: Set<string>;
   private readonly sunlightTilesSnapshot: SunlightTile[];
   private readonly directFlightLine: HexCoord[];
@@ -137,6 +140,7 @@ export class TowerDefenseGame {
   private scriptHandlerLastRun: Record<string, number> = {};
   private scriptEventCursor = 0;
   private scriptActionsRemaining = 0;
+  private scriptTerrainChangesRemaining = 0;
   private scriptSignalDepth = 0;
 
   constructor(options: TowerDefenseGameOptions) {
@@ -171,7 +175,7 @@ export class TowerDefenseGame {
     this.towerDamageMultiplier = Math.max(0, 1 + this.metaEffectTotal("towerDamage", "multiplierPerLevel"));
     this.towerFireRateMetaMultiplier = Math.max(0.05, 1 + this.metaEffectTotal("towerFireRate", "multiplierPerLevel"));
 
-    this.directFlightLine = hexLine(this.map.spawnCoord, this.map.coreCoord);
+    this.directFlightLine = this.map.line(this.map.spawnCoord, this.map.coreCoord);
     const sunlight = this.buildSunlightTilesSnapshot();
     this.sunlightPathKeys = new Set(sunlight.map((tile) => this.routePathKey(tile.routeId, tile.pathOrder)));
     this.sunlightTilesSnapshot = sunlight;
@@ -243,6 +247,8 @@ export class TowerDefenseGame {
     this.nextWaveStartAt = null;
     this.abilityCooldowns = {};
     this.temporaryWaterTiles = [];
+    this.runtimeTerrainOverrides.clear();
+    this.map.restoreAllTerrain();
     this.initializeScripts();
     this.beginScriptTransaction();
     this.runScriptEvent("gameStarted", { type: "gameStarted" });
@@ -345,7 +351,15 @@ export class TowerDefenseGame {
     this.spendResources(type.cost);
     this.towers.push(tower);
     this.map.setOccupied(tower.footprint, towerId);
-    this.lastEvents.push({ type: "towerPlaced", towerId, towerTypeId: typeId });
+    const placedTile = this.map.getTile(coord)!;
+    this.lastEvents.push({
+      type: "towerPlaced",
+      towerId,
+      towerTypeId: typeId,
+      coord: this.cleanCoord(coord),
+      terrain: placedTile.terrain,
+      terrainMetadata: this.terrainMetadata(placedTile.terrain)
+    });
     this.finishScriptedAction();
     return { ok: true };
   }
@@ -552,30 +566,23 @@ export class TowerDefenseGame {
     }
 
     const targetTile = this.map.getTile(center);
-    if (!targetTile || targetTile.terrain !== "path") {
+    if (!targetTile || this.map.getBaseTerrain(center) !== "path") {
       return this.fail("Water can only be poured onto the path.", "reason.abilityPathOnly");
     }
 
     const effectCoords = this.map
       .allPathCoords()
-      .filter((coord) => hexDistance(coord, center) <= ability.radius)
-      .filter((coord) => this.map.getTile(coord)?.terrain === "path");
+      .filter((coord) => this.map.distance(coord, center) <= ability.radius)
+      .filter((coord) => this.map.getBaseTerrain(coord) === "path");
     if (effectCoords.length === 0) {
       return this.fail("Water can only be poured onto the path.", "reason.abilityPathOnly");
     }
 
-    const activeByKey = new Map(this.temporaryWaterTiles.map((tile) => [coordKey(tile), tile]));
     for (const coord of effectCoords) {
-      const key = coordKey(coord);
-      const existing = activeByKey.get(key);
-      if (existing) {
-        existing.expiresIn = Math.max(existing.expiresIn, ability.duration);
-      } else {
-        const tile = { q: coord.q, r: coord.r, expiresIn: ability.duration };
-        activeByKey.set(key, tile);
-        this.temporaryWaterTiles.push(tile);
-      }
+      const result = this.applyTerrainOverride(coord, "water", ability.duration, "ability");
+      if (!result.ok) return result;
     }
+    this.syncTemporaryWaterTiles();
 
     this.abilityCooldowns.path_water = ability.cooldown;
     this.lastEvents.push({
@@ -641,7 +648,7 @@ export class TowerDefenseGame {
       return this.fail("Unknown ability.", "reason.abilityUnavailable");
     }
 
-    const targets = this.enemies.filter((enemy) => enemy.hp > 0 && hexDistance(this.enemyCoord(enemy), center) <= ability.radius);
+    const targets = this.enemies.filter((enemy) => enemy.hp > 0 && this.map.distance(this.enemyCoord(enemy), center) <= ability.radius);
     const enemyIds: string[] = [];
     for (const enemy of targets) {
       for (const effect of effects) {
@@ -732,6 +739,8 @@ export class TowerDefenseGame {
 
   private buildSnapshot(copyStaticState: boolean): GameSnapshot {
     return {
+      mapId: this.map.id,
+      grid: { ...this.map.grid },
       missionId: this.mission.id,
       missionLabel: this.mission.label,
       difficultyId: this.difficulty.id,
@@ -771,9 +780,12 @@ export class TowerDefenseGame {
         coord: { ...tower.coord },
         footprint: tower.footprint.map((coord) => ({ ...coord }))
       })),
-      tiles: copyStaticState ? [...this.map.tiles.values()].map((tile) => ({ ...tile })) : this.staticTilesSnapshot,
+      tiles: copyStaticState || this.runtimeTerrainOverrides.size > 0
+        ? [...this.map.tiles.values()].map((tile) => ({ ...tile }))
+        : this.staticTilesSnapshot,
       abilities: this.buildAbilitySnapshot(),
       temporaryWaterTiles: this.temporaryWaterTiles.map((tile) => ({ ...tile })),
+      terrainOverrides: [...this.runtimeTerrainOverrides.values()].map((entry) => ({ ...entry })),
       sunlightTiles: copyStaticState
         ? this.sunlightTilesSnapshot.map((tile) => ({ ...tile }))
         : this.sunlightTilesSnapshot,
@@ -809,6 +821,7 @@ export class TowerDefenseGame {
 
   private beginScriptTransaction(): void {
     this.scriptActionsRemaining = TOWER_SCRIPT_LIMITS.actionsPerTransaction;
+    this.scriptTerrainChangesRemaining = TOWER_SCRIPT_LIMITS.terrainChangesPerTransaction;
     this.scriptSignalDepth = 0;
   }
 
@@ -922,6 +935,7 @@ export class TowerDefenseGame {
               id: this.mission.mapId,
               width: this.map.width,
               height: this.map.height,
+              grid: { ...this.map.grid },
               spawnCoord: { ...this.map.spawnCoord },
               coreCoord: { ...this.map.coreCoord },
               pathLength: this.map.pathCenterline.length,
@@ -950,6 +964,23 @@ export class TowerDefenseGame {
       const abilityId = typeof event.abilityId === "string" ? event.abilityId : null;
       if (!abilityId || !accepts(abilityId)) return [];
       return [{ scope: "ability", id: abilityId, typeId: abilityId, value: { id: abilityId, ...(this.content.abilities[abilityId] ?? {}) } as Record<string, unknown> }];
+    }
+    if (binding.scope === "terrain") {
+      const coordValue = event.coord ?? event.center ?? event.to;
+      if (!coordValue || typeof coordValue !== "object") return [];
+      const rawCoord = coordValue as { q?: unknown; r?: unknown };
+      if (!Number.isInteger(rawCoord.q) || !Number.isInteger(rawCoord.r)) return [];
+      const coord = { q: Number(rawCoord.q), r: Number(rawCoord.r) };
+      const terrainId = typeof event.toTerrain === "string"
+        ? event.toTerrain
+        : typeof event.terrain === "string" ? event.terrain : this.map.getTile(coord)?.terrain;
+      if (!terrainId || !accepts(terrainId)) return [];
+      return [{
+        scope: "terrain",
+        id: `${coord.q},${coord.r}`,
+        typeId: terrainId,
+        value: { ...this.terrainMetadata(terrainId), coord }
+      }];
     }
     if (binding.scope === "tower") {
       const candidates: TowerScriptSelfContext[] = [];
@@ -1076,6 +1107,21 @@ export class TowerDefenseGame {
       }
       return;
     }
+    if (action.action === "setTileTerrain" || action.action === "restoreTileTerrain") {
+      this.scriptTerrainChangesRemaining -= 1;
+      if (this.scriptTerrainChangesRemaining < 0) throw new Error("TowerScript terrain change budget exceeded.");
+      const coord = this.resolveScriptTileTarget(action.target, context, evaluate);
+      if (!coord) throw new Error("TowerScript tile target did not resolve to an in-bounds integer coordinate.");
+      if (action.action === "restoreTileTerrain") {
+        this.restoreTerrainOverride(coord);
+        return;
+      }
+      const duration = action.duration === undefined ? undefined : numberValue(action.duration);
+      if (duration !== undefined && duration <= 0) throw new Error("setTileTerrain duration must be greater than zero.");
+      const result = this.applyTerrainOverride(coord, action.terrainId, duration, "script");
+      if (!result.ok) throw new Error(result.reason ?? "Unable to change tile terrain.");
+      return;
+    }
     if (action.action === "setState") {
       context.state[action.key] = evaluate(action.value);
       this.assertScriptStateSize(context);
@@ -1096,6 +1142,103 @@ export class TowerDefenseGame {
       this.runScriptEvent("signal", { type: "signal", signal: action.signal, payload, sourceScriptId: context.script.id });
       this.scriptSignalDepth -= 1;
     }
+  }
+
+  private resolveScriptTileTarget(
+    target: TowerScriptTileTarget,
+    context: TowerScriptExecutionContext,
+    evaluate: (expression: Parameters<typeof evaluateTowerScriptExpression>[0]) => TowerScriptJson
+  ): HexCoord | undefined {
+    if (target === "eventTile") {
+      const value = context.event.coord ?? context.event.center ?? context.event.to;
+      if (!value || typeof value !== "object") return undefined;
+      const coord = value as { q?: unknown; r?: unknown };
+      if (!Number.isInteger(coord.q) || !Number.isInteger(coord.r)) return undefined;
+      const resolved = { q: Number(coord.q), r: Number(coord.r) };
+      return this.map.isInside(resolved) ? resolved : undefined;
+    }
+    const q = evaluate(target.q);
+    const r = evaluate(target.r);
+    if (!Number.isInteger(q) || !Number.isInteger(r)) return undefined;
+    const coord = { q: Number(q), r: Number(r) };
+    return this.map.isInside(coord) ? coord : undefined;
+  }
+
+  private applyTerrainOverride(
+    coord: HexCoord,
+    terrainId: string,
+    duration: number | undefined,
+    source: RuntimeTerrainOverride["source"]
+  ): ActionResult {
+    const terrain = this.content.terrainTypes[terrainId];
+    if (!terrain) return this.fail(`Unknown terrain "${terrainId}".`, "reason.unknownTerrain", { terrainId });
+    if (!terrain.walkable && this.map.isPathCoord(coord)) {
+      return this.fail("An active route cannot be changed to non-walkable terrain.", "reason.routeMustRemainWalkable");
+    }
+    const tile = this.map.getTile(coord);
+    if (!tile) return this.fail("Tile is outside the map.", "reason.tileOutsideMap");
+    const key = coordKey(coord);
+    if (!this.runtimeTerrainOverrides.has(key) && this.runtimeTerrainOverrides.size >= TOWER_SCRIPT_LIMITS.activeTerrainOverrides) {
+      return this.fail(`Active terrain override limit (${TOWER_SCRIPT_LIMITS.activeTerrainOverrides}) exceeded.`, "reason.terrainOverrideLimit");
+    }
+    const fromTerrain = tile.terrain;
+    const existing = this.runtimeTerrainOverrides.get(key);
+    const expiresIn = duration === undefined ? undefined : Math.max(duration, existing?.expiresIn ?? 0);
+    this.runtimeTerrainOverrides.set(key, { q: coord.q, r: coord.r, terrain: terrainId, source, ...(expiresIn === undefined ? {} : { expiresIn }) });
+    this.map.setTerrain(coord, terrainId);
+    if (fromTerrain !== terrainId) {
+      this.lastEvents.push({
+        type: "terrainChanged",
+        coord: { ...coord },
+        fromTerrain,
+        toTerrain: terrainId,
+        terrainMetadata: this.terrainMetadata(terrainId),
+        source
+      });
+    }
+    return { ok: true };
+  }
+
+  private restoreTerrainOverride(coord: HexCoord): boolean {
+    return this.restoreTerrainOverrideByKey(coordKey(coord));
+  }
+
+  private restoreTerrainOverrideByKey(key: string): boolean {
+    const existing = this.runtimeTerrainOverrides.get(key);
+    if (!existing) return false;
+    const tile = this.map.getTile(existing);
+    const fromTerrain = tile?.terrain ?? existing.terrain;
+    this.runtimeTerrainOverrides.delete(key);
+    this.map.restoreTerrain(existing);
+    const toTerrain = this.map.getTile(existing)?.terrain ?? fromTerrain;
+    if (fromTerrain !== toTerrain) {
+      this.lastEvents.push({
+        type: "terrainChanged",
+        coord: { q: existing.q, r: existing.r },
+        fromTerrain,
+        toTerrain,
+        terrainMetadata: this.terrainMetadata(toTerrain),
+        source: "restore"
+      });
+    }
+    return true;
+  }
+
+  private syncTemporaryWaterTiles(): void {
+    this.temporaryWaterTiles = [...this.runtimeTerrainOverrides.values()]
+      .filter((entry) => entry.source === "ability" && entry.terrain === "water" && typeof entry.expiresIn === "number")
+      .map((entry) => ({ q: entry.q, r: entry.r, expiresIn: entry.expiresIn! }));
+  }
+
+  private terrainMetadata(terrainId: string) {
+    return this.content.terrainTypes[terrainId] ?? {
+      id: terrainId,
+      label: terrainId,
+      buildable: false,
+      walkable: false,
+      groundSpeedMultiplier: 1,
+      tags: []
+    };
   }
 
   private resolveScriptEnemies(target: TowerScriptEntityTarget, context: TowerScriptExecutionContext): EnemyState[] {
@@ -1246,15 +1389,12 @@ export class TowerDefenseGame {
       this.abilityCooldowns[ability.id] = Math.max(0, remaining - delta);
     }
 
-    let writeIndex = 0;
-    for (const tile of this.temporaryWaterTiles) {
-      tile.expiresIn = Math.max(0, tile.expiresIn - delta);
-      if (tile.expiresIn > 0) {
-        this.temporaryWaterTiles[writeIndex] = tile;
-        writeIndex += 1;
-      }
+    for (const [key, override] of this.runtimeTerrainOverrides) {
+      if (override.expiresIn === undefined) continue;
+      override.expiresIn = Math.max(0, override.expiresIn - delta);
+      if (override.expiresIn <= 0) this.restoreTerrainOverrideByKey(key);
     }
-    this.temporaryWaterTiles.length = writeIndex;
+    this.syncTemporaryWaterTiles();
   }
 
   private updateEnemyStatuses(delta: number): void {
@@ -1341,7 +1481,26 @@ export class TowerDefenseGame {
       const avoidanceSpeedFactor = Math.abs(desiredOffset) > 0.05 ? 0.82 : 1;
       const terrainSpeedFactor = this.enemyTerrainSpeedFactor(enemy);
       const statusSpeedFactor = this.enemyStatusSpeedFactor(enemy);
+      const previousPathOrder = Math.floor(enemy.pathProgress);
       enemy.pathProgress += type.speed * (this.difficulty.enemySpeedMultiplier ?? 1) * avoidanceSpeedFactor * terrainSpeedFactor * statusSpeedFactor * delta;
+
+      const track = this.enemyTrack(enemy);
+      const enteredThrough = Math.min(Math.floor(enemy.pathProgress), track.length - 1);
+      for (let pathOrder = previousPathOrder + 1; pathOrder <= enteredThrough; pathOrder += 1) {
+        const coord = track[pathOrder];
+        const tile = coord ? this.map.getTile(coord) : undefined;
+        if (!coord || !tile) continue;
+        this.lastEvents.push({
+          type: "enemyEnteredTile",
+          enemyId: enemy.id,
+          enemyTypeId: enemy.typeId,
+          coord: { ...coord },
+          terrain: tile.terrain,
+          terrainMetadata: this.terrainMetadata(tile.terrain),
+          routeId: enemy.routeId,
+          pathOrder
+        });
+      }
 
       if (enemy.pathProgress >= trackEnd) {
         enemy.hp = 0;
@@ -1439,7 +1598,7 @@ export class TowerDefenseGame {
         if (!aura.includeSelf && target.id === healer.id) {
           continue;
         }
-        if (hexDistance(healerCoord, this.enemyCoord(target)) > aura.radius) {
+        if (this.map.distance(healerCoord, this.enemyCoord(target)) > aura.radius) {
           continue;
         }
         const previous = healByTargetId.get(target.id);
@@ -1493,7 +1652,7 @@ export class TowerDefenseGame {
       const center = this.enemyCoord(enemy);
       const disabledTowerIds: string[] = [];
       for (const tower of this.towers) {
-        if (hexDistance(center, tower.coord) <= disrupt.radius) {
+        if (this.map.distance(center, tower.coord) <= disrupt.radius) {
           tower.disabledFor = Math.max(tower.disabledFor ?? 0, disrupt.duration);
           disabledTowerIds.push(tower.id);
         }
@@ -1528,7 +1687,7 @@ export class TowerDefenseGame {
       let best = Infinity;
       for (const tower of this.towers) {
         if (typeof tower.hp !== "number" || tower.hp <= 0) continue; // indestructible or already downed this tick
-        const dist = hexDistance(center, tower.coord);
+        const dist = this.map.distance(center, tower.coord);
         if (dist <= attack.range && dist < best) { best = dist; target = tower; }
       }
       if (!target) continue;
@@ -1624,7 +1783,7 @@ export class TowerDefenseGame {
         if (enemy.hp <= 0 || alreadyHit.has(enemy.id) || this.enemyTargetClass(enemy) !== "ground") {
           continue;
         }
-        const distance = hexDistance(fromCoord, this.enemyCoord(enemy));
+        const distance = this.map.distance(fromCoord, this.enemyCoord(enemy));
         if (distance > chain.jumpRadius) {
           continue;
         }
@@ -1738,7 +1897,7 @@ export class TowerDefenseGame {
         (enemy) =>
           enemy.hp > 0 &&
           (attack.affectsClasses ?? ["ground"]).includes(this.enemyTargetClass(enemy)) &&
-          hexDistance(this.enemyCoord(enemy), targetCoord) <= attack.splashRadius
+          this.map.distance(this.enemyCoord(enemy), targetCoord) <= attack.splashRadius
       );
 
       this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: target.id, damage: attack.damage });
@@ -1800,7 +1959,7 @@ export class TowerDefenseGame {
         const multiplier = Math.max(0, attack.delivery.secondaryMultiplier ?? 1);
         const center = this.enemyCoord(primary);
         for (const enemy of this.enemies) {
-          if (enemy.hp <= 0 || !classes.includes(this.enemyTargetClass(enemy)) || hexDistance(center, this.enemyCoord(enemy)) > attack.delivery.radius) continue;
+          if (enemy.hp <= 0 || !classes.includes(this.enemyTargetClass(enemy)) || this.map.distance(center, this.enemyCoord(enemy)) > attack.delivery.radius) continue;
           const nextMultiplier = enemy.id === primary.id ? 1 : multiplier;
           const current = delivered.get(enemy.id);
           if (!current || nextMultiplier > current.damageMultiplier) delivered.set(enemy.id, { enemy, damageMultiplier: nextMultiplier });
@@ -1812,8 +1971,8 @@ export class TowerDefenseGame {
         for (let hop = 1; hop <= delivery.maxJumps; hop += 1) {
           const center = this.enemyCoord(current);
           const next = this.enemies
-            .filter((enemy) => enemy.hp > 0 && !visited.has(enemy.id) && classes.includes(this.enemyTargetClass(enemy)) && hexDistance(center, this.enemyCoord(enemy)) <= delivery.jumpRadius)
-            .sort((left, right) => hexDistance(center, this.enemyCoord(left)) - hexDistance(center, this.enemyCoord(right)) || left.id.localeCompare(right.id))[0];
+            .filter((enemy) => enemy.hp > 0 && !visited.has(enemy.id) && classes.includes(this.enemyTargetClass(enemy)) && this.map.distance(center, this.enemyCoord(enemy)) <= delivery.jumpRadius)
+            .sort((left, right) => this.map.distance(center, this.enemyCoord(left)) - this.map.distance(center, this.enemyCoord(right)) || left.id.localeCompare(right.id))[0];
           if (!next) break;
           visited.add(next.id);
           const damageMultiplier = Math.pow(delivery.damageFalloff ?? 1, hop);
@@ -1891,8 +2050,8 @@ export class TowerDefenseGame {
     const mode = tower.targetMode ?? "first";
     const leftProgress = this.enemyRouteProgressRatio(left);
     const rightProgress = this.enemyRouteProgressRatio(right);
-    const leftDistance = hexDistance(tower.coord, this.enemyCoord(left));
-    const rightDistance = hexDistance(tower.coord, this.enemyCoord(right));
+    const leftDistance = this.map.distance(tower.coord, this.enemyCoord(left));
+    const rightDistance = this.map.distance(tower.coord, this.enemyCoord(right));
     let result = 0;
     if (mode === "last") result = leftProgress - rightProgress;
     else if (mode === "closest") result = leftDistance - rightDistance;
@@ -1906,7 +2065,7 @@ export class TowerDefenseGame {
   }
 
   private enemyInRange(tower: TowerState, enemy: EnemyState, range: number): boolean {
-    return hexDistance(tower.coord, this.enemyCoord(enemy)) <= range;
+    return this.map.distance(tower.coord, this.enemyCoord(enemy)) <= range;
   }
 
   private towerRange(tower: TowerState): number {
@@ -1973,7 +2132,8 @@ export class TowerDefenseGame {
       return 1;
     }
     const coord = this.enemyCoord(enemy);
-    const staticFactor = this.map.getTile(coord)?.terrain === "water" ? this.content.constants.waterGroundSpeedFactor : 1;
+    const terrainId = this.map.getTile(coord)?.terrain;
+    const staticFactor = terrainId ? this.terrainMetadata(terrainId).groundSpeedMultiplier : 1;
     const temporaryFactor = this.isTemporaryWaterTile(coord) ? this.content.constants.pathWaterGroundSpeedFactor : 1;
     return Math.min(staticFactor, temporaryFactor);
   }
@@ -2233,7 +2393,7 @@ export class TowerDefenseGame {
       return false;
     }
 
-    const edgeDistance = Math.max(0, hexDistance(support.coord, target.coord) - supportType.footprintRadius - targetType.footprintRadius);
+    const edgeDistance = Math.max(0, this.map.distance(support.coord, target.coord) - supportType.footprintRadius - targetType.footprintRadius);
     return edgeDistance <= this.towerRange(support);
   }
 
@@ -2273,7 +2433,7 @@ export class TowerDefenseGame {
     }
 
     return this.towers.some(
-      (tower) => tower.typeId === sourceTypeId && hexDistance(tower.coord, coord) <= this.towerRange(tower)
+      (tower) => tower.typeId === sourceTypeId && this.map.distance(tower.coord, coord) <= this.towerRange(tower)
     );
   }
 
@@ -2292,7 +2452,7 @@ export class TowerDefenseGame {
       return this.fail("Outside map.", "reason.outsideMap");
     }
 
-    const expectedFootprintSize = 1 + 3 * type.footprintRadius * (type.footprintRadius + 1);
+    const expectedFootprintSize = this.map.footprintSize(type.footprintRadius);
     if (footprint.length < expectedFootprintSize) {
       return this.fail("Tower does not fit.", "reason.noFit");
     }
@@ -2301,7 +2461,7 @@ export class TowerDefenseGame {
       if (tile.terrain === "water") {
         return this.fail("Cannot build on water.", "reason.water");
       }
-      if (tile.terrain !== "buildable") {
+      if (!this.content.terrainTypes[tile.terrain]?.buildable) {
         return this.fail("Can only build outside the path.", "reason.path");
       }
       if (tile.occupiedBy && tile.occupiedBy !== ignoreTowerId) {
@@ -2332,11 +2492,11 @@ export class TowerDefenseGame {
         return true;
       }
 
-      if (hexDistance(nextCoord, tower.coord) <= movedRange) {
+      if (this.map.distance(nextCoord, tower.coord) <= movedRange) {
         return true;
       }
 
-      return otherSources.some((source) => hexDistance(source.coord, tower.coord) <= this.towerRange(source));
+      return otherSources.some((source) => this.map.distance(source.coord, tower.coord) <= this.towerRange(source));
     });
   }
 
@@ -2349,7 +2509,7 @@ export class TowerDefenseGame {
     const otherSources = this.towers.filter((tower) => tower.typeId === sourceTower.typeId && tower.id !== sourceTowerId);
     return this.towers.every((tower) => {
       if (tower.id === sourceTowerId || !unlocked.has(tower.typeId)) return true;
-      return otherSources.some((source) => hexDistance(source.coord, tower.coord) <= this.towerRange(source));
+      return otherSources.some((source) => this.map.distance(source.coord, tower.coord) <= this.towerRange(source));
     });
   }
 

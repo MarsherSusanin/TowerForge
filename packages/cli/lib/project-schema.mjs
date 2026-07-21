@@ -1,17 +1,19 @@
 import { compileMapSources } from "./map-compiler.mjs";
 
-export const PROJECT_SCHEMA_VERSION = 1;
+export const PROJECT_SCHEMA_VERSION = 2;
 
 export function defaultVisuals() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     assetsRoot: "assets",
     atlases: {},
     sprites: {},
+    tileSets: {},
     bindings: {
       towers: {},
       enemies: {},
       tiles: {},
+      tileSets: { grids: {}, maps: {} },
       ui: {}
     },
     audio: {
@@ -34,20 +36,25 @@ export function normalizeManifest(input) {
 
 export function normalizeVisuals(input) {
   const visuals = { ...defaultVisuals(), ...clone(input) };
-  visuals.schemaVersion ??= 1;
+  visuals.schemaVersion ??= 2;
   visuals.assetsRoot = normalizeRelativeAssetPath(visuals.assetsRoot || "assets", "assets");
   visuals.atlases ??= {};
   visuals.sprites ??= {};
+  visuals.tileSets ??= {};
   visuals.bindings = {
     towers: {},
     enemies: {},
     tiles: {},
+    tileSets: { grids: {}, maps: {} },
     ui: {},
     ...(visuals.bindings ?? {})
   };
   visuals.bindings.towers ??= {};
   visuals.bindings.enemies ??= {};
   visuals.bindings.tiles ??= {};
+  visuals.bindings.tileSets ??= { grids: {}, maps: {} };
+  visuals.bindings.tileSets.grids ??= {};
+  visuals.bindings.tileSets.maps ??= {};
   visuals.bindings.ui ??= {};
 
   for (const atlas of Object.values(visuals.atlases)) {
@@ -108,8 +115,8 @@ export function validateProjectSchemas(files) {
     err("scriptFile", issue.path ?? "scripts", "source", issue.message ?? "Invalid TowerScript file.");
   }
   validateMapSources(files.mapSources ?? {}, err, warn);
-  issues.push(...compileMapSources(files.mapSources ?? {}).issues);
-  validateVisuals(files.visuals, err, warn, files.balance);
+  issues.push(...compileMapSources(files.mapSources ?? {}, files.balance?.terrainTypes ?? {}).issues);
+  validateVisuals(files.visuals, err, warn, files.balance, files.maps);
   validateNarrative(files, err, warn);
   validateBuildTargets(files.buildTargets, err);
 
@@ -251,7 +258,7 @@ export function listVisualAssetPaths(visuals) {
   return paths;
 }
 
-function validateVisuals(visuals, err, warn, balance) {
+function validateVisuals(visuals, err, warn, balance, maps = {}) {
   if (!visuals || typeof visuals !== "object") {
     err("visuals", "content/visuals.json", "root", "visuals.json must be an object.");
     return;
@@ -326,6 +333,73 @@ function validateVisuals(visuals, err, warn, balance) {
       warn("visuals", spriteId, `sprites.${spriteId}`, `Sprite "${spriteId}" has no image src or atlas frame yet.`);
     }
   }
+  for (const [tileSetId, tileSet] of Object.entries(visuals.tileSets ?? {})) {
+    if (!tileSet || typeof tileSet !== "object" || Array.isArray(tileSet)) {
+      err("tileSet", tileSetId, `tileSets.${tileSetId}`, `Tileset "${tileSetId}" must be an object.`);
+      continue;
+    }
+    if (!visuals.atlases?.[tileSet.atlas]) err("tileSet", tileSetId, `tileSets.${tileSetId}.atlas`, `Tileset references unknown atlas "${String(tileSet.atlas)}".`);
+    if (tileSet.id !== undefined && tileSet.id !== tileSetId) err("tileSet", tileSetId, `tileSets.${tileSetId}.id`, `Tileset id "${String(tileSet.id)}" must match its catalog key.`);
+    if (!Number.isInteger(tileSet.tileWidth) || tileSet.tileWidth <= 0) err("tileSet", tileSetId, `tileSets.${tileSetId}.tileWidth`, "tileWidth must be a positive integer.");
+    if (!Number.isInteger(tileSet.tileHeight) || tileSet.tileHeight <= 0) err("tileSet", tileSetId, `tileSets.${tileSetId}.tileHeight`, "tileHeight must be a positive integer.");
+    for (const field of ["margin", "spacing"]) {
+      if (tileSet[field] !== undefined && (!Number.isInteger(tileSet[field]) || tileSet[field] < 0)) err("tileSet", tileSetId, `tileSets.${tileSetId}.${field}`, `${field} must be a non-negative integer.`);
+    }
+    if (!["random", "edge", "corner", "mixed", "blob", "dual-grid", "sectors"].includes(tileSet.ruleKind)) {
+      err("tileSet", tileSetId, `tileSets.${tileSetId}.ruleKind`, `Unsupported ruleKind "${String(tileSet.ruleKind)}".`);
+    }
+    if (!["hex", "square"].includes(tileSet.topology)) err("tileSet", tileSetId, `tileSets.${tileSetId}.topology`, "topology must be hex or square.");
+    if (!tileSet.materials || typeof tileSet.materials !== "object" || Array.isArray(tileSet.materials)) {
+      err("tileSet", tileSetId, `tileSets.${tileSetId}.materials`, "materials must be an object keyed by terrain id.");
+      continue;
+    }
+    for (const [terrainId, material] of Object.entries(tileSet.materials)) {
+      const base = `tileSets.${tileSetId}.materials.${terrainId}`;
+      if (!balance?.terrainTypes?.[terrainId]) warn("tileSet", tileSetId, base, `Material references undeclared terrain "${terrainId}".`);
+      if (!material || typeof material !== "object" || Array.isArray(material)) {
+        err("tileSet", tileSetId, base, "material must be an object.");
+        continue;
+      }
+      if (material.connectionSource !== undefined && !["neighbors", "pathRoutes"].includes(material.connectionSource)) {
+        err("tileSet", tileSetId, `${base}.connectionSource`, "connectionSource must be neighbors or pathRoutes.");
+      }
+      if (!material.signatures || typeof material.signatures !== "object" || Array.isArray(material.signatures)) {
+        err("tileSet", tileSetId, `${base}.signatures`, "signatures must be an object keyed by canonical mask signature.");
+        continue;
+      }
+      for (const [signature, rawVariants] of Object.entries(material.signatures)) {
+        const variants = Array.isArray(rawVariants) ? rawVariants : [rawVariants];
+        if (variants.length === 0) err("tileSet", tileSetId, `${base}.signatures.${signature}`, "A signature needs at least one sprite variant.");
+        variants.forEach((variant, index) => {
+          const variantPath = `${base}.signatures.${signature}[${index}]`;
+          if (!variant || typeof variant !== "object" || Array.isArray(variant)) {
+            err("tileSet", tileSetId, variantPath, "Variant must be an object.");
+            return;
+          }
+          if (typeof variant.spriteId !== "string" || !visuals.sprites?.[variant.spriteId]) err("tileSet", tileSetId, `${variantPath}.spriteId`, `Variant references unknown sprite "${String(variant.spriteId)}".`);
+          if (variant.weight !== undefined && (!Number.isFinite(variant.weight) || variant.weight <= 0)) err("tileSet", tileSetId, `${variantPath}.weight`, "weight must be a finite number > 0.");
+          if (variant.transform !== undefined) {
+            const transform = variant.transform;
+            if (!transform || typeof transform !== "object" || Array.isArray(transform)) err("tileSet", tileSetId, `${variantPath}.transform`, "transform must be an object.");
+            else {
+              if (transform.flipX !== undefined && typeof transform.flipX !== "boolean") err("tileSet", tileSetId, `${variantPath}.transform.flipX`, "flipX must be boolean.");
+              if (transform.flipY !== undefined && typeof transform.flipY !== "boolean") err("tileSet", tileSetId, `${variantPath}.transform.flipY`, "flipY must be boolean.");
+              if (transform.rotate !== undefined && ![0, 90, 180, 270].includes(transform.rotate)) err("tileSet", tileSetId, `${variantPath}.transform.rotate`, "rotate must be 0, 90, 180, or 270 degrees.");
+            }
+          }
+        });
+      }
+    }
+  }
+  const tileBindings = visuals.bindings?.tileSets ?? {};
+  for (const [gridKind, tileSetId] of Object.entries(tileBindings.grids ?? {})) {
+    if (!["hex", "square"].includes(gridKind)) err("visuals", "content/visuals.json", `bindings.tileSets.grids.${gridKind}`, "Grid binding key must be hex or square.");
+    if (!visuals.tileSets?.[tileSetId]) err("visuals", "content/visuals.json", `bindings.tileSets.grids.${gridKind}`, `Grid binding references unknown tileset "${String(tileSetId)}".`);
+  }
+  for (const [mapId, tileSetId] of Object.entries(tileBindings.maps ?? {})) {
+    if (!maps?.[mapId]) err("visuals", "content/visuals.json", `bindings.tileSets.maps.${mapId}`, `Map binding references unknown map "${mapId}".`);
+    if (!visuals.tileSets?.[tileSetId]) err("visuals", "content/visuals.json", `bindings.tileSets.maps.${mapId}`, `Map binding references unknown tileset "${String(tileSetId)}".`);
+  }
 
   const sounds = visuals.audio?.sounds ?? {};
   for (const [soundId, sound] of Object.entries(sounds)) {
@@ -395,6 +469,11 @@ function validateMaps(maps, err) {
     if (!Number.isInteger(map.height) || map.height <= 0) err("map", mapId, "height", "Map height must be a positive integer.");
     if (!Array.isArray(map.pathCenterline)) err("map", mapId, "pathCenterline", "pathCenterline must be an array.");
     if (!Array.isArray(map.terrainOverrides)) err("map", mapId, "terrainOverrides", "terrainOverrides must be an array.");
+    if (map.grid !== undefined) {
+      const validHex = map.grid?.kind === "hex" && map.grid.layout === "odd-r";
+      const validSquare = map.grid?.kind === "square" && map.grid.adjacency === "cardinal";
+      if (!validHex && !validSquare) err("map", mapId, "grid", "grid must be hex/odd-r or square/cardinal.");
+    }
   }
 }
 
@@ -404,8 +483,8 @@ function validateMapSources(mapSources, err, warn) {
       err("mapSource", sourceName, "root", `Map source "${sourceName}" must be an object.`);
       continue;
     }
-    if (source.orientation && source.orientation !== "hexagonal") {
-      warn("mapSource", sourceName, "orientation", `Map source "${sourceName}" is "${source.orientation}", expected hexagonal.`);
+    if (source.orientation && !["hexagonal", "orthogonal"].includes(source.orientation)) {
+      warn("mapSource", sourceName, "orientation", `Map source "${sourceName}" has unsupported orientation "${source.orientation}".`);
     }
     if (!Number.isInteger(source.width) || source.width <= 0) err("mapSource", sourceName, "width", "Source width must be a positive integer.");
     if (!Number.isInteger(source.height) || source.height <= 0) err("mapSource", sourceName, "height", "Source height must be a positive integer.");

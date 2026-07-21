@@ -1,6 +1,8 @@
 import { ABILITY_IDS, ATTACK_KIND_IDS } from "./schema-descriptor.js";
 import type { GameContentRegistry } from "./registry.js";
 import { TOWER_TARGET_MODES } from "../simulation/types.js";
+import { coordKey } from "../simulation/hex.js";
+import { createGridTopology, normalizeGridDefinition } from "../simulation/topology.js";
 import { validateTowerScriptDefinitions } from "../scripting/validate.js";
 import type { TowerScriptDefinition } from "../scripting/types.js";
 
@@ -116,7 +118,7 @@ export function validateGameContentRegistry(content: GameContentRegistry): Valid
 
   for (const issue of validateTowerScriptDefinitions(
     content.scripts as Record<string, TowerScriptDefinition>,
-    { missionIds, mapIds, waveSetIds, towerIds, enemyIds, abilityIds, currencyIds }
+    { missionIds, mapIds, waveSetIds, towerIds, enemyIds, abilityIds, currencyIds, terrainIds: new Set(Object.keys(content.terrainTypes)) }
   )) {
     err("script", issue.scriptId, issue.fieldPath, issue.message);
   }
@@ -362,6 +364,18 @@ export function validateGameContentRegistry(content: GameContentRegistry): Valid
     }
   }
 
+  // Terrain registry
+  for (const [terrainId, terrain] of Object.entries(content.terrainTypes)) {
+    if (terrain.id !== terrainId) err("terrain", terrainId, "id", `Terrain key "${terrainId}" has mismatched id "${terrain.id}".`);
+    if (!terrain.label.trim()) err("terrain", terrainId, "label", `Terrain "${terrainId}" needs a non-empty label.`);
+    if (typeof terrain.buildable !== "boolean") err("terrain", terrainId, "buildable", "buildable must be boolean.");
+    if (typeof terrain.walkable !== "boolean") err("terrain", terrainId, "walkable", "walkable must be boolean.");
+    requireFinite(terrain.groundSpeedMultiplier, "terrain", terrainId, "groundSpeedMultiplier");
+    if (!Array.isArray(terrain.tags) || terrain.tags.some((tag) => typeof tag !== "string")) {
+      err("terrain", terrainId, "tags", "tags must be an array of strings.");
+    }
+  }
+
   // Maps
   for (const [mapId, map] of Object.entries(content.maps)) {
     if (map.id !== mapId) {
@@ -373,11 +387,44 @@ export function validateGameContentRegistry(content: GameContentRegistry): Valid
     if (map.pathCenterline.length < 2) {
       err("map", mapId, "pathCenterline", `Map "${mapId}" needs at least two path centerline points.`);
     }
-    for (const route of map.pathRoutes ?? []) {
+    const grid = normalizeGridDefinition(map.grid);
+    const topology = createGridTopology(grid);
+    if (map.grid && map.grid.kind === "hex" && map.grid.layout !== "odd-r") {
+      err("map", mapId, "grid.layout", `Map "${mapId}" uses unsupported hex layout "${String(map.grid.layout)}".`);
+    }
+    if (map.grid && map.grid.kind === "square" && map.grid.adjacency !== "cardinal") {
+      err("map", mapId, "grid.adjacency", `Map "${mapId}" uses unsupported square adjacency "${String(map.grid.adjacency)}".`);
+    }
+    const routes = map.pathRoutes?.length ? map.pathRoutes : [{ id: "main", pathCenterline: map.pathCenterline }];
+    const overrideTerrain = new Map(map.terrainOverrides.map((entry) => [coordKey(entry), entry.terrain]));
+    const terrainAt = (coord: { q: number; r: number }) => {
+      if (coordKey(coord) === coordKey(map.spawnCoord)) return content.terrainTypes.spawn;
+      if (coordKey(coord) === coordKey(map.coreCoord)) return content.terrainTypes.core;
+      return content.terrainTypes[overrideTerrain.get(coordKey(coord)) ?? map.defaultTerrain];
+    };
+    if (!content.terrainTypes[map.defaultTerrain]) err("map", mapId, "defaultTerrain", `Unknown terrain "${map.defaultTerrain}".`);
+    for (const [index, override] of map.terrainOverrides.entries()) {
+      if (!content.terrainTypes[override.terrain]) err("map", mapId, `terrainOverrides[${index}].terrain`, `Unknown terrain "${override.terrain}".`);
+    }
+    for (const route of routes) {
       if (!route.id) err("map", mapId, "pathRoutes", `Map "${mapId}" has a path route without an id.`);
       if (route.pathCenterline.length < 2) {
         err("map", mapId, `pathRoutes.${route.id}`, `Map "${mapId}" route "${route.id}" needs at least 2 centerline points.`);
       }
+      route.pathCenterline.forEach((coord, index) => {
+        if (terrainAt(coord)?.walkable === false) {
+          err("map", mapId, `pathRoutes.${route.id}[${index}]`, `Route "${route.id}" crosses non-walkable terrain at ${coord.q},${coord.r}.`);
+        }
+        const next = route.pathCenterline[index + 1];
+        if (next && !topology.directionBetween(coord, next)) {
+          err(
+            "map",
+            mapId,
+            `pathRoutes.${route.id}[${index + 1}]`,
+            `Route "${route.id}" contains a non-adjacent ${grid.kind} segment ${coord.q},${coord.r} -> ${next.q},${next.r}.`
+          );
+        }
+      });
     }
     const allCoords = [map.spawnCoord, map.coreCoord, ...map.pathCenterline, ...(map.pathRoutes ?? []).flatMap((r) => r.pathCenterline), ...map.terrainOverrides];
     for (const coord of allCoords) {

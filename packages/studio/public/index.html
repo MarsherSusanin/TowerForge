@@ -314,7 +314,10 @@
       <div class="panel-layout">
         <aside class="entity-list">
           <div class="entity-list-header">
-            <button id="btn-add-map-source" class="btn btn-outline" style="width:100%">Add Map</button>
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px">
+              <button id="btn-add-map-source" class="btn btn-outline">Add Map</button>
+              <select id="new-map-grid" aria-label="New map grid"><option value="hex">Hex</option><option value="square">Square</option></select>
+            </div>
           </div>
           <div class="entity-list-body" id="map-source-list"></div>
         </aside>
@@ -409,6 +412,35 @@
               <div class="field"><label>Kind</label><select id="asset-kind"><option value="sprite">sprite</option><option value="atlas">atlas</option><option value="sound">sound</option><option value="music">music</option></select></div>
               <button id="btn-import-asset" class="btn btn-outline" style="align-self:flex-end">Import</button>
             </div>
+          </section>
+          <section class="tool-card">
+            <div class="form-section-title">Tileset Workbench</div>
+            <div class="form-row">
+              <div class="field"><label>Tiled descriptor</label><input id="tileset-descriptor" type="file" accept=".tsj,.tsx,application/json,application/xml,text/xml"></div>
+              <div class="field"><label>PNG spritesheet</label><input id="tileset-image" type="file" accept=".png,image/png"></div>
+              <div class="field"><label>Topology</label><select id="tileset-topology"><option value="square">Square</option><option value="hex">Hex</option></select></div>
+            </div>
+            <div class="form-row">
+              <div class="field"><label>Tileset ID</label><input id="tileset-id" class="mono" placeholder="verdant_square"></div>
+              <button id="btn-preview-tileset" class="btn btn-outline" type="button" style="align-self:flex-end">Preview tileset</button>
+              <button id="btn-apply-tileset" class="btn btn-primary" type="button" style="align-self:flex-end" disabled>Apply</button>
+            </div>
+            <div class="tileset-slicing-grid">
+              <div class="field"><label>Tile width</label><input id="tileset-tile-width" type="number" min="1" step="1"></div>
+              <div class="field"><label>Tile height</label><input id="tileset-tile-height" type="number" min="1" step="1"></div>
+              <div class="field"><label>Columns</label><input id="tileset-columns" type="number" min="1" step="1"></div>
+              <div class="field"><label>Margin</label><input id="tileset-margin" type="number" min="0" step="1"></div>
+              <div class="field"><label>Spacing</label><input id="tileset-spacing" type="number" min="0" step="1"></div>
+            </div>
+            <div class="tileset-preview-grid">
+              <canvas id="tileset-slicing-preview" width="640" height="240" tabindex="0" aria-label="Tileset slicing preview"></canvas>
+              <div id="tileset-coverage-matrix" class="tileset-coverage-matrix" aria-live="polite"></div>
+            </div>
+            <div class="form-row tileset-rule-editors">
+              <div class="field"><label>Materials and signatures</label><textarea id="tileset-materials" class="mono" spellcheck="false"></textarea></div>
+              <div class="field"><label>Terrain properties</label><textarea id="tileset-terrain-types" class="mono" spellcheck="false"></textarea></div>
+            </div>
+            <div id="tileset-workbench-report" class="text-muted" style="font-size:11.5px"></div>
           </section>
           <section class="tool-card">
             <div class="form-section-title">Action Sounds</div>

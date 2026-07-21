@@ -431,6 +431,7 @@ async function save() {
         defaultDifficultyId: S.project.defaultDifficultyId,
         difficulties:     S.project.difficulties,
         metaProgression:  S.project.metaProgression,
+        terrainTypes:     S.project.terrainTypes,
         worldMap:         S.project.worldMap,
         visuals:          S.project.visuals,
         storyComics:      S.project.storyComics,
@@ -3525,6 +3526,7 @@ function addMapSource() {
   const id = "map_" + Math.random().toString(36).slice(-5);
   const sourceName = `${id}.tmj`;
   const w = 6, h = 6;
+  const gridKind = $("new-map-grid")?.value === "square" ? "square" : "hex";
   const pathCenterline = Array.from({ length: h }, (_, r) => ({ q: 2, r }));
   // Tiled "terrain" tile layer: all buildable (gid 1), the path column = gid 2.
   const data = new Array(w * h).fill(GID_BY_TERRAIN_C.buildable);
@@ -3532,11 +3534,12 @@ function addMapSource() {
   S.project.mapSources[sourceName] = {
     id,
     type: "map",
-    orientation: "hexagonal",
+    orientation: gridKind === "square" ? "orthogonal" : "hexagonal",
     width: w,
     height: h,
     properties: [
       { name: "id", type: "string", value: id },
+      { name: "towerforge.gridKind", type: "string", value: gridKind },
       { name: "defaultTerrain", type: "string", value: "buildable" },
       { name: "spawnCoord", type: "string", value: JSON.stringify(pathCenterline[0]) },
       { name: "coreCoord", type: "string", value: JSON.stringify(pathCenterline[pathCenterline.length - 1]) },
@@ -3567,6 +3570,9 @@ function renderMapSourceDetail() {
       <div class="form-section-title">Map Identity</div>
       <div class="form-row">
         <div class="field"><label>ID</label><input id="map-id-field" class="mono" value="${esc(map.id)}"></div>
+        <div class="field"><label>Grid</label><select id="map-grid-field"><option value="hex"${map.grid.kind==="hex"?" selected":""}>Hex odd-r</option><option value="square"${map.grid.kind==="square"?" selected":""}>Square cardinal</option></select></div>
+      </div>
+      <div class="form-row">
         <div class="field"><label>Default Terrain</label>
           <select id="map-default-terrain">
             ${["buildable","blocked","water","path"].map(t => `<option value="${t}"${map.defaultTerrain===t?" selected":""}>${t}</option>`).join("")}
@@ -3590,6 +3596,13 @@ function renderMapSourceDetail() {
     </div>`;
 
   $("map-id-field").onchange = (e) => { setMapProperty(source, "id", e.target.value.trim()); source.id = e.target.value.trim(); markDirty(true); renderMapSourceList(); };
+  $("map-grid-field").onchange = (e) => {
+    const kind = e.target.value === "square" ? "square" : "hex";
+    source.orientation = kind === "square" ? "orthogonal" : "hexagonal";
+    setMapProperty(source, "towerforge.gridKind", kind);
+    markDirty(true);
+    drawSelectedMapSource();
+  };
   $("map-default-terrain").onchange = (e) => { setMapProperty(source, "defaultTerrain", e.target.value); markDirty(true); drawSelectedMapSource(); };
   $("map-width-field").onchange = (e) => { source.width = Math.max(1, Number(e.target.value) || 1); markDirty(true); drawSelectedMapSource(); };
   $("map-height-field").onchange = (e) => { source.height = Math.max(1, Number(e.target.value) || 1); markDirty(true); drawSelectedMapSource(); };
@@ -3607,7 +3620,7 @@ function drawSelectedMapSource() {
   const source = S.project.mapSources?.[S.selectedMapSourceName];
   if (!canvas || !source) return;
   if (!mapRenderer) {
-    mapRenderer = createCanvasRenderer({ canvas, content: { towers: {}, enemies: {} } });
+    mapRenderer = createCanvasRenderer({ canvas, content: { towers: {}, enemies: {}, visuals: S.project.visuals ?? {} } });
     window.addEventListener("resize", () => { if (S.activeTab === "maps") drawSelectedMapSource(); });
     canvas.addEventListener("mousedown", e => {
       if (e.button !== 0 || S.mapPaintMode === "inspect") return;
@@ -3624,6 +3637,7 @@ function drawSelectedMapSource() {
     });
   }
   mapRenderer.resize();
+  mapRenderer.content.visuals = S.project.visuals ?? {};
   mapRenderer.drawMapDefinition(mapEditorDefinition(source));
 }
 
@@ -3647,6 +3661,11 @@ function paintMapAt(event) {
     const exists = path.some(point => coordKey(point) === key);
     if (mapPaintStroke && mapPaintStroke.pathAction === null) mapPaintStroke.pathAction = exists ? "remove" : "add";
     const action = mapPaintStroke?.pathAction ?? (exists ? "remove" : "add");
+    const previous = path[path.length - 1];
+    if (action === "add" && previous && !mapCoordsAdjacent(previous, coord, def.grid)) {
+      toast(`Route segments must be adjacent on the ${def.grid.kind} grid.`, "warn");
+      return;
+    }
     const nextPath = action === "remove"
       ? path.filter(point => coordKey(point) !== key)
       : exists ? path : [...path, coord];
@@ -3701,10 +3720,12 @@ $("btn-map-compile")?.addEventListener("click", () => runStudioCommand("project.
 
 function mapSourceToDefinition(source, sourceName) {
   const props = mapProperties(source);
+  const gridKind = props["towerforge.gridKind"] === "square" || source.orientation === "orthogonal" ? "square" : "hex";
   return {
     id: String(props.id ?? source.id ?? sourceName?.replace(/\.tmj$/, "") ?? "map"),
     width: Number(source.width ?? 1),
     height: Number(source.height ?? 1),
+    grid: gridKind === "square" ? { kind: "square", adjacency: "cardinal" } : { kind: "hex", layout: "odd-r" },
     defaultTerrain: String(props.defaultTerrain ?? source.defaultTerrain ?? "buildable"),
     spawnCoord: parseJsonInput(props.spawnCoord ?? source.spawnCoord, { q: 0, r: 0 }),
     coreCoord: parseJsonInput(props.coreCoord ?? source.coreCoord, { q: 0, r: 0 }),
@@ -3712,6 +3733,14 @@ function mapSourceToDefinition(source, sourceName) {
     pathRoutes: source.pathRoutes ?? parseJsonInput(props.pathRoutes, []),
     terrainOverrides: source.terrainOverrides ?? parseJsonInput(props.terrainOverrides, [])
   };
+}
+
+function mapCoordsAdjacent(a, b, grid) {
+  const dq = b.q - a.q, dr = b.r - a.r;
+  if (grid?.kind === "square") return Math.abs(dq) + Math.abs(dr) === 1;
+  const even = a.r % 2 === 0;
+  const deltas = even ? [[-1,-1],[0,-1],[-1,0],[1,0],[-1,1],[0,1]] : [[0,-1],[1,-1],[-1,0],[1,0],[0,1],[1,1]];
+  return deltas.some(([x,y]) => x === dq && y === dr);
 }
 
 function mapSourceId(source, sourceName) {
@@ -4026,7 +4055,7 @@ $("btn-script-delete")?.addEventListener("click", async () => {
 });
 
 function renderAssetsTab() {
-  if (!S.project.visuals) S.project.visuals = { schemaVersion: 1, assetsRoot: "assets", atlases: {}, sprites: {}, bindings: { towers: {}, enemies: {}, tiles: {}, ui: {} }, audio: { sounds: {}, events: {}, musicTracks: {}, musicByMission: {} } };
+  if (!S.project.visuals) S.project.visuals = { schemaVersion: 2, assetsRoot: "assets", atlases: {}, sprites: {}, tileSets: {}, bindings: { towers: {}, enemies: {}, tiles: {}, tileSets: { grids: {}, maps: {} }, ui: {} }, audio: { sounds: {}, events: {}, musicTracks: {}, musicByMission: {} } };
   const textarea = $("visuals-json");
   if (textarea) {
     textarea.value = JSON.stringify(S.project.visuals, null, 2);
@@ -4048,6 +4077,163 @@ function renderAssetsTab() {
   renderSoundBindings();
   renderMusicBindings();
   renderAtlasFrames();
+  bindTilesetWorkbench();
+}
+
+let tilesetImportPreview = null;
+function numericTilesetField(id) {
+  const value = $(id)?.value;
+  return value === "" || value === undefined ? undefined : Number(value);
+}
+
+async function tilesetImagePayload(file) {
+  if (!file) return undefined;
+  if (file.type && file.type !== "image/png") throw new Error("Tileset image must be a PNG file.");
+  if (!/\.png$/i.test(file.name)) throw new Error("Tileset image filename must end in .png.");
+  if (file.size < 1 || file.size > 10 * 1024 * 1024) throw new Error("Tileset PNG must be 10 MB or smaller.");
+  return { name: file.name, mimeType: "image/png", data: bytesToBase64(new Uint8Array(await file.arrayBuffer())) };
+}
+
+function parseOptionalJsonEditor(id, label) {
+  const source = $(id)?.value.trim();
+  if (!source) return undefined;
+  try { return JSON.parse(source); }
+  catch (error) { throw new Error(`${label} JSON is invalid: ${error.message}`); }
+}
+
+function tilesetSlicingOptions() {
+  const slicing = {
+    tileWidth: numericTilesetField("tileset-tile-width"),
+    tileHeight: numericTilesetField("tileset-tile-height"),
+    columns: numericTilesetField("tileset-columns"),
+    margin: numericTilesetField("tileset-margin"),
+    spacing: numericTilesetField("tileset-spacing")
+  };
+  return Object.values(slicing).some((value) => value !== undefined) ? slicing : undefined;
+}
+
+function renderTilesetCoverage(preview) {
+  const panel = $("tileset-coverage-matrix");
+  if (!panel) return;
+  const expected = preview.tileSet.ruleKind === "edge" ? (preview.tileSet.topology === "hex" ? 64 : 16)
+    : preview.tileSet.ruleKind === "corner" ? 16
+      : preview.tileSet.ruleKind === "mixed" || preview.tileSet.ruleKind === "blob" ? 47
+        : null;
+  const rows = Object.entries(preview.tileSet.materials ?? {}).map(([terrainId, material]) => {
+    const signatures = Object.keys(material.signatures ?? {}).length;
+    const variants = Object.values(material.signatures ?? {}).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 1), 0);
+    return `<div class="tileset-coverage-row"><span>${esc(terrainId)} · ${esc(material.connectionSource ?? "neighbors")}</span><span class="tileset-coverage-count">${signatures}${expected ? `/${expected}` : ""} masks · ${variants} variants</span></div>`;
+  });
+  panel.innerHTML = rows.join("") || `<div class="text-muted">No terrain materials mapped.</div>`;
+}
+
+async function renderTilesetSlicingPreview(file, preview) {
+  const canvas = $("tileset-slicing-preview");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#101410";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!file) {
+    ctx.fillStyle = "#8c968d";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("Select the matching PNG spritesheet", 18, 30);
+    return;
+  }
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  try {
+    await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error("Could not decode tileset PNG.")); image.src = url; });
+    const scale = Math.min(canvas.width / image.width, canvas.height / image.height);
+    const dx = (canvas.width - image.width * scale) / 2;
+    const dy = (canvas.height - image.height * scale) / 2;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(image, dx, dy, image.width * scale, image.height * scale);
+    const { tileWidth, tileHeight, margin, spacing } = preview.tileSet;
+    ctx.strokeStyle = "rgba(255,255,255,.55)";
+    ctx.lineWidth = 1;
+    for (let tileId = 0; tileId < preview.source.tileCount && tileId < 512; tileId += 1) {
+      const q = tileId % preview.source.columns;
+      const r = Math.floor(tileId / preview.source.columns);
+      ctx.strokeRect(dx + (margin + q * (tileWidth + spacing)) * scale, dy + (margin + r * (tileHeight + spacing)) * scale, tileWidth * scale, tileHeight * scale);
+    }
+    canvas.title = `${image.width}x${image.height} · ${preview.source.tileCount} tiles`;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function bindTilesetWorkbench() {
+  const previewButton = $("btn-preview-tileset");
+  const applyButton = $("btn-apply-tileset");
+  const report = $("tileset-workbench-report");
+  if (!previewButton || !applyButton || !report) return;
+  const invalidatePreview = () => {
+    if (!tilesetImportPreview) return;
+    tilesetImportPreview = null;
+    applyButton.disabled = true;
+    report.textContent = "Workbench changed. Preview again before applying.";
+  };
+  for (const id of ["tileset-descriptor", "tileset-image", "tileset-topology", "tileset-id", "tileset-tile-width", "tileset-tile-height", "tileset-columns", "tileset-margin", "tileset-spacing", "tileset-materials", "tileset-terrain-types"]) {
+    const control = $(id);
+    if (control) control.oninput = invalidatePreview;
+  }
+  previewButton.onclick = async () => {
+    const file = $("tileset-descriptor")?.files?.[0];
+    if (!file) { toast("Choose a TSJ or TSX descriptor.", "warn"); return; }
+    try {
+      const descriptor = await file.text();
+      const imageFile = $("tileset-image")?.files?.[0];
+      const request = {
+        descriptor,
+        sourceName: file.name,
+        tileSetId: $("tileset-id")?.value.trim() || undefined,
+        topology: $("tileset-topology")?.value,
+        slicing: tilesetSlicingOptions(),
+        materialOverrides: parseOptionalJsonEditor("tileset-materials", "Materials"),
+        terrainTypeOverrides: parseOptionalJsonEditor("tileset-terrain-types", "Terrain properties"),
+        image: await tilesetImagePayload(imageFile)
+      };
+      const result = await apiPost("/api/tilesets/preview", request);
+      tilesetImportPreview = { ...result.preview, revision: result.revision, request };
+      $("tileset-tile-width").value = result.preview.tileSet.tileWidth;
+      $("tileset-tile-height").value = result.preview.tileSet.tileHeight;
+      $("tileset-columns").value = result.preview.source.columns;
+      $("tileset-margin").value = result.preview.tileSet.margin;
+      $("tileset-spacing").value = result.preview.tileSet.spacing;
+      $("tileset-materials").value = JSON.stringify(result.preview.tileSet.materials, null, 2);
+      $("tileset-terrain-types").value = JSON.stringify(result.preview.terrainTypes, null, 2);
+      const materialCount = Object.keys(result.preview.tileSet.materials ?? {}).length;
+      report.innerHTML = `<strong>${esc(result.preview.tileSet.id)}</strong> · ${esc(result.preview.tileSet.ruleKind)} · ${Object.keys(result.preview.sprites ?? {}).length} frames · ${materialCount} terrain material(s) · ${result.preview.source.expectedWidth}x${result.preview.source.expectedHeight}px minimum${result.preview.warnings?.length ? `<br>${result.preview.warnings.map(esc).join("<br>")}` : ""}`;
+      renderTilesetCoverage(result.preview);
+      await renderTilesetSlicingPreview(imageFile, result.preview);
+      applyButton.disabled = false;
+    } catch (error) {
+      tilesetImportPreview = null;
+      applyButton.disabled = true;
+      report.textContent = error.message;
+      toast(`Tileset preview failed: ${error.message}`, "err");
+    }
+  };
+  applyButton.onclick = async () => {
+    if (!tilesetImportPreview) return;
+    try {
+      const request = {
+        ...tilesetImportPreview.request,
+        slicing: tilesetSlicingOptions(),
+        materialOverrides: parseOptionalJsonEditor("tileset-materials", "Materials"),
+        terrainTypeOverrides: parseOptionalJsonEditor("tileset-terrain-types", "Terrain properties")
+      };
+      const result = await apiPost("/api/tilesets/apply", {
+        ...request,
+        tileSetId: tilesetImportPreview.tileSet.id,
+        ifRevision: tilesetImportPreview.revision
+      });
+      toast(`Tileset "${result.tileSetId}" imported.`, "ok");
+      tilesetImportPreview = null;
+      await load();
+    } catch (error) { toast(`Tileset import failed: ${error.message}`, "err"); }
+  };
 }
 
 let themePacksCache = null;
@@ -5177,6 +5363,7 @@ function assembleBalance() {
     defaultDifficultyId: P.defaultDifficultyId ?? P.difficulties?.[0]?.id ?? "normal",
     difficulties: P.difficulties ?? [{ id: "normal", label: "Normal" }],
     metaProgression: P.metaProgression ?? { currencies: [], upgrades: {}, rewardsByMission: {} },
+    terrainTypes: P.terrainTypes ?? {},
     defaultMissionId: P.defaultMissionId ?? Object.keys(P.missions ?? {})[0] ?? "",
     abilities: P.abilities ?? {}, enemies: P.enemies ?? {}, towers: P.towers ?? {},
     waveSets: P.waveSets ?? {}, missions: P.missions ?? {}

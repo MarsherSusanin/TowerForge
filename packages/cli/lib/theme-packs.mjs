@@ -8,6 +8,7 @@ import { readRawProjectFiles, validateProjectDir } from "./project-loader.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const THEME_PACKS_ROOT = path.resolve(__dirname, "../theme-packs");
 const PACK_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const BUILTIN_TERRAINS = ["buildable", "path", "blocked", "water", "spawn", "core"];
 
 export function listThemePacks() {
   if (!fs.existsSync(THEME_PACKS_ROOT)) return [];
@@ -20,6 +21,7 @@ export function listThemePacks() {
       description: manifest.description,
       background: manifest.background,
       theme: manifest.theme,
+      tileTopologies: (manifest.tiles ?? []).map((tile) => tile.topology),
       previewUrl: `/api/theme-packs/${encodeURIComponent(manifest.id)}/preview`
     }))
     .sort((a, b) => a.label.localeCompare(b.label));
@@ -64,10 +66,11 @@ export async function applyThemePack(projectDir, packId, options = {}) {
   }
   if (options.dryRun) return previewThemePack(projectDir, packId);
 
-  const originals = snapshotPaths([plan.visualsPath, plan.backgroundsPath, plan.destinationPath]);
+  const originals = snapshotPaths([plan.visualsPath, plan.backgroundsPath, plan.destinationPath, ...plan.tileCopies.map((copy) => copy.destinationPath)]);
   const backupDir = createBackup(projectDir, plan.manifest.id, originals);
   try {
     copyFileAtomic(plan.sourcePath, plan.destinationPath);
+    for (const copy of plan.tileCopies) copyFileAtomic(copy.sourcePath, copy.destinationPath);
     writeJsonAtomic(plan.visualsPath, plan.visuals);
     writeJsonAtomic(plan.backgroundsPath, plan.battleBackgrounds);
     const validation = await validateProjectDir(projectDir);
@@ -100,7 +103,7 @@ export async function applyThemePack(projectDir, packId, options = {}) {
 function planThemePack(projectDir, packId) {
   const projectFile = path.join(projectDir, "project.json");
   if (!fs.existsSync(projectFile)) throw new Error(`No project.json found at: ${projectDir}`);
-  const { manifest, sourcePath } = readThemePack(packId);
+  const { manifest, sourcePath, tileSources } = readThemePack(packId);
   const raw = readRawProjectFiles(projectDir);
   const missionIds = Object.keys(raw.balance?.missions ?? {});
   if (!missionIds.length) throw new Error("A theme pack needs at least one mission to bind its battle background.");
@@ -112,6 +115,16 @@ function planThemePack(projectDir, packId) {
   visuals.theme = structuredClone(manifest.theme);
   visuals.theme.id = manifest.id;
   visuals.theme.label = manifest.label;
+
+  const tileCopies = [];
+  for (const tileAsset of manifest.tiles ?? []) {
+    const source = tileSources.find((item) => item.config.tileSetId === tileAsset.tileSetId);
+    if (!source) throw new Error(`Theme tile source is missing for ${tileAsset.tileSetId}.`);
+    const destinationRel = `assets/themes/${manifest.id}/tiles-${tileAsset.topology}.png`;
+    const destinationPath = resolveInside(projectDir, destinationRel, "theme tile destination");
+    tileCopies.push({ sourcePath: source.sourcePath, destinationPath, destinationRel, config: tileAsset });
+    addTileAssetToVisuals(visuals, tileAsset, destinationRel);
+  }
 
   const battleBackgrounds = structuredClone(raw.battleBackgrounds ?? {});
   battleBackgrounds.fallbackMissionId = battleBackgrounds.fallbackMissionId || missionIds[0];
@@ -133,14 +146,16 @@ function planThemePack(projectDir, packId) {
     manifest,
     sourcePath,
     destinationPath,
+    tileCopies,
     visualsPath: path.join(projectDir, "content", "visuals.json"),
     backgroundsPath: path.join(projectDir, "content", "battle-backgrounds.json"),
     visuals,
     battleBackgrounds,
     revision: themePackRevision(projectDir),
     changes: {
-      files: ["content/visuals.json", "content/battle-backgrounds.json", destinationRel],
+      files: ["content/visuals.json", "content/battle-backgrounds.json", destinationRel, ...tileCopies.map((copy) => copy.destinationRel)],
       spriteId: manifest.asset.spriteId,
+      tileSetIds: tileCopies.map((copy) => copy.config.tileSetId),
       missionIds,
       replacesThemeId: raw.visuals?.theme?.id ?? null
     }
@@ -158,11 +173,16 @@ function readThemePack(packId) {
   if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
     throw new Error(`Theme pack asset not found: ${manifest.asset.source}`);
   }
-  return { manifest, sourcePath };
+  const tileSources = (manifest.tiles ?? []).map((config) => {
+    const sourcePath = resolveInside(packDir, config.source, "theme tile source");
+    if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) throw new Error(`Theme tile asset not found: ${config.source}`);
+    return { config, sourcePath };
+  });
+  return { manifest, sourcePath, tileSources };
 }
 
 function validateManifest(manifest, expectedId) {
-  if (manifest?.schemaVersion !== 1) throw new Error(`Theme pack ${expectedId} uses an unsupported schemaVersion.`);
+  if (manifest?.schemaVersion !== 1 && manifest?.schemaVersion !== 2) throw new Error(`Theme pack ${expectedId} uses an unsupported schemaVersion.`);
   if (manifest.id !== expectedId || !PACK_ID_RE.test(manifest.id)) throw new Error(`Theme pack manifest id must match ${expectedId}.`);
   if (typeof manifest.label !== "string" || !manifest.label.trim()) throw new Error(`Theme pack ${expectedId} needs a label.`);
   if (validateSafeAssetPath(manifest.asset?.source, "asset.source")) throw new Error(validateSafeAssetPath(manifest.asset?.source, "asset.source"));
@@ -171,12 +191,66 @@ function validateManifest(manifest, expectedId) {
   if (!Number.isFinite(manifest.background?.opacity) || manifest.background.opacity < 0 || manifest.background.opacity > 1) {
     throw new Error(`Theme pack ${expectedId} opacity must be between 0 and 1.`);
   }
+  for (const [index, tile] of (manifest.tiles ?? []).entries()) {
+    const base = `tiles[${index}]`;
+    const sourceIssue = validateSafeAssetPath(tile?.source, `${base}.source`);
+    if (sourceIssue || !/\.png$/i.test(tile?.source ?? "")) throw new Error(sourceIssue ?? `Theme pack ${expectedId} ${base}.source must be PNG.`);
+    if (!["hex", "square"].includes(tile?.topology)) throw new Error(`Theme pack ${expectedId} ${base}.topology must be hex or square.`);
+    for (const idField of ["atlasId", "tileSetId"]) {
+      if (!/^[a-zA-Z0-9_.-]+$/.test(tile?.[idField] ?? "")) throw new Error(`Theme pack ${expectedId} ${base}.${idField} is invalid.`);
+    }
+    if (!Number.isInteger(tile?.tileWidth) || tile.tileWidth <= 0 || !Number.isInteger(tile?.tileHeight) || tile.tileHeight <= 0 || !Number.isInteger(tile?.columns) || tile.columns <= 0) {
+      throw new Error(`Theme pack ${expectedId} ${base} needs positive integer tileWidth, tileHeight, and columns.`);
+    }
+    if (tile.ruleKind !== "edge") throw new Error(`Theme pack ${expectedId} ${base}.ruleKind must be edge.`);
+  }
   for (const group of [manifest.theme?.ui, manifest.theme?.renderer]) {
     if (!group || typeof group !== "object") throw new Error(`Theme pack ${expectedId} needs UI and renderer palettes.`);
     for (const [key, value] of Object.entries(group)) {
       if (!/^#[0-9a-f]{6}$/i.test(value)) throw new Error(`Theme pack ${expectedId} palette ${key} must be a six-digit hex color.`);
     }
   }
+}
+
+function addTileAssetToVisuals(visuals, config, destinationRel) {
+  const signatureCount = config.topology === "square" ? 16 : 64;
+  visuals.atlases[config.atlasId] = { src: destinationRel };
+  const materials = {};
+  for (const [terrainIndex, terrainId] of BUILTIN_TERRAINS.entries()) {
+    const signatures = {};
+    for (let mask = 0; mask < signatureCount; mask += 1) {
+      const spriteId = `${config.tileSetId}_${terrainId}_${mask}`;
+      const tileIndex = terrainIndex * signatureCount + mask;
+      visuals.sprites[spriteId] = {
+        atlas: config.atlasId,
+        frame: {
+          x: (tileIndex % config.columns) * config.tileWidth,
+          y: Math.floor(tileIndex / config.columns) * config.tileHeight,
+          w: config.tileWidth,
+          h: config.tileHeight
+        }
+      };
+      signatures[`edge:${mask}`] = [{ spriteId, weight: 1 }];
+    }
+    materials[terrainId] = {
+      connectGroup: terrainId,
+      connectionSource: terrainId === "path" ? "pathRoutes" : "neighbors",
+      signatures
+    };
+  }
+  visuals.tileSets[config.tileSetId] = {
+    id: config.tileSetId,
+    atlas: config.atlasId,
+    tileWidth: config.tileWidth,
+    tileHeight: config.tileHeight,
+    margin: 0,
+    spacing: 0,
+    topology: config.topology,
+    ruleKind: config.ruleKind,
+    transformations: { hflip: false, vflip: false, rotate: false, preferUntransformed: true },
+    materials
+  };
+  visuals.bindings.tileSets.grids[config.topology] = config.tileSetId;
 }
 
 function resolveInside(root, relativePath, label) {
@@ -249,7 +323,8 @@ function publicPack(manifest) {
     label: manifest.label,
     description: manifest.description,
     background: manifest.background,
-    theme: manifest.theme
+    theme: manifest.theme,
+    tileTopologies: (manifest.tiles ?? []).map((tile) => tile.topology)
   };
 }
 
