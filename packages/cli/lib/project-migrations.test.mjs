@@ -17,7 +17,9 @@ describe("project migrations", () => {
       buildTargets: { targets: { web: { platform: "web", outputDir: "public" } } }
     });
 
-    expect(files.manifest.schemaVersion).toBe(1);
+    expect(files.manifest.schemaVersion).toBe(2);
+    expect(files.visuals.schemaVersion).toBe(2);
+    expect(files.balance.terrainTypes.water.walkable).toBe(true);
     expect(files.visuals.atlases.creatures.src).toBe("assets/creatures.png");
     expect(files.balance.missions.tutorial.availability).toBe("playable");
     expect(files.balance.missions.tutorial.sunlight).toEqual({ intensity: 0.5 });

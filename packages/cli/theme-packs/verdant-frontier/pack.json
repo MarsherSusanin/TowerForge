@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "verdant-frontier",
   "label": "Verdant Frontier",
   "description": "A readable hand-painted frontier battlefield with warm road and timber accents.",
@@ -13,6 +13,28 @@
     "source": "assets/battle-background.png",
     "spriteId": "theme_verdant_frontier_background"
   },
+  "tiles": [
+    {
+      "topology": "square",
+      "source": "assets/tiles-square.png",
+      "atlasId": "theme_verdant_frontier_square_atlas",
+      "tileSetId": "theme_verdant_frontier_square",
+      "tileWidth": 64,
+      "tileHeight": 64,
+      "columns": 16,
+      "ruleKind": "edge"
+    },
+    {
+      "topology": "hex",
+      "source": "assets/tiles-hex.png",
+      "atlasId": "theme_verdant_frontier_hex_atlas",
+      "tileSetId": "theme_verdant_frontier_hex",
+      "tileWidth": 64,
+      "tileHeight": 64,
+      "columns": 16,
+      "ruleKind": "edge"
+    }
+  ],
   "background": {
     "color": "#142117",
     "opacity": 0.44

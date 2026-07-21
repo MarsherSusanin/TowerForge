@@ -1,5 +1,5 @@
 import { type GameContentRegistry } from "../content/registry.js";
-import { hexDistance } from "./hex.js";
+import { createGridTopology } from "./topology.js";
 import { TowerDefenseGame } from "./TowerDefenseGame.js";
 import type { GameSnapshot, HexCoord } from "./types.js";
 
@@ -216,9 +216,10 @@ function placeTowers(game: TowerDefenseGame, strategy: BalanceStrategy, counts: 
 }
 
 function comparePlacement(a: HexCoord, b: HexCoord, snap: GameSnapshot, placement: BalanceStrategy["placement"]): number {
-  if (placement === "far_path") return distanceToPath(b, snap.pathCenterline) - distanceToPath(a, snap.pathCenterline);
-  if (placement === "near_core") return hexDistance(a, snap.coreCoord) - hexDistance(b, snap.coreCoord);
-  return distanceToPath(a, snap.pathCenterline) - distanceToPath(b, snap.pathCenterline);
+  const distance = createGridTopology(snap.grid).distance;
+  if (placement === "far_path") return distanceToPath(b, snap.pathCenterline, distance) - distanceToPath(a, snap.pathCenterline, distance);
+  if (placement === "near_core") return distance(a, snap.coreCoord) - distance(b, snap.coreCoord);
+  return distanceToPath(a, snap.pathCenterline, distance) - distanceToPath(b, snap.pathCenterline, distance);
 }
 
 function upgradeAll(game: TowerDefenseGame): void {
@@ -228,10 +229,10 @@ function upgradeAll(game: TowerDefenseGame): void {
   }
 }
 
-function distanceToPath(coord: HexCoord, pathCenterline: HexCoord[]): number {
+function distanceToPath(coord: HexCoord, pathCenterline: HexCoord[], distance: (a: HexCoord, b: HexCoord) => number): number {
   let best = Infinity;
   for (const point of pathCenterline) {
-    const d = hexDistance(coord, point);
+    const d = distance(coord, point);
     if (d < best) best = d;
   }
   return best === Infinity ? 0 : best;

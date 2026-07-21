@@ -32,6 +32,7 @@ export interface TowerScriptReferenceSets {
   enemyIds?: Set<string>;
   abilityIds?: Set<string>;
   currencyIds?: Set<string>;
+  terrainIds?: Set<string>;
 }
 
 export interface TowerScriptValidationIssue {
@@ -65,7 +66,7 @@ function validateScript(
     report(key, "root", "TowerScript must be an object.");
     return;
   }
-  if (script.schemaVersion !== 1) report(scriptId, "schemaVersion", "TowerScript schemaVersion must be 1.");
+  if (script.schemaVersion !== 1 && script.schemaVersion !== 2) report(scriptId, "schemaVersion", "TowerScript schemaVersion must be 1 or 2.");
   if (!ID_RE.test(scriptId)) report(scriptId, "id", "Script id must use letters, digits, underscore, dot, or hyphen.");
   if (script.id !== key) report(scriptId, "id", `Script key "${key}" must match id "${script.id}".`);
   if (script.enabled !== undefined && typeof script.enabled !== "boolean") report(scriptId, "enabled", "enabled must be boolean.");
@@ -130,7 +131,8 @@ function validateBinding(scriptId: string, binding: TowerScriptBinding, index: n
     wave: refs.waveSetIds,
     tower: refs.towerIds,
     enemy: refs.enemyIds,
-    ability: refs.abilityIds
+    ability: refs.abilityIds,
+    terrain: refs.terrainIds
   };
   for (const id of binding.ids ?? []) if (sets[binding.scope] && !sets[binding.scope]!.has(id)) report(scriptId, `${base}.ids`, `Unknown ${binding.scope} id "${id}".`);
 }
@@ -140,7 +142,7 @@ function validateAction(scriptId: string, path: string, action: TowerScriptActio
     report(scriptId, path, `Unknown TowerScript action "${String((action as { action?: unknown })?.action)}".`);
     return;
   }
-  const expressionFields = ["amount", "value", "count", "pathProgress", "payload"];
+  const expressionFields = ["amount", "value", "count", "pathProgress", "payload", "duration"];
   for (const field of expressionFields) if (Object.hasOwn(action, field) && (action as unknown as Record<string, TowerScriptExpression>)[field] !== undefined) validateExpression(scriptId, `${path}.${field}`, (action as unknown as Record<string, TowerScriptExpression>)[field]!, 0, report);
   if (["damageEnemy", "healEnemy", "applyStatus", "setTowerCooldown", "addTowerStacks"].includes(action.action) && !TARGETS.has((action as { target: string }).target)) report(scriptId, `${path}.target`, "Action needs a supported entity target.");
   if (["damageEnemy", "healEnemy", "applyStatus"].includes(action.action) && !ENEMY_TARGETS.has((action as { target: string }).target)) report(scriptId, `${path}.target`, "Enemy actions require self, eventEnemy, or allEnemies.");
@@ -150,6 +152,32 @@ function validateAction(scriptId: string, path: string, action: TowerScriptActio
   if (action.action === "emitSignal" && !ID_RE.test(action.signal ?? "")) report(scriptId, `${path}.signal`, "Signal must be a safe identifier.");
   if (action.action === "grantResource" && refs.currencyIds && !refs.currencyIds.has(action.resourceId)) report(scriptId, `${path}.resourceId`, `Unknown currency "${action.resourceId}".`);
   if (action.action === "spawnEnemy" && refs.enemyIds && !refs.enemyIds.has(action.enemyTypeId)) report(scriptId, `${path}.enemyTypeId`, `Unknown enemy "${action.enemyTypeId}".`);
+  if (action.action === "setTileTerrain" || action.action === "restoreTileTerrain") {
+    validateTileTarget(scriptId, `${path}.target`, action.target, report);
+  }
+  if (action.action === "setTileTerrain" && refs.terrainIds && !refs.terrainIds.has(action.terrainId)) {
+    report(scriptId, `${path}.terrainId`, `Unknown terrain "${action.terrainId}".`);
+  }
+}
+
+function validateTileTarget(
+  scriptId: string,
+  path: string,
+  target: unknown,
+  report: (scriptId: string, fieldPath: string, message: string) => void
+): void {
+  if (target === "eventTile") return;
+  if (!target || typeof target !== "object" || Array.isArray(target)) {
+    report(scriptId, path, 'Tile target must be "eventTile" or {q, r} expressions.');
+    return;
+  }
+  const coord = target as { q?: TowerScriptExpression; r?: TowerScriptExpression };
+  if (coord.q === undefined || coord.r === undefined) {
+    report(scriptId, path, "Tile target needs q and r expressions.");
+    return;
+  }
+  validateExpression(scriptId, `${path}.q`, coord.q, 0, report);
+  validateExpression(scriptId, `${path}.r`, coord.r, 0, report);
 }
 
 function validateStatus(scriptId: string, path: string, status: unknown, report: (scriptId: string, fieldPath: string, message: string) => void): void {

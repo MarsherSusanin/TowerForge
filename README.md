@@ -13,7 +13,7 @@
 [![Desktop: Tauri 2](https://img.shields.io/badge/desktop-Tauri%202-E8A44A.svg)](packages/desktop)
 [![Локальные данные](https://img.shields.io/badge/данные-local--first-7EB87E.svg)](ARCHITECTURE.md)
 
-TowerForge — открытый и независимый от конкретного контента конструктор 2D tower-defense игр на гексагональной сетке. В него входят детерминированный движок симуляции на TypeScript, локальный браузерный редактор проектов `.tdproj`, безопасные пользовательские TowerScript-сценарии, CLI для проверки, headless-симуляции и анализа баланса, а также статическая веб-сборка с Canvas- или Phaser-рендерером.
+TowerForge — открытый и независимый от конкретного контента конструктор 2D tower-defense игр с гексагональными и квадратными картами. В него входят детерминированный движок симуляции на TypeScript, локальный браузерный редактор проектов `.tdproj`, Wang/autotile pipeline, безопасные пользовательские TowerScript-сценарии, CLI для проверки, headless-симуляции и анализа баланса, а также статическая веб-сборка с Canvas- или Phaser-рендерером.
 
 ## Загрузки
 
@@ -44,7 +44,7 @@ Studio откроется по адресу `http://localhost:5174` и по ум
 | Задача | Команда |
 | --- | --- |
 | Установить зависимости | `npm install` |
-| Создать проект | `npx towerforge create my-game --template classic`, также доступны `maze`, `idle` и `roguelike` |
+| Создать проект | `npx towerforge create my-game --template classic --grid square`, сетки `hex`/`square`, шаблоны `classic`, `maze`, `idle`, `roguelike` |
 | Запустить Studio | `npm run studio` |
 | Запустить MCP-сервер | `npm run mcp -- --project examples/starter.tdproj` |
 | Подключить ИИ-клиент | `npx towerforge mcp:connect <project> [--client <id> --write]` или выбор клиента в **Настройки → Интеграция ИИ-агентов** |
@@ -71,6 +71,7 @@ Studio откроется по адресу `http://localhost:5174` и по ум
 | Собрать установщики для текущей ОС | `npm run desktop:build:mac`, `npm run desktop:build:win` или `npm run desktop:build:linux` |
 | Пересобрать бренд-баннеры | `npm run brand:build` |
 | Пересобрать нативные иконки | `npm run brand:icons` |
+| Пересобрать встроенные tile sheets | `npm run tiles:build-presets` |
 | Запустить unit- и integration-тесты | `npm run test` |
 | Запустить браузерные E2E-тесты | `npm run test:e2e` |
 
@@ -87,14 +88,14 @@ python3 -m http.server 5175 --bind 127.0.0.1 --directory examples/starter.tdproj
 Каталог `.tdproj` является исходным кодом игры:
 
 - `project.json` — метаданные проекта.
-- `content/balance.json` — константы, сложности, метапрогрессия, награды, способности, враги, башни, волны и миссии.
+- `content/balance.json` — константы, типизированный terrain registry, сложности, метапрогрессия, награды, способности, враги, башни, волны и миссии.
 - `content/world-map.json` — регионы и узлы миссий.
-- `content/visuals.json` — визуальный каталог, привязки ресурсов, атласы и спрайты.
+- `content/visuals.json` — визуальный каталог v2: атласы, спрайты, tilesets, Wang/signature rules, веса, transforms и map/grid bindings.
 - `content/story-comics.json` — сюжетные панели, связанные с миссиями.
 - `content/battle-backgrounds.json` — цвета миссий и необязательные фоновые спрайты.
 - `maps/src/*.tmj` — редактируемые исходные карты.
 - `maps/compiled/maps.json` — runtime-описания карт, созданные компилятором.
-- `scripts/**/*.tower.json` — детерминированная пользовательская логика глобального, миссионного, картографического, волнового, башенного, вражеского или способностного scope.
+- `scripts/**/*.tower.json` — детерминированная пользовательская логика, включая terrain scope, tile events и контролируемые runtime terrain changes.
 - `build-targets.json` — цели сборки.
 - `.towerforge/` — локальное состояние редактора и резервные копии; каталог нельзя добавлять в git.
 

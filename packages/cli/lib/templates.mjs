@@ -4,30 +4,33 @@
 
 export const TEMPLATE_NAMES = ["classic", "maze", "idle", "roguelike"];
 
-export function getTemplate(name) {
+export function getTemplate(name, { gridKind = "hex" } = {}) {
   const factory = TEMPLATES[name] ?? TEMPLATES.classic;
-  return factory();
+  return factory(gridKind === "square" ? "square" : "hex");
 }
 
 // ── Map helpers ───────────────────────────────────────────────────────────────
-/** Build a compiled map + its .tmj-style source from an explicit hex path (buildable elsewhere). */
-function mapFromPath(id, label, width, height, path) {
+/** Build a compiled map + its .tmj-style source from an explicit grid path. */
+function mapFromPath(id, label, width, height, path, gridKind = "hex") {
   const spawnCoord = path[0];
   const coreCoord = path[path.length - 1];
   const pathRoutes = [{ id: "main", pathCenterline: path }];
   // defaultTerrain MUST be on the compiled map too — builds embed the compiled map directly (they
   // don't recompile from source), so without it non-path tiles would have no buildable terrain.
-  const map = { id, label, width, height, defaultTerrain: "buildable", spawnCoord, coreCoord, pathCenterline: path, pathRoutes, terrainOverrides: [] };
+  const grid = gridKind === "square" ? { kind: "square", adjacency: "cardinal" } : { kind: "hex", layout: "odd-r" };
+  const terrainOverrides = path.slice(1, -1).map((coord) => ({ ...coord, terrain: "path" }));
+  const map = { id, label, width, height, grid, defaultTerrain: "buildable", spawnCoord, coreCoord, pathCenterline: path, pathRoutes, terrainOverrides };
   const source = {
-    id, type: "map", orientation: "hexagonal", width, height,
+    id, type: "map", orientation: gridKind === "square" ? "orthogonal" : "hexagonal", width, height,
     properties: [
       { name: "id", type: "string", value: id },
+      { name: "towerforge.gridKind", type: "string", value: gridKind },
       { name: "defaultTerrain", type: "string", value: "buildable" },
       { name: "spawnCoord", type: "string", value: JSON.stringify(spawnCoord) },
       { name: "coreCoord", type: "string", value: JSON.stringify(coreCoord) },
       { name: "pathCenterline", type: "string", value: JSON.stringify(path) }
     ],
-    pathRoutes, terrainOverrides: []
+    pathRoutes, terrainOverrides
   };
   return { map, source };
 }
@@ -106,10 +109,10 @@ function mission(id, label, description, mapId, waveSetId, buildTowerIds, extra 
 
 // ── Templates ─────────────────────────────────────────────────────────────────
 const TEMPLATES = {
-  classic() {
-    const { map, source } = mapFromPath("lane", "Forest Lane", 11, 5, straightPath(11, 2));
+  classic(gridKind) {
+    const { map, source } = mapFromPath("lane", "Forest Lane", 11, 5, straightPath(11, 2), gridKind);
     const balance = {
-      schemaVersion: 1, defaultMissionId: "mission_1",
+      schemaVersion: 2, defaultMissionId: "mission_1",
       currencies: [{ id: "coins", label: "Coins", color: 0xf5c542 }],
       constants: constants(),
       abilities: {},
@@ -140,11 +143,11 @@ const TEMPLATES = {
     ));
   },
 
-  maze() {
+  maze(gridKind) {
     const path = serpentinePath(9, 7);
-    const { map, source } = mapFromPath("maze", "Maze Run", 9, 7, path);
+    const { map, source } = mapFromPath("maze", "Maze Run", 9, 7, path, gridKind);
     const balance = {
-      schemaVersion: 1, defaultMissionId: "mission_1",
+      schemaVersion: 2, defaultMissionId: "mission_1",
       currencies: [{ id: "coins", label: "Coins", color: 0xf5c542 }],
       constants: constants({ startingCoins: 200, startingResources: { coins: 200 } }),
       abilities: {},
@@ -175,10 +178,10 @@ const TEMPLATES = {
     ));
   },
 
-  idle() {
-    const { map, source } = mapFromPath("loop", "Idle Loop", 9, 5, straightPath(9, 2));
+  idle(gridKind) {
+    const { map, source } = mapFromPath("loop", "Idle Loop", 9, 5, straightPath(9, 2), gridKind);
     const balance = {
-      schemaVersion: 1, defaultMissionId: "mission_1",
+      schemaVersion: 2, defaultMissionId: "mission_1",
       currencies: [
         { id: "coins", label: "Coins", color: 0xf5c542 },
         { id: "cores", label: "Cores", color: 0x6fb6ff }
@@ -212,8 +215,8 @@ const TEMPLATES = {
     ));
   },
 
-  roguelike() {
-    const { map, source } = mapFromPath("arena", "Arena", 9, 5, straightPath(9, 2));
+  roguelike(gridKind) {
+    const { map, source } = mapFromPath("arena", "Arena", 9, 5, straightPath(9, 2), gridKind);
     const towers = {
       dagger: singleTower("dagger", "Dagger", { coins: 40 }, 13, 1.4, 3),
       arbalest: sniperTower("arbalest", "Arbalest", { coins: 85 }, 58, 1.5, 6),
@@ -226,7 +229,7 @@ const TEMPLATES = {
       lich: enemy("lich", "Lich", 520, 0.85, 40, 0x5aa0a0, { coreDamage: 3 })
     };
     const balance = {
-      schemaVersion: 1, defaultMissionId: "run_1",
+      schemaVersion: 2, defaultMissionId: "run_1",
       currencies: [{ id: "coins", label: "Coins", color: 0xf5c542 }],
       constants: constants(),
       abilities: {},
@@ -264,6 +267,14 @@ const TEMPLATES = {
 };
 
 function finalize(balance, maps, mapSources, world) {
+  balance.terrainTypes ??= {
+    buildable: { id: "buildable", label: "Buildable", buildable: true, walkable: true, groundSpeedMultiplier: 1, tags: ["ground"] },
+    path: { id: "path", label: "Path", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["path"] },
+    blocked: { id: "blocked", label: "Blocked", buildable: false, walkable: false, groundSpeedMultiplier: 1, tags: ["blocked"] },
+    core: { id: "core", label: "Core", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["objective"] },
+    spawn: { id: "spawn", label: "Spawn", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["spawn"] },
+    water: { id: "water", label: "Water", buildable: false, walkable: true, groundSpeedMultiplier: balance.constants.waterGroundSpeedFactor, tags: ["water"] }
+  };
   balance.defaultDifficultyId ??= "normal";
   balance.difficulties ??= [
     { id: "story", label: "Story", description: "More room to learn and experiment.", enemyHpMultiplier: 0.8, enemySpeedMultiplier: 0.9, enemyRewardMultiplier: 1.15, coreDamageMultiplier: 0.75, startingResourceMultiplier: 1.2, coreHpMultiplier: 1.2 },

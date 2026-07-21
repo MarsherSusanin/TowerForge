@@ -106,6 +106,46 @@ describe("studio server origin/host guard", () => {
     expect(preview.maps.tutorial_map.pathRoutes[0].pathCenterline).toEqual(nextPath);
     expect(fs.readFileSync(compiledPath, "utf8")).toBe(before);
   });
+
+  it("previews and atomically imports a browser-selected tileset PNG", async () => {
+    const imageBytes = fs.readFileSync(path.join(repoRoot, "packages", "cli", "theme-packs", "verdant-frontier", "assets", "tiles-square.png"));
+    const descriptor = JSON.stringify({
+      type: "tileset",
+      name: "uploaded_square",
+      image: "tilesets/uploaded-square.png",
+      tilewidth: 64,
+      tileheight: 64,
+      tilecount: 1,
+      columns: 1,
+      properties: [{ name: "towerforge.terrainId", value: "buildable" }]
+    });
+    const request = {
+      descriptor,
+      sourceName: "uploaded-square.tsj",
+      topology: "square",
+      image: { name: "uploaded-square.png", mimeType: "image/png", data: imageBytes.toString("base64") }
+    };
+    const previewResponse = await fetch(`${BASE}/api/tilesets/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request)
+    });
+    const preview = await previewResponse.json();
+    expect(previewResponse.status).toBe(200);
+    expect(preview.image).toMatchObject({ uploaded: true, width: 1024, height: 384 });
+
+    const applyResponse = await fetch(`${BASE}/api/tilesets/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...request, ifRevision: preview.revision })
+    });
+    const applied = await applyResponse.json();
+    expect(applyResponse.status).toBe(200);
+    expect(applied).toMatchObject({ ok: true, tileSetId: "uploaded_square", imagePath: "assets/tilesets/uploaded-square.png" });
+    expect(fs.readFileSync(path.join(projectDir, "assets", "tilesets", "uploaded-square.png"))).toEqual(imageBytes);
+    const visuals = JSON.parse(fs.readFileSync(path.join(projectDir, "content", "visuals.json"), "utf8"));
+    expect(visuals.tileSets.uploaded_square.materials.buildable.signatures.random).toHaveLength(1);
+  });
 });
 
 function rawGet(pathname, headers) {

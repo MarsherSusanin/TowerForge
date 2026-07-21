@@ -1,5 +1,7 @@
 export * from "./simulation/types.js";
 export * from "./simulation/hex.js";
+export * from "./simulation/topology.js";
+export * from "./simulation/terrain.js";
 export * from "./simulation/map.js";
 export * from "./simulation/headless.js";
 export * from "./simulation/balance.js";

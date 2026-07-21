@@ -22,19 +22,10 @@ const ATTACK_FIELD_RENAMES = {
 // An ordered list of named, independently-reviewable content fixups, each a pure
 // `apply(files): boolean` that mutates in place and reports whether it changed anything.
 //
-// `from`/`to` are the schemaVersion range a step targets. Every step below targets `0 → 1`
-// because PROJECT_SCHEMA_VERSION has stayed at 1 through several rounds of legacy-content
-// cleanup (the taxonomy de-theme, the currency-registry backfill, path-blocker tagging) added
-// after v1 already existed — so they detect their target shape by content probe rather than by
-// the manifest's declared version, and deliberately keep firing for a project already AT v1 that
-// simply predates that specific fixup (see project-migrations.test.mjs, which exercises every
-// rename below against `schemaVersion: 1` input). That is why `from >= step.from` below is `>=`
-// and not a strict "already past this version, skip it" gate.
-//
-// A genuinely version-gated step — one that should run once and then never again once a project
-// is past it — becomes possible the day PROJECT_SCHEMA_VERSION is bumped past 1: give the new
-// step `from: 1, to: 2`, and any project whose manifest.schemaVersion is already >= 2 will skip
-// it via the `fromVersion < step.to` guard in `migrateProjectFiles` below.
+// `from`/`to` describe the schema range a step introduced. Older v1 cleanup steps still use
+// content probes because some schemaVersion:1 projects predate those fixups. The v1 -> v2 step
+// introduces per-map grids, typed terrain, and the visual tileset catalog. Every apply function
+// remains idempotent so partially-authored or hand-edited projects can be normalized safely.
 const MIGRATIONS = [
   {
     id: "mission-availability-playable",
@@ -221,6 +212,39 @@ const MIGRATIONS = [
       if (changed) b.currencies = list;
       return changed;
     }
+  },
+  {
+    id: "grid-terrain-visual-schema-v2",
+    from: 1,
+    to: 2,
+    description: "Add per-map grid topology, typed terrain defaults, and the v2 tileset catalog.",
+    apply(files) {
+      let changed = false;
+      for (const map of Object.values(files.maps ?? {})) {
+        if (!map.grid) {
+          map.grid = { kind: "hex", layout: "odd-r" };
+          changed = true;
+        }
+      }
+      if (!files.balance.terrainTypes) {
+        const waterSpeed = Number.isFinite(files.balance?.constants?.waterGroundSpeedFactor)
+          ? files.balance.constants.waterGroundSpeedFactor
+          : 0.6;
+        files.balance.terrainTypes = defaultTerrainTypes(waterSpeed);
+        changed = true;
+      }
+      if (files.visuals.schemaVersion !== 2) {
+        files.visuals.schemaVersion = 2;
+        changed = true;
+      }
+      files.visuals.tileSets ??= {};
+      files.visuals.bindings ??= {};
+      if (!files.visuals.bindings.tileSets) {
+        files.visuals.bindings.tileSets = { grids: {}, maps: {} };
+        changed = true;
+      }
+      return changed;
+    }
   }
 ];
 
@@ -244,11 +268,8 @@ export function migrateProjectFiles(rawFiles) {
   }
 
   for (const step of MIGRATIONS) {
-    // Forward-looking guard: a future step declaring a real `from: 1, to: 2` (once
-    // PROJECT_SCHEMA_VERSION is bumped past 1) stops firing for a project already past it. Every
-    // step here targets `to: 1` and must still run for a project sitting exactly at schemaVersion
-    // 1 (see the module doc comment above) — only a version strictly newer than the step's target
-    // skips it.
+    // Content probes intentionally still run at the target version to repair older partially
+    // normalized projects; a strictly newer schema skips steps it has superseded.
     if (fromVersion > step.to) continue;
     if (step.apply(files)) {
       migrations.push({ id: step.id, description: step.description });
@@ -264,6 +285,7 @@ export function writeMigratedProjectFiles(projectDir, files) {
     ["project.json", files.manifest],
     ["content/visuals.json", files.visuals],
     ["content/balance.json", files.balance],
+    ["maps/compiled/maps.json", files.maps],
     ["build-targets.json", files.buildTargets]
   ];
   for (const [relPath, data] of writes) {
@@ -285,4 +307,15 @@ function backupFile(projectDir, filePath) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value ?? {}));
+}
+
+function defaultTerrainTypes(waterSpeed = 0.6) {
+  return {
+    buildable: { id: "buildable", label: "Buildable", buildable: true, walkable: true, groundSpeedMultiplier: 1, tags: ["ground"] },
+    path: { id: "path", label: "Path", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["path"] },
+    blocked: { id: "blocked", label: "Blocked", buildable: false, walkable: false, groundSpeedMultiplier: 1, tags: ["blocked"] },
+    core: { id: "core", label: "Core", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["objective"] },
+    spawn: { id: "spawn", label: "Spawn", buildable: false, walkable: true, groundSpeedMultiplier: 1, tags: ["spawn"] },
+    water: { id: "water", label: "Water", buildable: false, walkable: true, groundSpeedMultiplier: waterSpeed, tags: ["water"] }
+  };
 }

@@ -13,13 +13,13 @@ describe("map compiler", () => {
         { name: "defaultTerrain", value: "buildable" },
         { name: "spawnCoord", value: JSON.stringify({ q: 1, r: 0 }) },
         { name: "coreCoord", value: JSON.stringify({ q: 1, r: 4 }) },
-        { name: "pathCenterline", value: JSON.stringify([{ q: 1, r: 0 }, { q: 1, r: 4 }]) }
+        { name: "pathCenterline", value: JSON.stringify([0, 1, 2, 3, 4].map((r) => ({ q: 1, r }))) }
       ],
       terrainOverrides: [{ q: 1, r: 0, terrain: "spawn" }]
     }, "runtime_map.tmj");
 
     expect(map.id).toBe("runtime_map");
-    expect(map.pathRoutes).toEqual([{ id: "main", pathCenterline: [{ q: 1, r: 0 }, { q: 1, r: 4 }] }]);
+    expect(map.pathRoutes).toEqual([{ id: "main", pathCenterline: [0, 1, 2, 3, 4].map((r) => ({ q: 1, r })) }]);
     expect(map.terrainOverrides[0]).toEqual({ q: 1, r: 0, terrain: "spawn" });
   });
 
@@ -32,7 +32,7 @@ describe("map compiler", () => {
         { name: "defaultTerrain", value: "buildable" },
         { name: "spawnCoord", value: JSON.stringify({ q: 0, r: 0 }) },
         { name: "coreCoord", value: JSON.stringify({ q: 2, r: 1 }) },
-        { name: "pathCenterline", value: JSON.stringify([{ q: 0, r: 0 }, { q: 2, r: 1 }]) }
+        { name: "pathCenterline", value: JSON.stringify([{ q: 0, r: 0 }, { q: 0, r: 1 }, { q: 1, r: 1 }, { q: 2, r: 1 }]) }
       ],
       layers: [
         { name: "terrain", type: "tilelayer", width: 3, height: 2, data: [1, 2, 1, 4, 1, 1] }
@@ -58,7 +58,7 @@ describe("map compiler", () => {
         { name: "defaultTerrain", value: "buildable" },
         { name: "spawnCoord", value: JSON.stringify({ q: 0, r: 0 }) },
         { name: "coreCoord", value: JSON.stringify({ q: 2, r: 1 }) },
-        { name: "pathCenterline", value: JSON.stringify([{ q: 0, r: 0 }, { q: 2, r: 1 }]) }
+        { name: "pathCenterline", value: JSON.stringify([{ q: 0, r: 0 }, { q: 0, r: 1 }, { q: 1, r: 1 }, { q: 2, r: 1 }]) }
       ],
       // (1,0) is a horizontally-flipped "path" (2); (0,1) is a flip+rotated "water" (4).
       layers: [
@@ -97,5 +97,35 @@ describe("map compiler", () => {
 
     expect(result.ok).toBe(false);
     expect(result.issues[0]).toMatchObject({ entityKind: "mapSource", entityId: "bad.tmj" });
+  });
+
+  it("compiles orthogonal maps as square/cardinal and rejects diagonal route segments", () => {
+    const source = {
+      id: "square",
+      orientation: "orthogonal",
+      width: 3,
+      height: 3,
+      spawnCoord: { q: 0, r: 0 },
+      coreCoord: { q: 2, r: 2 },
+      pathCenterline: [{ q: 0, r: 0 }, { q: 1, r: 0 }, { q: 1, r: 1 }, { q: 2, r: 1 }, { q: 2, r: 2 }]
+    };
+    expect(compileMapSource(source, "square.tmj").grid).toEqual({ kind: "square", adjacency: "cardinal" });
+    expect(() => compileMapSource({
+      ...source,
+      pathCenterline: [{ q: 0, r: 0 }, { q: 1, r: 1 }, { q: 2, r: 2 }]
+    }, "diagonal.tmj")).toThrow(/non-adjacent square segment/);
+  });
+
+  it("uses typed terrain walkability while validating routes", () => {
+    expect(() => compileMapSource({
+      id: "typed",
+      orientation: "orthogonal",
+      width: 3,
+      height: 1,
+      spawnCoord: { q: 0, r: 0 },
+      coreCoord: { q: 2, r: 0 },
+      pathCenterline: [{ q: 0, r: 0 }, { q: 1, r: 0 }, { q: 2, r: 0 }],
+      terrainOverrides: [{ q: 1, r: 0, terrain: "lava" }]
+    }, "typed.tmj", { lava: { walkable: false } })).toThrow(/non-walkable terrain/);
   });
 });

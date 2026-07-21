@@ -18,12 +18,12 @@ export function readMapSources(projectDir) {
   return sources;
 }
 
-export function compileMapSources(mapSources) {
+export function compileMapSources(mapSources, terrainTypes = {}) {
   const maps = {};
   const issues = [];
   for (const [sourceName, source] of Object.entries(mapSources)) {
     try {
-      const map = compileMapSource(source, sourceName);
+      const map = compileMapSource(source, sourceName, terrainTypes);
       maps[map.id] = map;
     } catch (error) {
       issues.push({
@@ -42,7 +42,7 @@ export function compileMapSources(mapSources) {
   };
 }
 
-export function compileMapSource(source, sourceName = "map.tmj") {
+export function compileMapSource(source, sourceName = "map.tmj", terrainTypes = {}) {
   if (!source || typeof source !== "object") {
     throw new Error(`Map source "${sourceName}" must be an object.`);
   }
@@ -51,6 +51,7 @@ export function compileMapSource(source, sourceName = "map.tmj") {
   const width = requirePositiveInteger(source.width, `${sourceName}.width`);
   const height = requirePositiveInteger(source.height, `${sourceName}.height`);
   const defaultTerrain = String(properties.defaultTerrain ?? source.defaultTerrain ?? "buildable");
+  const grid = resolveGrid(source, properties, sourceName);
   const spawnCoord = parseCoord(properties.spawnCoord ?? source.spawnCoord, `${sourceName}.spawnCoord`);
   const coreCoord = parseCoord(properties.coreCoord ?? source.coreCoord, `${sourceName}.coreCoord`);
   const pathCenterline = parseCoordArray(properties.pathCenterline ?? source.pathCenterline, `${sourceName}.pathCenterline`);
@@ -58,11 +59,13 @@ export function compileMapSource(source, sourceName = "map.tmj") {
   const explicitOverrides = normalizeTerrainOverrides(source.terrainOverrides ?? parseJson(properties.terrainOverrides, []), `${sourceName}.terrainOverrides`);
   const terrainOverrides = mergeTerrainOverrides(layerOverrides, explicitOverrides);
   const pathRoutes = normalizeRoutes(source.pathRoutes ?? parseJson(properties.pathRoutes, []), pathCenterline, `${sourceName}.pathRoutes`);
+  validateRoutes(pathRoutes, grid, width, height, defaultTerrain, terrainOverrides, terrainTypes, sourceName);
 
   return {
     id,
     width,
     height,
+    grid,
     defaultTerrain,
     spawnCoord,
     coreCoord,
@@ -70,6 +73,52 @@ export function compileMapSource(source, sourceName = "map.tmj") {
     pathRoutes,
     terrainOverrides
   };
+}
+
+function resolveGrid(source, properties, sourceName) {
+  const explicit = properties["towerforge.gridKind"] ?? properties.gridKind ?? source.gridKind;
+  if (explicit === "square" || (!explicit && source.orientation === "orthogonal")) {
+    return { kind: "square", adjacency: "cardinal" };
+  }
+  if (explicit === undefined || explicit === "hex" || source.orientation === "hexagonal") {
+    if (source.orientation === "hexagonal" && source.staggeraxis && source.staggeraxis !== "y") {
+      throw new Error(`${sourceName}.staggeraxis must be "y" for odd-r hex maps.`);
+    }
+    return { kind: "hex", layout: "odd-r" };
+  }
+  throw new Error(`${sourceName} has unsupported grid kind "${String(explicit)}".`);
+}
+
+function validateRoutes(pathRoutes, grid, width, height, defaultTerrain, terrainOverrides, terrainTypes, sourceName) {
+  const overrides = new Map(terrainOverrides.map((entry) => [`${entry.q},${entry.r}`, entry.terrain]));
+  const walkable = (coord) => {
+    const terrainId = overrides.get(`${coord.q},${coord.r}`) ?? defaultTerrain;
+    return terrainTypes?.[terrainId]?.walkable ?? terrainId !== "blocked";
+  };
+  for (const route of pathRoutes) {
+    route.pathCenterline.forEach((coord, index) => {
+      if (coord.q < 0 || coord.r < 0 || coord.q >= width || coord.r >= height) {
+        throw new Error(`${sourceName}.pathRoutes.${route.id}[${index}] is outside the map.`);
+      }
+      if (!walkable(coord)) throw new Error(`${sourceName}.pathRoutes.${route.id}[${index}] crosses non-walkable terrain.`);
+      const next = route.pathCenterline[index + 1];
+      if (!next) return;
+      const dq = Math.abs(next.q - coord.q);
+      const dr = Math.abs(next.r - coord.r);
+      const adjacent = grid.kind === "square"
+        ? dq + dr === 1
+        : oddRAdjacent(coord, next);
+      if (!adjacent) throw new Error(`${sourceName}.pathRoutes.${route.id} contains a non-adjacent ${grid.kind} segment at index ${index}.`);
+    });
+  }
+}
+
+function oddRAdjacent(a, b) {
+  const even = a.r % 2 === 0;
+  const deltas = even
+    ? [[-1, -1], [0, -1], [-1, 0], [1, 0], [-1, 1], [0, 1]]
+    : [[0, -1], [1, -1], [-1, 0], [1, 0], [0, 1], [1, 1]];
+  return deltas.some(([dq, dr]) => a.q + dq === b.q && a.r + dr === b.r);
 }
 
 export function writeCompiledMaps(projectDir, maps) {

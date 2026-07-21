@@ -14,6 +14,7 @@ import {
 } from "./lib/project-loader.mjs";
 import { copyVisualAssets } from "./lib/assets.mjs";
 import { parseJsonFlag, printJson } from "./lib/trace.mjs";
+import { projectTileCoverage } from "./lib/tile-coverage.mjs";
 
 function parseArgs() {
   const raw = process.argv.slice(2);
@@ -65,6 +66,15 @@ try {
 
   await loadEngine();
   const files = loadProjectFiles(PROJECT_DIR);
+  const tileCoverage = projectTileCoverage(files);
+  if (!tileCoverage.ok) {
+    const error = new Error(`Build stopped because ${tileCoverage.missingCount} reachable tileset signature(s) are missing.`);
+    error.issues = tileCoverage.maps.flatMap((map) => map.missing.map((entry) => ({
+      severity: "error", entityKind: "tileSet", entityId: map.tileSetId ?? "?", fieldPath: `maps.${map.mapId}.${entry.terrain}.${entry.signature}`,
+      code: "TILESET_REACHABLE_SIGNATURE_MISSING", message: `Map "${map.mapId}" needs ${entry.terrain}/${entry.signature} (${entry.count} reachable cell(s)).`
+    })));
+    throw error;
+  }
   const [targetId, target] = selectBuildTarget(files.buildTargets, args.targetId);
   if (target.platform !== "web") {
     throw new Error(`Build target "${targetId}" uses platform "${target.platform}". This build command currently supports web targets only.`);
@@ -137,15 +147,14 @@ try {
     fs.writeFileSync(singleFilePath, singleFileHtml(outDir, files.manifest, target, renderer, embeddedProject), "utf8");
   }
 
-  // The phaser player renders flat shapes only — it does not consume visuals.bindings/sprites yet.
-  // Warn honestly at build time (instead of silently dropping the art) so an author using custom
-  // sprites knows to build with the canvas renderer or expect placeholder shapes.
+  // Phaser now shares topology and terrain tileset resolution with Canvas. Entity sprites still use
+  // flat placeholders, so report only those bindings instead of claiming all visual art is ignored.
   const warnings = [];
   if (renderer === "phaser") {
     const bindings = files.visuals?.bindings ?? {};
-    const boundCount = Object.values(bindings).reduce((n, group) => n + Object.keys(group ?? {}).length, 0);
+    const boundCount = Object.keys(bindings.towers ?? {}).length + Object.keys(bindings.enemies ?? {}).length;
     if (boundCount > 0) {
-      warnings.push(`Phaser renderer does not render sprite bindings yet — ${boundCount} bound sprite(s) will show as flat shapes. Use the canvas renderer for custom art.`);
+      warnings.push(`Phaser renderer uses the shared tileset pipeline, but ${boundCount} bound tower/enemy sprite(s) still use flat entity placeholders.`);
     }
   }
 
@@ -524,12 +533,21 @@ syncAudioSettings();
 applyBattleBackground();
 selectMissionMusic();
 showStoryForMission("beforeMission");
+window.__towerforgeInspect = () => game.getRenderSnapshot();
+window.__towerforgeTilePoint = (coord) => {
+  const snapshot = game.getRenderSnapshot();
+  const point = renderer.center(coord, renderer.geometry(snapshot.tiles, snapshot.grid));
+  const rect = canvas.getBoundingClientRect();
+  return { x: rect.left + point.x * rect.width / canvas.width, y: rect.top + point.y * rect.height / canvas.height };
+};
+window.__towerforgePickPoint = (point) => renderer.pickTile({ clientX: point.x, clientY: point.y }, game.getRenderSnapshot().tiles);
 window.__towerforgeBootOk = true;
 canvas.addEventListener("focus", () => syncKeyboardCursor(ensureKeyboardCoord()));
 canvas.addEventListener("click", (event) => {
   audio.resume();
   const coord = pickTile(event);
   if (!coord) return;
+  window.__towerforgeLastPointerCoord = coord;
   syncKeyboardCursor(coord);
   actAtCoord(coord);
 });
@@ -801,8 +819,12 @@ function refreshMissionOptions() {
 function resolveStandaloneSprite(spriteId) {
   const src = content.visuals?.sprites?.[spriteId]?.src;
   if (typeof src !== "string" || !src) return "";
+  return visualAssetUrl(src);
+}
+
+function visualAssetUrl(src) {
   if (/^(?:data:|blob:|https?:)/i.test(src)) return src;
-  return "./" + src.split("/").map(encodeURIComponent).join("/");
+  return "./" + String(src).split("/").map(encodeURIComponent).join("/");
 }
 
 function applyBattleBackground() {
@@ -966,6 +988,7 @@ function applyProjectTheme() {
 function phaserPlayerTemplate() {
   return `import { createGameContentRegistry, TowerDefenseGame } from "./engine/index.js";
 import { createAudioPlayer } from "./renderer/audio.mjs";
+import { resolveAutotile } from "./renderer/autotile.mjs";
 import project from "./project-data.js";
 
 const content = createGameContentRegistry({
@@ -1129,33 +1152,68 @@ function selectMissionMusic() {
 }
 
 class PlayScene extends Phaser.Scene {
+  preload() {
+    for (const [atlasId, atlas] of Object.entries(content.visuals?.atlases || {})) {
+      if (atlas?.src) this.load.image("tf-atlas:" + atlasId, visualAssetUrl(atlas.src));
+    }
+    for (const [spriteId, sprite] of Object.entries(content.visuals?.sprites || {})) {
+      if (sprite?.src) this.load.image("tf-sprite:" + spriteId, visualAssetUrl(sprite.src));
+    }
+  }
   create() {
     this.tileG = this.add.graphics();
     this.fxG = this.add.graphics();
     this.entG = this.add.graphics();
     this.towerLabels = new Map();
+    this.tileImages = new Map();
+    this.tileTerrainState = new Map();
+    this.tileImageKey = "";
+    this.registerAtlasFrames();
     this.input.on("pointerdown", (p) => {
       audio.resume();
       const coord = this.pickTile(p.worldX, p.worldY);
       if (!coord) return;
+      window.__towerforgeLastPointerCoord = coord;
       syncKeyboardCursor(coord);
       actAtCoord(coord);
     });
   }
-  geometry(tiles) {
+  registerAtlasFrames() {
+    for (const [spriteId, sprite] of Object.entries(content.visuals?.sprites || {})) {
+      if (!sprite?.atlas || !sprite.frame) continue;
+      const texture = this.textures.get("tf-atlas:" + sprite.atlas);
+      const frame = sprite.frame;
+      if (texture?.key !== "__MISSING" && !texture.has(spriteId)) texture.add(spriteId, 0, frame.x, frame.y, frame.w, frame.h);
+    }
+  }
+  spriteTexture(spriteId) {
+    const sprite = content.visuals?.sprites?.[spriteId];
+    if (!sprite) return null;
+    if (sprite.atlas && sprite.frame && this.textures.exists("tf-atlas:" + sprite.atlas)) return { key: "tf-atlas:" + sprite.atlas, frame: spriteId };
+    if (sprite.src && this.textures.exists("tf-sprite:" + spriteId)) return { key: "tf-sprite:" + spriteId };
+    return null;
+  }
+  geometry(tiles, grid) {
     let maxQ = 1, maxR = 1;
     for (const t of tiles) { if (t.q > maxQ) maxQ = t.q; if (t.r > maxR) maxR = t.r; }
     const W = this.scale.width, H = this.scale.height;
+    if (grid?.kind === "square") {
+      const cell = Math.min(W / (maxQ + 2), H / (maxR + 2));
+      return { r: cell / 2, ox: cell, oy: cell, grid };
+    }
     const r = Math.min(W / ((maxQ + 2) * 1.65), H / ((maxR + 2) * 1.45));
-    return { r, ox: r * 1.5, oy: r * 1.5 };
+    return { r, ox: r * 1.5, oy: r * 1.5, grid: grid || { kind: "hex", layout: "odd-r" } };
   }
-  center(coord, g) { return { x: g.ox + coord.q * g.r * 1.48 + (coord.r % 2) * g.r * 0.74, y: g.oy + coord.r * g.r * 1.28 }; }
+  center(coord, g) {
+    if (g.grid.kind === "square") return { x: g.ox + coord.q * g.r * 2, y: g.oy + coord.r * g.r * 2 };
+    return { x: g.ox + coord.q * g.r * 1.48 + (coord.r % 2) * g.r * 0.74, y: g.oy + coord.r * g.r * 1.28 };
+  }
   pickTile(x, y) {
     const snap = game.getRenderSnapshot();
-    const g = this.geometry(snap.tiles);
+    const g = this.geometry(snap.tiles, snap.grid);
     let best = null, bestD = Infinity;
     for (const t of snap.tiles) { const p = this.center(t, g); const d = Math.hypot(p.x - x, p.y - y); if (d < bestD) { bestD = d; best = t; } }
-    return best && bestD <= g.r * 0.95 ? { q: best.q, r: best.r } : null;
+    return best && bestD <= (g.grid.kind === "square" ? g.r * Math.SQRT2 : g.r * 0.95) ? { q: best.q, r: best.r } : null;
   }
   enemyPos(enemy, snap, g) {
     const route = enemy.routeId ? snap.pathRoutes?.find((rt) => rt.id === enemy.routeId)?.pathCenterline : snap.pathCenterline;
@@ -1173,6 +1231,94 @@ class PlayScene extends Phaser.Scene {
     gr.closePath(); gr.fillPath();
     gr.lineStyle(1, 0xffffff, 0.08); gr.strokePath();
   }
+  cell(gr, x, y, r, fill, alpha, grid) {
+    if (grid.kind === "square") {
+      gr.fillStyle(fill, alpha == null ? 1 : alpha);
+      gr.fillRect(x - r, y - r, r * 2, r * 2);
+      gr.lineStyle(1, 0xffffff, 0.08);
+      gr.strokeRect(x - r, y - r, r * 2, r * 2);
+      return;
+    }
+    this.hex(gr, x, y, r, fill, alpha);
+  }
+  syncTileImages(snap, g) {
+    const stateKey = [snap.mapId, snap.grid?.kind, this.scale.width, this.scale.height].join("|");
+    const fullRedraw = stateKey !== this.tileImageKey;
+    if (fullRedraw) {
+      for (const images of this.tileImages.values()) for (const image of images) this.destroyTileImage(image);
+      this.tileImages.clear();
+      this.tileTerrainState.clear();
+      this.tileImageKey = stateKey;
+    }
+    const map = { id: snap.mapId || snap.missionId, grid: snap.grid, tiles: snap.tiles, pathRoutes: snap.pathRoutes || [] };
+    const tileByKey = new Map(snap.tiles.map((tile) => [tile.q + "," + tile.r, tile]));
+    const dirty = new Set();
+    for (const tile of snap.tiles) {
+      const key = tile.q + "," + tile.r;
+      if (fullRedraw || this.tileTerrainState.get(key) !== tile.terrain) {
+        dirty.add(key);
+        for (const neighbor of this.renderingNeighbors(tile, snap.grid)) dirty.add(neighbor.q + "," + neighbor.r);
+      }
+    }
+    for (const key of dirty) {
+      for (const image of this.tileImages.get(key) || []) this.destroyTileImage(image);
+      this.tileImages.delete(key);
+      const tile = tileByKey.get(key);
+      if (!tile) continue;
+      const resolved = resolveAutotile({ map, visuals: content.visuals, coord: tile, terrain: tile.terrain, seed: content.visuals?.tileSeed || 0 });
+      const p = this.center(tile, g);
+      if (resolved.sectors?.length) {
+        for (const sector of resolved.sectors) this.addTileImage(sector.selected, p, g, sector.direction, key);
+      } else {
+        this.addTileImage(resolved.selected, p, g, null, key);
+      }
+    }
+    this.tileTerrainState = new Map(snap.tiles.map((tile) => [tile.q + "," + tile.r, tile.terrain]));
+  }
+  destroyTileImage(image) {
+    image.__towerforgeMask?.destroy();
+    image.__towerforgeMaskShape?.destroy();
+    image.destroy();
+  }
+  renderingNeighbors(coord, grid) {
+    if (grid?.kind === "square") return [[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]].map(([q,r]) => ({ q: coord.q + q, r: coord.r + r }));
+    const offsets = coord.r % 2 === 0 ? [[-1,-1],[0,-1],[1,0],[0,1],[-1,1],[-1,0]] : [[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,0]];
+    return offsets.map(([q,r]) => ({ q: coord.q + q, r: coord.r + r }));
+  }
+  addTileImage(selected, p, g, sectorDirection, tileKey) {
+    const texture = this.spriteTexture(selected?.spriteId);
+    if (!texture) return;
+    const size = g.r * 1.72;
+    const image = this.add.image(p.x, p.y, texture.key, texture.frame).setDisplaySize(size, size).setDepth(-1);
+    const transform = selected.transform;
+    image.setFlip(Boolean(transform?.flipX), Boolean(transform?.flipY));
+    image.setAngle(Number(transform?.rotate || 0));
+    if (sectorDirection) {
+      const shape = this.make.graphics({ add: false });
+      shape.fillStyle(0xffffff, 1);
+      if (g.grid.kind === "square") {
+        const quadrants = { NW: [-size / 2, -size / 2], NE: [0, -size / 2], SE: [0, 0], SW: [-size / 2, 0] };
+        const offset = quadrants[sectorDirection] || quadrants.NW;
+        shape.fillRect(p.x + offset[0], p.y + offset[1], size / 2, size / 2);
+      } else {
+        const directions = ["NW", "NE", "E", "SE", "SW", "W"];
+        const index = Math.max(0, directions.indexOf(sectorDirection));
+        const start = -Math.PI + index * Math.PI / 3;
+        shape.fillTriangle(
+          p.x, p.y,
+          p.x + Math.cos(start) * size / 2, p.y + Math.sin(start) * size / 2,
+          p.x + Math.cos(start + Math.PI / 3) * size / 2, p.y + Math.sin(start + Math.PI / 3) * size / 2
+        );
+      }
+      const mask = shape.createGeometryMask();
+      image.setMask(mask);
+      image.__towerforgeMask = mask;
+      image.__towerforgeMaskShape = shape;
+    }
+    const images = this.tileImages.get(tileKey) || [];
+    images.push(image);
+    this.tileImages.set(tileKey, images);
+  }
   update(time, delta) {
     if (document.hidden) return; // paused while backgrounded (see the visibilitychange listener)
     const speed = Number($("speed").value) || 0;
@@ -1188,15 +1334,27 @@ class PlayScene extends Phaser.Scene {
     const events = ticked ? pending.concat(snap.lastEvents) : pending;
     game.lastEvents = []; // consumed this frame — clear so nothing replays next frame
     if ($("snd")?.checked) audio.handleEvents(events);
-    const g = this.geometry(snap.tiles);
+    const g = this.geometry(snap.tiles, snap.grid);
+    this.syncTileImages(snap, g);
+    const map = { id: snap.mapId || snap.missionId, grid: snap.grid, tiles: snap.tiles, pathRoutes: snap.pathRoutes || [] };
 
     this.tileG.clear();
-    for (const t of snap.tiles) { const p = this.center(t, g); this.hex(this.tileG, p.x, p.y, g.r * 0.86, TERRAIN_COLORS[t.terrain] ?? TERRAIN_COLORS.buildable); }
-    for (const w of snap.temporaryWaterTiles) { const p = this.center(w, g); this.hex(this.tileG, p.x, p.y, g.r * 0.74, 0x427b88, 0.55); }
+    for (const t of snap.tiles) {
+      const resolved = resolveAutotile({ map, visuals: content.visuals, coord: t, terrain: t.terrain, seed: content.visuals?.tileSeed || 0 });
+      const missingVisual = resolved.sectors?.length
+        ? resolved.sectors.some((sector) => !this.spriteTexture(sector.selected?.spriteId))
+        : !this.spriteTexture(resolved.selected?.spriteId);
+      if (missingVisual) {
+        const p = this.center(t, g);
+        this.cell(this.tileG, p.x, p.y, g.r * 0.86, TERRAIN_COLORS[t.terrain] ?? TERRAIN_COLORS.buildable, 1, g.grid);
+      }
+    }
+    for (const w of snap.temporaryWaterTiles) { const p = this.center(w, g); this.cell(this.tileG, p.x, p.y, g.r * 0.74, 0x427b88, 0.55, g.grid); }
     if (keyboardCoord) {
       const p = this.center(keyboardCoord, g);
       this.tileG.lineStyle(Math.max(2, g.r * 0.12), 0xe8f4db, 1);
-      this.tileG.strokeCircle(p.x, p.y, g.r * 0.64);
+      if (g.grid.kind === "square") this.tileG.strokeRect(p.x - g.r * 0.72, p.y - g.r * 0.72, g.r * 1.44, g.r * 1.44);
+      else this.tileG.strokeCircle(p.x, p.y, g.r * 0.64);
     }
 
     this.fxG.clear();
@@ -1261,7 +1419,7 @@ class PlayScene extends Phaser.Scene {
   }
 }
 
-new Phaser.Game({
+const phaserGame = new Phaser.Game({
   type: Phaser.AUTO,
   parent: "playfield",
   transparent: true,
@@ -1273,6 +1431,21 @@ new Phaser.Game({
   scale: { mode: Phaser.Scale.RESIZE, width: "100%", height: "100%" },
   scene: PlayScene
 });
+window.__towerforgeInspect = () => game.getRenderSnapshot();
+window.__towerforgeTilePoint = (coord) => {
+  const scene = phaserGame.scene.getScenes(true)[0];
+  if (!scene) return null;
+  const snapshot = game.getRenderSnapshot();
+  const point = scene.center(coord, scene.geometry(snapshot.tiles, snapshot.grid));
+  const rect = phaserGame.canvas.getBoundingClientRect();
+  return { x: rect.left + point.x * rect.width / scene.scale.width, y: rect.top + point.y * rect.height / scene.scale.height };
+};
+window.__towerforgePickPoint = (point) => {
+  const scene = phaserGame.scene.getScenes(true)[0];
+  if (!scene) return null;
+  const rect = phaserGame.canvas.getBoundingClientRect();
+  return scene.pickTile((point.x - rect.left) * scene.scale.width / rect.width, (point.y - rect.top) * scene.scale.height / rect.height);
+};
 window.__towerforgeBootOk = true;
 
 // Free the audio hardware while the app is backgrounded (the scene's update() already bails on
@@ -1467,8 +1640,12 @@ function refreshMissionOptions() {
 function resolveStandaloneSprite(spriteId) {
   const src = content.visuals?.sprites?.[spriteId]?.src;
   if (typeof src !== "string" || !src) return "";
+  return visualAssetUrl(src);
+}
+
+function visualAssetUrl(src) {
   if (/^(?:data:|blob:|https?:)/i.test(src)) return src;
-  return "./" + src.split("/").map(encodeURIComponent).join("/");
+  return "./" + String(src).split("/").map(encodeURIComponent).join("/");
 }
 
 function applyBattleBackground() {

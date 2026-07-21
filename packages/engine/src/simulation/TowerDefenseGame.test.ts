@@ -821,6 +821,61 @@ describe("TowerDefenseGame", () => {
     expect(game.coins).toBe(129); // +11 external signal, +2 normal kill reward, +7 scripted reward
     expect(game.lastEvents.some((event) => event.type === "scriptSignal" && event.signal === "wave_bonus")).toBe(false); // action events reset on tick
   });
+
+  it("applies and expires controlled TowerScript terrain overrides without removing towers", () => {
+    const content = buildContent();
+    content.scripts = {
+      terrain_rules: {
+        schemaVersion: 2,
+        id: "terrain_rules",
+        bindings: [{ scope: "global" }],
+        handlers: {
+          signal: [{
+            when: { $op: "eq", args: [{ $get: "event.signal" }, "flood"] },
+            actions: [{ action: "setTileTerrain", target: { q: 1, r: 0 }, terrainId: "water", duration: 0.2 }]
+          }]
+        }
+      }
+    };
+    const game = new TowerDefenseGame({ missionId: "basic", content });
+    expect(game.placeTower("pelter", { q: 1, r: 0 }).ok).toBe(true);
+
+    expect(game.emitScriptSignal("flood").ok).toBe(true);
+    expect(game.getSnapshot().tiles.find((tile) => tile.q === 1 && tile.r === 0)?.terrain).toBe("water");
+    expect(game.getTowerIdAt({ q: 1, r: 0 })).toBe("tower_1");
+    expect(game.getSnapshot().terrainOverrides).toEqual([
+      expect.objectContaining({ q: 1, r: 0, terrain: "water", source: "script" })
+    ]);
+
+    game.tick(0.2);
+    expect(game.getSnapshot().tiles.find((tile) => tile.q === 1 && tile.r === 0)?.terrain).toBe("buildable");
+    expect(game.getSnapshot().terrainOverrides).toEqual([]);
+    expect(game.getTowerIdAt({ q: 1, r: 0 })).toBe("tower_1");
+    expect(game.lastEvents).toContainEqual(expect.objectContaining({
+      type: "terrainChanged", coord: { q: 1, r: 0 }, fromTerrain: "water", toTerrain: "buildable", source: "restore"
+    }));
+  });
+
+  it("rejects TowerScript attempts to make an active route non-walkable", () => {
+    const content = buildContent();
+    content.scripts = {
+      terrain_rules: {
+        schemaVersion: 2,
+        id: "terrain_rules",
+        bindings: [{ scope: "global" }],
+        handlers: {
+          signal: [{ actions: [{ action: "setTileTerrain", target: { q: 2, r: 1 }, terrainId: "blocked" }] }]
+        }
+      }
+    };
+    const game = new TowerDefenseGame({ missionId: "basic", content });
+    game.emitScriptSignal("block_route");
+
+    expect(game.getSnapshot().tiles.find((tile) => tile.q === 2 && tile.r === 1)?.terrain).not.toBe("blocked");
+    expect(game.getSnapshot().scriptState.diagnostics).toContainEqual(expect.objectContaining({
+      scriptId: "terrain_rules", code: "runtime_error", message: expect.stringContaining("active route")
+    }));
+  });
 });
 
 describe("deferred death near the core (regression)", () => {

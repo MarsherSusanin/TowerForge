@@ -120,7 +120,7 @@ describe("Studio AI provider adapters", () => {
     expect(response.status).toBe(200);
     const result = await response.json();
     expect(result.ok).toBe(true);
-    expect(result.checks.map((check) => check.id)).toEqual(["validation", "maps", "identity", "content", "build_targets"]);
+    expect(result.checks.map((check) => check.id)).toEqual(["validation", "maps", "identity", "content", "build_targets", "tile_coverage"]);
     expect(result).not.toHaveProperty("projectDir");
     expect(JSON.stringify(result)).not.toContain(studio.projectDir);
   }, 15_000);

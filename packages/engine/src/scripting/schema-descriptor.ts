@@ -7,14 +7,14 @@ import type {
 } from "./types.js";
 
 export const TOWER_SCRIPT_SCOPES = Object.freeze([
-  "global", "mission", "map", "wave", "tower", "enemy", "ability"
+  "global", "mission", "map", "wave", "tower", "enemy", "ability", "terrain"
 ] satisfies TowerScriptScope[]);
 
 export const TOWER_SCRIPT_EVENTS = Object.freeze([
   "gameStarted", "tick", "towerPlaced", "towerSold", "towerMoved", "towerUpgraded", "towerDestroyed",
   "towerTargetModeChanged", "towerFired", "towerResourcesGranted", "enemyHit", "enemyKilled", "enemyLeaked",
   "enemySpawnedOnDeath", "enemyPhaseSpawned", "waveStarted", "waveCleared", "resourcesGranted", "abilityUsed",
-  "objectiveCompleted", "objectiveFailed", "starEarned", "victory", "defeat", "signal"
+  "enemyEnteredTile", "terrainChanged", "objectiveCompleted", "objectiveFailed", "starEarned", "victory", "defeat", "signal"
 ] satisfies TowerScriptEventName[]);
 
 export const TOWER_SCRIPT_OPERATORS = Object.freeze([
@@ -42,6 +42,11 @@ export const TOWER_SCRIPT_ACTION_SCHEMA = Object.freeze({
     required: { enemyTypeId: "existing enemy type id" },
     optional: { count: "expression; integer 0..32", routeId: "existing route id", pathProgress: "expression >= 0" }
   },
+  setTileTerrain: {
+    required: { target: '"eventTile" or {q: expression, r: expression}', terrainId: "existing terrain id" },
+    optional: { duration: "expression > 0; omitted persists until reset or restore" }
+  },
+  restoreTileTerrain: { required: { target: '"eventTile" or {q: expression, r: expression}' } },
   setState: { required: { key: "safe identifier", value: "expression" } },
   incrementState: { required: { key: "safe identifier" }, optional: { amount: "expression; defaults to 1" } },
   emitSignal: { required: { signal: "safe identifier" }, optional: { payload: "JSON expression" } }
@@ -67,6 +72,8 @@ export const TOWER_SCRIPT_EVENT_FIELDS = Object.freeze({
   waveCleared: ["type", "waveIndex", "income", "interest"],
   resourcesGranted: ["type", "source", "waveIndex", "resources"],
   abilityUsed: ["type", "abilityId", "center", "enemyIds", "effects"],
+  enemyEnteredTile: ["type", "enemyId", "enemyTypeId", "coord", "terrain", "terrainMetadata", "routeId", "pathOrder"],
+  terrainChanged: ["type", "coord", "fromTerrain", "toTerrain", "terrainMetadata", "source"],
   objectiveCompleted: ["type", "objectiveId", "kind"],
   objectiveFailed: ["type", "objectiveId", "kind"],
   starEarned: ["type", "starId"],
@@ -86,13 +93,15 @@ export const TOWER_SCRIPT_LIMITS = Object.freeze({
   eventsPerTransaction: 512,
   signalRecursionDepth: 8,
   spawnedEnemiesPerAction: 32,
+  terrainChangesPerTransaction: 64,
+  activeTerrainOverrides: 512,
   stateBytesPerBinding: 65_536,
   externalSignalPayloadBytes: 65_536,
   retainedDiagnostics: 32
 });
 
 export const TOWER_SCRIPT_SCHEMA = Object.freeze({
-  schemaVersion: 1,
+  schemaVersion: 2,
   filePattern: "scripts/**/*.tower.json",
   semantics: "Deterministic JSON rules interpreted by the engine; never executable host code.",
   bindingRules: {

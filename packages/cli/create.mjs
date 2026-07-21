@@ -6,7 +6,7 @@ import { createProject, TEMPLATE_NAMES } from "./lib/create-project.mjs";
 
 function parseArgs() {
   const raw = process.argv.slice(2);
-  const result = { name: null, dir: null, template: "classic" };
+  const result = { name: null, dir: null, template: "classic", grid: "hex" };
   let i = 0;
   while (i < raw.length) {
     if (raw[i] === "--dir" && raw[i + 1]) {
@@ -14,6 +14,9 @@ function parseArgs() {
       i += 2;
     } else if (raw[i] === "--template" && raw[i + 1]) {
       result.template = raw[i + 1];
+      i += 2;
+    } else if (raw[i] === "--grid" && raw[i + 1]) {
+      result.grid = raw[i + 1];
       i += 2;
     } else if (!raw[i].startsWith("--")) {
       if (!result.name) result.name = raw[i];
@@ -27,10 +30,11 @@ function parseArgs() {
 
 const args = parseArgs();
 if (!args.name) {
-  console.error("Usage: node create.mjs <name> [--dir <path>] [--template <name>]");
+  console.error("Usage: node create.mjs <name> [--dir <path>] [--template <name>] [--grid hex|square]");
   console.error("  name        Project name (will create <name>.tdproj directory)");
   console.error("  --dir       Parent directory for the project (default: current directory)");
   console.error(`  --template  Starter game: ${TEMPLATE_NAMES.join(" | ")} (default: classic)`);
+  console.error("  --grid      Map topology: hex | square (default: hex)");
   process.exit(1);
 }
 
@@ -38,7 +42,8 @@ try {
   const result = createProject({
     name: args.name,
     parentDir: args.dir ?? process.cwd(),
-    templateName: args.template
+    templateName: args.template,
+    gridKind: args.grid
   });
   const { projectName, templateName, counts } = result;
   console.log(`Created ${projectName}/  (template: ${templateName})`);

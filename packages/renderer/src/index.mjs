@@ -1,3 +1,6 @@
+import { resolveAutotile } from "./autotile.mjs";
+export * from "./autotile.mjs";
+
 // Max canvas backbuffer area (pixels). Above this, high-DPR mobile GPUs stall or OOM. ~1.35M px
 // ≈ 1600x844 — plenty for a hex playfield while keeping cheap Android devices stable.
 export const MAX_BACKBUFFER_PX = 1_350_000;
@@ -19,6 +22,11 @@ export class TowerForgeCanvasRenderer {
     this.prevEnemyPos = new Map();
     this.lastDrawTime = null;
     this.focusCoord = null;
+    this.lastGrid = { kind: "hex", layout: "odd-r" };
+    this.tileLayer = null;
+    this.tileLayerKey = null;
+    this.tileTerrainState = new Map();
+    this.tileLayerDirtyAll = true;
     this.theme = {
       bg: "#101410",
       buildable: "#1d2a1d",
@@ -58,7 +66,9 @@ export class TowerForgeCanvasRenderer {
     const dt = this.lastDrawTime == null ? 0 : Math.min(0.05, (now - this.lastDrawTime) / 1000);
     this.lastDrawTime = now;
 
-    const geom = this.geometry(snapshot.tiles ?? []);
+    this.lastGrid = snapshot.grid ?? this.lastGrid;
+    const geom = this.geometry(snapshot.tiles ?? [], this.lastGrid);
+    const mapModel = { id: snapshot.mapId ?? snapshot.missionId ?? "map", grid: this.lastGrid, tiles: snapshot.tiles ?? [], pathRoutes: snapshot.pathRoutes ?? [] };
     const positions = new Map();
     for (const enemy of snapshot.enemies ?? []) positions.set(enemy.id, this.enemyPoint(enemy, snapshot, geom));
 
@@ -70,15 +80,12 @@ export class TowerForgeCanvasRenderer {
     this.ctx.save();
     this.ctx.translate(offset.x, offset.y);
 
-    for (const tile of snapshot.tiles ?? []) {
-      const p = this.center(tile, geom);
-      this.drawHex(p.x, p.y, geom.r * 0.86, this.tileColor(tile.terrain));
-    }
+    this.drawCachedTileLayer(snapshot.tiles ?? [], geom, mapModel);
     for (const tile of snapshot.temporaryWaterTiles ?? []) {
       const p = this.center(tile, geom);
-      this.drawHex(p.x, p.y, geom.r * 0.74, "rgba(66,123,136,.58)");
+      this.drawCell(p.x, p.y, geom.r * 0.74, "rgba(66,123,136,.58)", geom);
     }
-    if (this.focusCoord) this.drawFocusHex(this.focusCoord, geom);
+    if (this.focusCoord) this.drawFocusCell(this.focusCoord, geom);
     for (const tower of snapshot.towers ?? []) this.drawTower(tower, geom);
     for (const enemy of snapshot.enemies ?? []) this.drawEnemy(enemy, snapshot, geom);
     this.drawEffects(geom);
@@ -92,12 +99,18 @@ export class TowerForgeCanvasRenderer {
     this.focusCoord = coord && Number.isFinite(coord.q) && Number.isFinite(coord.r) ? { q: coord.q, r: coord.r } : null;
   }
 
-  drawFocusHex(coord, geom) {
+  drawFocusCell(coord, geom) {
     const p = this.center(coord, geom);
     this.ctx.save();
     this.ctx.strokeStyle = this.theme.towerStroke;
     this.ctx.lineWidth = Math.max(2, geom.r * 0.12);
     this.ctx.setLineDash([Math.max(3, geom.r * 0.22), Math.max(2, geom.r * 0.12)]);
+    if (geom.grid.kind === "square") {
+      const size = geom.r * 1.62;
+      this.ctx.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+      this.ctx.restore();
+      return;
+    }
     this.ctx.beginPath();
     for (let i = 0; i < 6; i += 1) {
       const angle = Math.PI / 6 + i * Math.PI / 3;
@@ -190,7 +203,12 @@ export class TowerForgeCanvasRenderer {
   spriteFor(kind, id) {
     const visuals = this.content.visuals;
     const spriteId = visuals && visuals.bindings && visuals.bindings[kind] ? visuals.bindings[kind][id] : null;
-    const sprite = spriteId && visuals.sprites ? visuals.sprites[spriteId] : null;
+    return this.spriteById(spriteId);
+  }
+
+  spriteById(spriteId) {
+    const visuals = this.content.visuals;
+    const sprite = spriteId && visuals?.sprites ? visuals.sprites[spriteId] : null;
     if (!sprite || typeof sprite !== "object") return null;
     if (sprite.atlas && sprite.frame) {
       const atlas = visuals.atlases ? visuals.atlases[sprite.atlas] : null;
@@ -214,6 +232,7 @@ export class TowerForgeCanvasRenderer {
       // Encode each path segment so filenames with spaces/unicode/reserved chars resolve (the
       // studio /project-file/ route decodeURIComponent's the path).
       img.src = assetUrl(this.assetBase, src);
+      img.onload = () => { this.tileLayerDirtyAll = true; };
       this.images.set(src, img);
     }
     return img && img.complete && img.naturalWidth ? img : null;
@@ -228,20 +247,19 @@ export class TowerForgeCanvasRenderer {
         tiles.push({ q, r, terrain: overrides.get(`${q},${r}`) ?? map.defaultTerrain ?? "buildable" });
       }
     }
-    const geom = this.geometry(tiles);
+    this.lastGrid = map.grid ?? (map.orientation === "orthogonal" ? { kind: "square", adjacency: "cardinal" } : { kind: "hex", layout: "odd-r" });
+    const geom = this.geometry(tiles, this.lastGrid);
+    const mapModel = { ...map, grid: this.lastGrid, tiles };
     this.clear();
-    for (const tile of tiles) {
-      const p = this.center(tile, geom);
-      this.drawHex(p.x, p.y, geom.r * 0.86, this.tileColor(tile.terrain));
-    }
+    this.drawCachedTileLayer(tiles, geom, mapModel);
     for (const coord of map.pathCenterline ?? []) {
       const p = this.center(coord, geom);
-      this.drawHex(p.x, p.y, geom.r * 0.45, "rgba(215,181,119,.55)");
+      this.drawCell(p.x, p.y, geom.r * 0.45, "rgba(215,181,119,.55)", geom);
     }
   }
 
   pickTile(event, tiles) {
-    const geom = this.geometry(tiles ?? []);
+    const geom = this.geometry(tiles ?? [], this.lastGrid);
     const rect = this.canvas.getBoundingClientRect();
     // Pointer events are reported in CSS pixels, while geometry is calculated in backbuffer
     // pixels. resize() may cap the effective DPR, so the browser's devicePixelRatio is not a
@@ -260,7 +278,8 @@ export class TowerForgeCanvasRenderer {
         best = tile;
       }
     }
-    return best && bestDist <= geom.r * 0.95 ? { q: best.q, r: best.r } : null;
+    const hitRadius = geom.grid.kind === "square" ? geom.r * Math.SQRT2 : geom.r * 0.95;
+    return best && bestDist <= hitRadius ? { q: best.q, r: best.r } : null;
   }
 
   clear() {
@@ -269,7 +288,7 @@ export class TowerForgeCanvasRenderer {
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
-  geometry(tiles) {
+  geometry(tiles, grid = this.lastGrid) {
     // Loop instead of Math.max(...tiles.map(...)): the spread pushes one argument per tile onto the
     // call stack, so a large map (256x256 = 65 536 tiles) throws "Maximum call stack size exceeded"
     // in WebKit/JSC (Safari + packaged iOS) every frame. A loop also avoids allocating two
@@ -280,11 +299,18 @@ export class TowerForgeCanvasRenderer {
       if (tile.q > maxQ) maxQ = tile.q;
       if (tile.r > maxR) maxR = tile.r;
     }
+    if (grid?.kind === "square") {
+      const cell = Math.min(this.canvas.width / (maxQ + 2), this.canvas.height / (maxR + 2));
+      return { r: cell / 2, ox: cell, oy: cell, grid };
+    }
     const r = Math.min(this.canvas.width / ((maxQ + 2) * 1.65), this.canvas.height / ((maxR + 2) * 1.45));
-    return { r, ox: r * 1.5, oy: r * 1.5 };
+    return { r, ox: r * 1.5, oy: r * 1.5, grid: grid ?? { kind: "hex", layout: "odd-r" } };
   }
 
   center(coord, geom) {
+    if (geom.grid.kind === "square") {
+      return { x: geom.ox + coord.q * geom.r * 2, y: geom.oy + coord.r * geom.r * 2 };
+    }
     return {
       x: geom.ox + coord.q * geom.r * 1.48 + (coord.r % 2) * geom.r * 0.74,
       y: geom.oy + coord.r * geom.r * 1.28
@@ -387,6 +413,142 @@ export class TowerForgeCanvasRenderer {
     this.ctx.stroke();
   }
 
+  drawCell(x, y, r, fill, geom) {
+    if (geom.grid.kind === "square") {
+      const size = r * 2;
+      this.ctx.fillStyle = fill;
+      this.ctx.fillRect(x - r, y - r, size, size);
+      this.ctx.strokeStyle = "rgba(255,255,255,.12)";
+      this.ctx.strokeRect(x - r, y - r, size, size);
+      return;
+    }
+    this.drawHex(x, y, r, fill);
+  }
+
+  drawCachedTileLayer(tiles, geom, map) {
+    if (typeof globalThis.document?.createElement !== "function") {
+      for (const tile of tiles) this.drawTile(tile, geom, map);
+      return;
+    }
+    if (!this.tileLayer) this.tileLayer = globalThis.document.createElement("canvas");
+    const binding = this.content.visuals?.bindings?.tileSets?.maps?.[map.id]
+      ?? this.content.visuals?.bindings?.tileSets?.grids?.[geom.grid.kind]
+      ?? "fallback";
+    const cacheKey = `${map.id}|${geom.grid.kind}|${tiles.length}|${this.canvas.width}x${this.canvas.height}|${binding}|${this.content.visuals?.tileSeed ?? 0}`;
+    const fullRedraw = this.tileLayerDirtyAll || this.tileLayerKey !== cacheKey || this.tileLayer.width !== this.canvas.width || this.tileLayer.height !== this.canvas.height;
+    if (this.tileLayer.width !== this.canvas.width) this.tileLayer.width = this.canvas.width;
+    if (this.tileLayer.height !== this.canvas.height) this.tileLayer.height = this.canvas.height;
+    const layerContext = this.tileLayer.getContext("2d");
+    const previousContext = this.ctx;
+    this.ctx = layerContext;
+    if (fullRedraw) {
+      layerContext.clearRect(0, 0, this.tileLayer.width, this.tileLayer.height);
+      for (const tile of tiles) this.drawTile(tile, geom, map);
+    } else {
+      const dirty = new Set();
+      for (const tile of tiles) {
+        const key = `${tile.q},${tile.r}`;
+        if (this.tileTerrainState.get(key) === tile.terrain) continue;
+        dirty.add(key);
+        for (const coord of renderingNeighbors(tile, geom.grid)) dirty.add(`${coord.q},${coord.r}`);
+      }
+      if (dirty.size) {
+        const tileByKey = new Map(tiles.map((tile) => [`${tile.q},${tile.r}`, tile]));
+        for (const key of dirty) {
+          const tile = tileByKey.get(key);
+          if (!tile) continue;
+          this.clipCell(tile, geom, () => {
+            const p = this.center(tile, geom);
+            layerContext.clearRect(p.x - geom.r, p.y - geom.r, geom.r * 2, geom.r * 2);
+            this.drawTile(tile, geom, map);
+          });
+        }
+      }
+    }
+    this.ctx = previousContext;
+    this.tileLayerKey = cacheKey;
+    this.tileLayerDirtyAll = false;
+    this.tileTerrainState = new Map(tiles.map((tile) => [`${tile.q},${tile.r}`, tile.terrain]));
+    previousContext.drawImage(this.tileLayer, 0, 0);
+  }
+
+  clipCell(coord, geom, draw) {
+    const p = this.center(coord, geom);
+    this.ctx.save();
+    this.ctx.beginPath();
+    if (geom.grid.kind === "square") {
+      this.ctx.rect(p.x - geom.r, p.y - geom.r, geom.r * 2, geom.r * 2);
+    } else {
+      for (let index = 0; index < 6; index += 1) {
+        const angle = Math.PI / 6 + index * Math.PI / 3;
+        const x = p.x + Math.cos(angle) * geom.r;
+        const y = p.y + Math.sin(angle) * geom.r;
+        if (index === 0) this.ctx.moveTo(x, y); else this.ctx.lineTo(x, y);
+      }
+      this.ctx.closePath();
+    }
+    this.ctx.clip();
+    draw();
+    this.ctx.restore();
+  }
+
+  drawTile(tile, geom, map) {
+    const p = this.center(tile, geom);
+    const resolved = resolveAutotile({ map, visuals: this.content.visuals, coord: tile, terrain: tile.terrain, seed: this.content.visuals?.tileSeed ?? 0 });
+    if (resolved.sectors?.length) {
+      const complete = resolved.sectors.every((sector) => this.spriteById(sector.selected?.spriteId));
+      if (!complete) {
+        this.drawCell(p.x, p.y, geom.r * 0.86, this.tileColor(tile.terrain), geom);
+        return;
+      }
+      for (const sector of resolved.sectors) this.drawTileSector(p, geom, sector);
+      return;
+    }
+    const sprite = this.spriteById(resolved.selected?.spriteId);
+    if (!sprite) {
+      this.drawCell(p.x, p.y, geom.r * 0.86, this.tileColor(tile.terrain), geom);
+      return;
+    }
+    const size = geom.grid.kind === "square" ? geom.r * 1.72 : geom.r * 1.72;
+    this.ctx.save();
+    const transform = resolved.selected?.transform;
+    this.ctx.translate(p.x, p.y);
+    if (transform?.rotate) this.ctx.rotate((transform.rotate * Math.PI) / 180);
+    this.ctx.scale(transform?.flipX ? -1 : 1, transform?.flipY ? -1 : 1);
+    this.ctx.drawImage(sprite.img, sprite.sx, sprite.sy, sprite.sw, sprite.sh, -size / 2, -size / 2, size, size);
+    this.ctx.restore();
+  }
+
+  drawTileSector(center, geom, sector) {
+    const sprite = this.spriteById(sector.selected?.spriteId);
+    if (!sprite) return;
+    const size = geom.r * 1.72;
+    this.ctx.save();
+    this.ctx.beginPath();
+    if (geom.grid.kind === "square") {
+      const quadrants = {
+        NW: [-size / 2, -size / 2], NE: [0, -size / 2],
+        SE: [0, 0], SW: [-size / 2, 0]
+      };
+      const [x, y] = quadrants[sector.direction] ?? [-size / 2, -size / 2];
+      this.ctx.rect(center.x + x, center.y + y, size / 2, size / 2);
+    } else {
+      const index = HEX_SECTOR_DIRECTIONS.indexOf(sector.direction);
+      const start = -Math.PI + index * Math.PI / 3;
+      this.ctx.moveTo(center.x, center.y);
+      this.ctx.lineTo(center.x + Math.cos(start) * size / 2, center.y + Math.sin(start) * size / 2);
+      this.ctx.lineTo(center.x + Math.cos(start + Math.PI / 3) * size / 2, center.y + Math.sin(start + Math.PI / 3) * size / 2);
+      this.ctx.closePath();
+    }
+    this.ctx.clip();
+    this.ctx.translate(center.x, center.y);
+    const transform = sector.selected?.transform;
+    if (transform?.rotate) this.ctx.rotate((transform.rotate * Math.PI) / 180);
+    this.ctx.scale(transform?.flipX ? -1 : 1, transform?.flipY ? -1 : 1);
+    this.ctx.drawImage(sprite.img, sprite.sx, sprite.sy, sprite.sw, sprite.sh, -size / 2, -size / 2, size, size);
+    this.ctx.restore();
+  }
+
   tileColor(terrain) {
     return this.theme[terrain] ?? this.theme.buildable;
   }
@@ -395,6 +557,22 @@ export class TowerForgeCanvasRenderer {
     const value = this.content.enemies?.[id]?.color ?? 0xaaaaaa;
     return "#" + Number(value).toString(16).padStart(6, "0");
   }
+}
+
+const HEX_SECTOR_DIRECTIONS = ["NW", "NE", "E", "SE", "SW", "W"];
+
+function renderingNeighbors(coord, grid) {
+  if (grid?.kind === "square") {
+    return [
+      { q: coord.q, r: coord.r - 1 }, { q: coord.q + 1, r: coord.r - 1 },
+      { q: coord.q + 1, r: coord.r }, { q: coord.q + 1, r: coord.r + 1 },
+      { q: coord.q, r: coord.r + 1 }, { q: coord.q - 1, r: coord.r + 1 },
+      { q: coord.q - 1, r: coord.r }, { q: coord.q - 1, r: coord.r - 1 }
+    ];
+  }
+  const even = coord.r % 2 === 0;
+  const offsets = even ? [[-1, -1], [0, -1], [1, 0], [0, 1], [-1, 1], [-1, 0]] : [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 0]];
+  return offsets.map(([q, r]) => ({ q: coord.q + q, r: coord.r + r }));
 }
 
 function assetUrl(assetBase, src) {

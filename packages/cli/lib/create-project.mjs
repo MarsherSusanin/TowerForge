@@ -20,11 +20,12 @@ export function validateProjectName(name) {
   return name;
 }
 
-export function createProject({ name, parentDir = process.cwd(), templateName = "classic" }) {
+export function createProject({ name, parentDir = process.cwd(), templateName = "classic", gridKind = "hex" }) {
   validateProjectName(name);
   if (!TEMPLATE_NAMES.includes(templateName)) {
     throw new Error(`Unknown template "${templateName}". Choose one of: ${TEMPLATE_NAMES.join(", ")}.`);
   }
+  if (gridKind !== "hex" && gridKind !== "square") throw new Error('gridKind must be "hex" or "square".');
 
   const resolvedParent = path.resolve(parentDir);
   const projectName = `${name}.tdproj`;
@@ -33,23 +34,24 @@ export function createProject({ name, parentDir = process.cwd(), templateName = 
     throw new Error(`Directory already exists: ${projectDir}`);
   }
 
-  const template = getTemplate(templateName);
+  const template = getTemplate(templateName, { gridKind });
   const balanceJson = template.balance;
   const worldMapJson = template.worldMap;
   const mapsJson = template.maps;
   const mapSourcesJson = template.mapSources;
   const projectJson = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     name,
     description: `A ${templateName} tower-defense game built with TowerForge.`,
     author: "",
   };
   const visualsJson = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     assetsRoot: "assets",
     atlases: {},
     sprites: {},
-    bindings: { towers: {}, enemies: {}, tiles: {}, ui: {} }
+    tileSets: {},
+    bindings: { towers: {}, enemies: {}, tiles: {}, tileSets: { grids: {}, maps: {} }, ui: {} }
   };
   const buildTargetsJson = {
     schemaVersion: 1,
@@ -69,7 +71,7 @@ export function createProject({ name, parentDir = process.cwd(), templateName = 
     }
   };
   const starterScript = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "starter_gameplay",
     label: "Starter gameplay hooks",
     description: "A safe TowerScript example. Extend handlers or add more files under scripts/.",
@@ -106,6 +108,7 @@ export function createProject({ name, parentDir = process.cwd(), templateName = 
     projectDir,
     projectName,
     templateName,
+    gridKind,
     counts: {
       missions: Object.keys(balanceJson.missions ?? {}).length,
       enemies: Object.keys(balanceJson.enemies ?? {}).length,

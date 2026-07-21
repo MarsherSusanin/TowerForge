@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 2,
+  "id": "terrain_mutation_example",
+  "label": "Temporary flooded path",
+  "enabled": true,
+  "bindings": [
+    {
+      "scope": "terrain",
+      "ids": ["path"]
+    }
+  ],
+  "handlers": {
+    "enemyEnteredTile": [
+      {
+        "id": "flood_entered_path",
+        "actions": [
+          {
+            "action": "setTileTerrain",
+            "target": "eventTile",
+            "terrainId": "water",
+            "duration": 2
+          }
+        ]
+      }
+    ]
+  }
+}

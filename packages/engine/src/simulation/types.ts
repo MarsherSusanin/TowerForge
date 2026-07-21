@@ -1,4 +1,6 @@
-export type Terrain = "buildable" | "path" | "blocked" | "core" | "spawn" | "water";
+/** Terrain ids are project-authored; the built-in ids remain available as defaults. */
+export type Terrain = string;
+export type TerrainId = Terrain;
 export type Outcome = "playing" | "victory" | "defeat";
 export type WaveState = "ready" | "spawning" | "between" | "complete";
 export type TowerAttackKind =
@@ -38,20 +40,40 @@ export interface CurrencyDefinition {
   color?: number;
 }
 
-export interface HexCoord {
+export interface GridCoord {
   q: number;
   r: number;
 }
 
-export interface HexTile extends HexCoord {
+export type GridDefinition =
+  | { kind: "hex"; layout: "odd-r" }
+  | { kind: "square"; adjacency: "cardinal" };
+
+export interface TerrainTypeDefinition {
+  id: TerrainId;
+  label: string;
+  buildable: boolean;
+  walkable: boolean;
+  groundSpeedMultiplier: number;
+  tags: string[];
+}
+
+export interface GridTile extends GridCoord {
   terrain: Terrain;
   occupiedBy?: string;
 }
 
-export interface HexPathRoute {
+export interface GridPathRoute {
   id: string;
-  pathCenterline: HexCoord[];
+  pathCenterline: GridCoord[];
 }
+
+/** @deprecated Use GridCoord. Coordinates stay `{q,r}` for project compatibility. */
+export type HexCoord = GridCoord;
+/** @deprecated Use GridTile. */
+export type HexTile = GridTile;
+/** @deprecated Use GridPathRoute. */
+export type HexPathRoute = GridPathRoute;
 
 export interface EnemyDeathSpawnDefinition {
   enemyId: string;
@@ -511,7 +533,7 @@ export interface TowerState {
 }
 
 export type GameEvent =
-  | { type: "towerPlaced"; towerId: string; towerTypeId: string }
+  | { type: "towerPlaced"; towerId: string; towerTypeId: string; coord: GridCoord; terrain: Terrain; terrainMetadata: TerrainTypeDefinition }
   | { type: "towerSold"; towerId: string; towerTypeId: string; refund: ResourceBag }
   | { type: "towerMoved"; towerId: string; from: HexCoord; to: HexCoord; cost: ResourceBag }
   | { type: "towerUpgraded"; towerId: string; level: number; stacks: number }
@@ -550,6 +572,8 @@ export type GameEvent =
   | { type: "towerResourcesGranted"; towerId: string; enemyId: string; resources: ResourceBag }
   | { type: "waterAbilityUsed"; abilityId: MissionAbilityId; center: HexCoord; coords: HexCoord[]; duration: number }
   | { type: "abilityUsed"; abilityId: MissionAbilityId; center: HexCoord; enemyIds: string[]; effects: AbilityEffect[] }
+  | { type: "enemyEnteredTile"; enemyId: string; enemyTypeId: string; coord: GridCoord; terrain: Terrain; terrainMetadata: TerrainTypeDefinition; routeId?: string; pathOrder: number }
+  | { type: "terrainChanged"; coord: GridCoord; fromTerrain: Terrain; toTerrain: Terrain; terrainMetadata: TerrainTypeDefinition; source: "script" | "ability" | "restore" }
   | { type: "scriptSignal"; scriptId: string; signal: string; payload: import("../scripting/types.js").TowerScriptJson }
   | { type: "scriptDiagnostic"; diagnostic: import("../scripting/types.js").TowerScriptDiagnostic }
   | { type: "victory" }
@@ -569,12 +593,20 @@ export interface TemporaryWaterTile extends HexCoord {
   expiresIn: number;
 }
 
+export interface RuntimeTerrainOverride extends GridCoord {
+  terrain: Terrain;
+  expiresIn?: number;
+  source: "script" | "ability";
+}
+
 export interface SunlightTile extends HexCoord {
   pathOrder: number;
   routeId?: string;
 }
 
 export interface GameSnapshot {
+  mapId: string;
+  grid: GridDefinition;
   missionId: string;
   missionLabel: string;
   difficultyId: string;
@@ -602,6 +634,7 @@ export interface GameSnapshot {
   tiles: HexTile[];
   abilities: Partial<Record<MissionAbilityId, AbilitySnapshot>>;
   temporaryWaterTiles: TemporaryWaterTile[];
+  terrainOverrides: RuntimeTerrainOverride[];
   sunlightTiles: SunlightTile[];
   pathCenterline: HexCoord[];
   pathRoutes: HexPathRoute[];

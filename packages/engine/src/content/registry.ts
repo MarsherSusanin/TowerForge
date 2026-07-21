@@ -1,4 +1,5 @@
-import { HexMap, type HexMapDefinition } from "../simulation/map.js";
+import { GridMap, type GridMapDefinition } from "../simulation/map.js";
+import { normalizeTerrainTypes } from "../simulation/terrain.js";
 import type { TowerScriptDefinition } from "../scripting/types.js";
 import type {
   CurrencyDefinition,
@@ -12,6 +13,7 @@ import type {
   MissionObjectivesDefinition,
   MissionSunlightDefinition,
   ResourceBag,
+  TerrainTypeDefinition,
   TowerType,
   WaveDefinition
 } from "../simulation/types.js";
@@ -81,7 +83,7 @@ export interface MissionContentDefinition extends MissionDefinition {
   waveSetId: string;
   buildTowerIds: string[];
   abilityIds: MissionAbilityId[];
-  mapFactory: () => HexMap;
+  mapFactory: () => GridMap;
 }
 
 export interface GameBalanceData {
@@ -90,6 +92,7 @@ export interface GameBalanceData {
   defaultDifficultyId?: string;
   difficulties?: DifficultyDefinition[];
   metaProgression?: MetaProgressionDefinition;
+  terrainTypes?: Record<string, Partial<TerrainTypeDefinition>>;
   defaultMissionId: string;
   abilities: Partial<Record<MissionAbilityId, MissionAbilityDefinition>>;
   enemies: Record<string, EnemyType>;
@@ -126,13 +129,14 @@ export interface GameContentRegistry {
   defaultDifficultyId: string;
   difficulties: DifficultyDefinition[];
   metaProgression: MetaProgressionDefinition;
+  terrainTypes: Record<string, TerrainTypeDefinition>;
   defaultMissionId: string;
   abilities: Partial<Record<MissionAbilityId, MissionAbilityDefinition>>;
   enemies: Record<string, EnemyType>;
   towers: Record<string, TowerType>;
   waveSets: Record<string, WaveDefinition[]>;
   missions: Record<string, MissionContentDefinition>;
-  maps: Record<string, HexMapDefinition>;
+  maps: Record<string, GridMapDefinition>;
   scripts: Record<string, TowerScriptDefinition>;
   worldMap: WorldMapCatalog;
   visuals: unknown;
@@ -145,7 +149,7 @@ export interface GameContentRegistry {
 
 export interface GameContentInput {
   balance: GameBalanceData;
-  maps: Record<string, HexMapDefinition>;
+  maps: Record<string, GridMapDefinition>;
   worldMap: WorldMapCatalog;
   scripts?: Record<string, TowerScriptDefinition>;
   visuals?: unknown;
@@ -174,7 +178,7 @@ export function createGameContentRegistry(options: GameContentInput): GameConten
           if (!mapDefinition) {
             throw new Error(`Mission ${mission.id} references unknown map "${mission.mapId}".`);
           }
-          return HexMap.fromDefinition(mapDefinition);
+          return GridMap.fromDefinition(mapDefinition);
         }
       };
       return [mission.id, resolved];
@@ -189,6 +193,7 @@ export function createGameContentRegistry(options: GameContentInput): GameConten
       ? balance.difficulties.map((difficulty) => ({ ...difficulty }))
       : [{ id: "normal", label: "Normal" }],
     metaProgression: balance.metaProgression ?? { currencies: [], upgrades: {}, rewardsByMission: {} },
+    terrainTypes: normalizeTerrainTypes(balance.terrainTypes, balance.constants.waterGroundSpeedFactor),
     defaultMissionId: balance.defaultMissionId,
     abilities: balance.abilities,
     enemies: balance.enemies,

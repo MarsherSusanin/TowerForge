@@ -40,6 +40,7 @@
     "desktop:build:win": "npm --workspace @towerforge/desktop run build -- --bundles nsis,msi",
     "desktop:build:linux": "npm --workspace @towerforge/desktop run build -- --bundles appimage,deb,rpm",
     "brand:build": "node scripts/build-brand-assets.mjs",
+    "tiles:build-presets": "node scripts/build-tile-preset-assets.mjs",
     "brand:icons": "npm --workspace @towerforge/desktop exec tauri icon -- ../../assets/brand/towerforge-app-icon.png"
   },
   "dependencies": {
@@ -47,6 +48,8 @@
     "@anthropic-ai/sdk": "^0.93.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@openai/codex": "0.144.6",
+    "fast-xml-parser": "^5.10.1",
+    "pngjs": "^7.0.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

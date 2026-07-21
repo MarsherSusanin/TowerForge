@@ -2,7 +2,7 @@ import type { StatusEffectSpec } from "../simulation/types.js";
 
 export type TowerScriptJson = null | boolean | number | string | TowerScriptJson[] | { [key: string]: TowerScriptJson };
 
-export type TowerScriptScope = "global" | "mission" | "map" | "wave" | "tower" | "enemy" | "ability";
+export type TowerScriptScope = "global" | "mission" | "map" | "wave" | "tower" | "enemy" | "ability" | "terrain";
 
 export interface TowerScriptBinding {
   scope: TowerScriptScope;
@@ -30,6 +30,8 @@ export type TowerScriptEventName =
   | "waveCleared"
   | "resourcesGranted"
   | "abilityUsed"
+  | "enemyEnteredTile"
+  | "terrainChanged"
   | "objectiveCompleted"
   | "objectiveFailed"
   | "starEarned"
@@ -62,6 +64,8 @@ export type TowerScriptExpression =
 
 export type TowerScriptEntityTarget = "self" | "eventEnemy" | "eventTower" | "allEnemies" | "allTowers";
 
+export type TowerScriptTileTarget = "eventTile" | { q: TowerScriptExpression; r: TowerScriptExpression };
+
 export type TowerScriptAction =
   | { action: "grantResource"; resourceId: string; amount: TowerScriptExpression }
   | { action: "damageCore"; amount: TowerScriptExpression }
@@ -72,6 +76,8 @@ export type TowerScriptAction =
   | { action: "setTowerCooldown"; target: TowerScriptEntityTarget; value: TowerScriptExpression }
   | { action: "addTowerStacks"; target: TowerScriptEntityTarget; amount: TowerScriptExpression }
   | { action: "spawnEnemy"; enemyTypeId: string; count?: TowerScriptExpression; routeId?: string; pathProgress?: TowerScriptExpression }
+  | { action: "setTileTerrain"; target: TowerScriptTileTarget; terrainId: string; duration?: TowerScriptExpression }
+  | { action: "restoreTileTerrain"; target: TowerScriptTileTarget }
   | { action: "setState"; key: string; value: TowerScriptExpression }
   | { action: "incrementState"; key: string; amount?: TowerScriptExpression }
   | { action: "emitSignal"; signal: string; payload?: TowerScriptExpression };
@@ -86,7 +92,7 @@ export interface TowerScriptHandler {
 }
 
 export interface TowerScriptDefinition {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   id: string;
   label?: string;
   description?: string;
