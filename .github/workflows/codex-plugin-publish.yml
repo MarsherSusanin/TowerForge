@@ -1,0 +1,84 @@
+name: Publish Codex Plugin Mirror
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-plugin-mirror
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build:engine
+      - run: npm run plugin:build
+      - run: npm run plugin:validate
+      - run: npm run plugin:smoke
+      - name: Require matching version for a source tag
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          plugin_version="$(node -p "require('./plugins/towerforge/.codex-plugin/plugin.json').version")"
+          source_version="${GITHUB_REF_NAME#v}"
+          test "$plugin_version" = "$source_version" || {
+            echo "Plugin version $plugin_version does not match source tag $GITHUB_REF_NAME" >&2
+            exit 1
+          }
+      - name: Export deterministic mirror
+        run: npm run plugin:export -- --out "$RUNNER_TEMP/towerforge-codex-plugin-export"
+      - name: Verify exported hashes
+        run: node "$RUNNER_TEMP/towerforge-codex-plugin-export/scripts/verify-release.mjs" "$RUNNER_TEMP/towerforge-codex-plugin-export"
+      - name: Configure repository-scoped deploy key
+        shell: bash
+        env:
+          DEPLOY_KEY: ${{ secrets.TOWERFORGE_CODEX_PLUGIN_DEPLOY_KEY }}
+        run: |
+          test -n "$DEPLOY_KEY" || { echo "TOWERFORGE_CODEX_PLUGIN_DEPLOY_KEY is not configured" >&2; exit 1; }
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/towerforge-codex-plugin"
+          chmod 600 "$HOME/.ssh/towerforge-codex-plugin"
+          curl --fail --silent --show-error https://api.github.com/meta \
+            | jq -r '.ssh_keys[] | "github.com " + .' > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/towerforge-codex-plugin -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts" >> "$GITHUB_ENV"
+      - name: Publish generated release commit
+        shell: bash
+        run: |
+          git clone git@github.com:Lindforge-Studios/towerforge-codex-plugin.git "$RUNNER_TEMP/towerforge-codex-plugin"
+          rsync -a --delete --exclude .git/ \
+            "$RUNNER_TEMP/towerforge-codex-plugin-export/" \
+            "$RUNNER_TEMP/towerforge-codex-plugin/"
+          cd "$RUNNER_TEMP/towerforge-codex-plugin"
+          git config user.name "TowerForge Release Bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Mirror is already current."
+          else
+            git commit -m "release: sync plugin from ${GITHUB_SHA}"
+            git push origin main
+          fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if git rev-parse "refs/tags/$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              echo "Mirror tag $GITHUB_REF_NAME already exists; refusing to overwrite it." >&2
+              exit 1
+            fi
+            git tag -a "$GITHUB_REF_NAME" -m "TowerForge Codex plugin $GITHUB_REF_NAME"
+            git push origin "$GITHUB_REF_NAME"
+          fi

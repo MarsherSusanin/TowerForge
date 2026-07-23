@@ -1,0 +1,20 @@
+name: Verify Generated Plugin
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node scripts/verify-release.mjs
+      - run: node --check plugins/towerforge/runtime/packages/mcp/server.mjs

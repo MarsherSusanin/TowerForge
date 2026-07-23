@@ -1,5 +1,10 @@
 node_modules/
 dist/
+!plugins/towerforge/runtime/node_modules/
+!plugins/towerforge/runtime/node_modules/**
+!plugins/towerforge/runtime/packages/engine/
+!plugins/towerforge/runtime/packages/engine/dist/
+!plugins/towerforge/runtime/packages/engine/dist/**
 test-results/
 playwright-report/
 .DS_Store

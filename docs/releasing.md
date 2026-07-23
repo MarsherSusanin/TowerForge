@@ -25,6 +25,26 @@ Every run creates the `towerforge-release-candidate` Actions artifact. It contai
 
 The release assembler rejects mismatched versions across root npm, desktop npm, Tauri, and Cargo manifests, duplicate installer names, unsupported tag syntax, missing installers, and attempts to reuse an existing release tag. It never silently replaces published assets.
 
+## Codex Plugin Mirror
+
+`Lindforge-Studios/towerforge-codex-plugin` is a generated public marketplace, not an independent
+source repository. Canonical plugin code remains under `plugins/towerforge`, `packages/mcp`, and
+their dependencies in TowerForge.
+
+The `Publish Codex Plugin Mirror` workflow runs manually or for `vX.Y.Z` tags. It rebuilds and
+smokes the bundled runtime, exports the distribution outside the source tree, verifies every
+SHA-256, and pushes one generated release commit with a deploy key scoped only to the mirror. A tag
+publication additionally requires the plugin version to equal the source tag and creates the same
+annotated tag in the mirror without overwriting existing tags.
+
+The mirror `build-manifest.json` MUST contain the exact source commit, TowerForge/plugin/MCP
+versions, agent-guide and protocol versions, runtime requirements, and every distributed file's
+size and SHA-256. The mirror's own CI rejects missing, unexpected, symlinked, or modified files.
+
+To rotate publication credentials, create a new write deploy key on the mirror, replace only the
+`TOWERFORGE_CODEX_PLUGIN_DEPLOY_KEY` Actions secret in TowerForge, test a manual publication, and
+then remove the old deploy key. Never use a broad organization PAT for routine mirror publication.
+
 ## macOS Unsigned Build
 
 Build and verify the Apple Silicon DMG:

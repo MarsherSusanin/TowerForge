@@ -1,0 +1,20 @@
+{
+  "name": "towerforge",
+  "interface": {
+    "displayName": "Lindforge Studios"
+  },
+  "plugins": [
+    {
+      "name": "towerforge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/towerforge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

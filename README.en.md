@@ -47,6 +47,8 @@ Studio opens at `http://localhost:5174` and edits `examples/starter.tdproj` by d
 | Create a project | `npx towerforge create my-game --template classic` (also `maze`, `idle`, or `roguelike`) |
 | Run Studio | `npm run studio` |
 | Run MCP server | `npm run mcp -- --project examples/starter.tdproj` |
+| Build Codex plugin | `npm run plugin:build` |
+| Validate Codex plugin | `npm run plugin:validate && npm run plugin:smoke` |
 | Connect an AI client (Claude Code / Codex / Claude Desktop / Cursor / VS Code) | `npx towerforge mcp:connect <project> [--client <id> --write]` — or the client picker in Studio → Settings → AI Agent Integration |
 | Validate project | `npm run validate` |
 | Validate as JSON | `npm run validate -- --json` |
@@ -111,6 +113,8 @@ Brand assets, palette, naming, and export instructions live in [docs/brand.md](d
 Agent policy lives in [AGENTS.md](AGENTS.md). Operations are in [docs/runbook.md](docs/runbook.md), release policy is in [docs/releasing.md](docs/releasing.md), architecture decisions are in [docs/adr/](docs/adr/), and reference examples are in [docs/examples/](docs/examples/).
 
 Studio **AI Chat** and external MCP clients share the same tool registry and authoring policy. Domain-scoped schema discovery teaches agents when to use universal effects, TowerScript, difficulty/meta progression, or themes. Tools advertise risk metadata and prefer previewed, revision-guarded writes such as `apply_progression_patch`, `upsert_tower_script`, `apply_theme_pack`, granular entity/map/asset/narrative operations, validation, and rollback over broad replacement. Compact reads expose project concepts without raw filesystem access. Settings offers ChatGPT OAuth through Codex App Server, Claude account auth through the bundled Claude Agent SDK/runtime, and direct Anthropic, OpenAI, or OpenRouter keys. The right-side chat supports Ask/Plan/Act permissions, model catalogs, reasoning effort, images, and locally sampled video frames; official runtimes retain ownership of OAuth credentials.
+
+Codex users can install the generated public marketplace from [towerforge-codex-plugin](https://github.com/Lindforge-Studios/towerforge-codex-plugin). The canonical source, tests, and build scripts remain in this repository. Every mirror update records the exact TowerForge source commit and SHA-256 for each distributed file.
 
 ## License
 

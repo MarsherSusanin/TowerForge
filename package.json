@@ -41,6 +41,10 @@
     "desktop:build:linux": "npm --workspace @towerforge/desktop run build -- --bundles appimage,deb,rpm",
     "brand:build": "node scripts/build-brand-assets.mjs",
     "tiles:build-presets": "node scripts/build-tile-preset-assets.mjs",
+    "plugin:build": "node scripts/build-codex-plugin.mjs",
+    "plugin:validate": "node scripts/validate-codex-plugin.mjs",
+    "plugin:smoke": "node scripts/smoke-codex-plugin.mjs",
+    "plugin:export": "node scripts/export-codex-plugin-repository.mjs",
     "brand:icons": "npm --workspace @towerforge/desktop exec tauri icon -- ../../assets/brand/towerforge-app-icon.png"
   },
   "dependencies": {

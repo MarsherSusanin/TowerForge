@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "towerforge": {
+      "command": "node",
+      "args": [
+        "./runtime/packages/mcp/server.mjs"
+      ],
+      "cwd": ".",
+      "env": {
+        "TOWERFORGE_RUNTIME_ROOT": "./runtime",
+        "TOWERFORGE_BUNDLED_RUNTIME": "1",
+        "TOWERFORGE_MCP_WORKSPACE_BOUND": "1"
+      }
+    }
+  }
+}

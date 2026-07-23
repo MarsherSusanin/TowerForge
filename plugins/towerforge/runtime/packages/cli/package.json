@@ -1,0 +1,12 @@
+{
+  "name": "@towerforge/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "towerforge": "./bin/towerforge.mjs"
+  },
+  "scripts": {
+    "validate": "node validate.mjs",
+    "sim": "node sim.mjs"
+  }
+}
