@@ -61,7 +61,8 @@ export function verifyReleaseTree(root) {
   return { ok: true, fileCount: actual.length, pluginVersion: manifest.pluginVersion, sourceCommit: manifest.sourceCommit };
 }
 
-const invoked = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const invoked = process.argv[1]
+  && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
 if (invoked) {
   const root = path.resolve(process.argv[2] ?? path.dirname(path.dirname(fileURLToPath(import.meta.url))));
   const result = verifyReleaseTree(root);

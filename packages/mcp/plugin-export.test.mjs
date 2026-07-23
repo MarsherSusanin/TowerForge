@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +27,8 @@ describe("Codex plugin repository exporter", () => {
     expect(fs.existsSync(path.join(output, "plugins", "towerforge", "runtime", "packages", "mcp", "server.mjs"))).toBe(true);
     expect(fs.readFileSync(path.join(output, "README.md"), "utf8")).toContain(sourceCommit);
     expect(verifyReleaseTree(output)).toEqual(expect.objectContaining({ ok: true, sourceCommit }));
+    expect(execFileSync(process.execPath, [path.join(output, "scripts", "verify-release.mjs"), output], { encoding: "utf8" }))
+      .toContain(`source ${sourceCommit}`);
 
     fs.appendFileSync(path.join(output, "plugins", "towerforge", "README.md"), "tampered\n");
     expect(() => verifyReleaseTree(output)).toThrow(/mismatch/);
