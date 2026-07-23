@@ -122,7 +122,8 @@ function parseArgs(args) {
   return { outputDirectory: args[outIndex + 1] };
 }
 
-const invoked = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const invoked = process.argv[1]
+  && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
 if (invoked) {
   const result = exportPluginRepository(parseArgs(process.argv.slice(2)));
   process.stdout.write(`Exported TowerForge Codex plugin ${result.manifest.pluginVersion} (${result.manifest.files.length} files) from ${result.manifest.sourceCommit}.\n`);
