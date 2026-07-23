@@ -1,0 +1,92 @@
+name: Sync from TowerForge
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: towerforge-plugin-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mirror
+          fetch-depth: 0
+      - name: Check out canonical public source
+        run: git clone --depth 1 --branch main https://github.com/Lindforge-Studios/TowerForge.git source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - run: npm ci
+        working-directory: source
+      - run: npm run typecheck
+        working-directory: source
+      - run: npm run build:engine
+        working-directory: source
+      - run: npm run plugin:build
+        working-directory: source
+      - run: npm run plugin:validate
+        working-directory: source
+      - run: npm run plugin:smoke
+        working-directory: source
+      - name: Export deterministic mirror
+        working-directory: source
+        run: npm run plugin:export -- --out "$RUNNER_TEMP/towerforge-codex-plugin-export"
+      - name: Verify exported hashes
+        run: |
+          node "$RUNNER_TEMP/towerforge-codex-plugin-export/scripts/verify-release.mjs" "$RUNNER_TEMP/towerforge-codex-plugin-export"
+          node --check "$RUNNER_TEMP/towerforge-codex-plugin-export/plugins/towerforge/runtime/packages/mcp/server.mjs"
+      - name: Commit generated distribution
+        id: publish
+        shell: bash
+        run: |
+          rsync -a --delete --exclude .git/ \
+            "$RUNNER_TEMP/towerforge-codex-plugin-export/" \
+            "$GITHUB_WORKSPACE/mirror/"
+          cd "$GITHUB_WORKSPACE/mirror"
+          source_commit="$(node -p "require('./build-manifest.json').sourceCommit")"
+          plugin_version="$(node -p "require('./build-manifest.json').pluginVersion")"
+          git config user.name "TowerForge Release Bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Mirror is already current."
+          else
+            git commit -m "release: sync plugin from $source_commit"
+            git push origin main
+          fi
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "plugin_version=$plugin_version" >> "$GITHUB_OUTPUT"
+      - name: Mirror an exact canonical release tag
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.publish.outputs.source_commit }}
+          PLUGIN_VERSION: ${{ steps.publish.outputs.plugin_version }}
+        run: |
+          source_tag="v$PLUGIN_VERSION"
+          if ! git -C source fetch --depth 1 origin "refs/tags/$source_tag:refs/tags/$source_tag"; then
+            echo "Canonical tag $source_tag does not exist; leaving main untagged."
+            exit 0
+          fi
+          tagged_commit="$(git -C source rev-list -n 1 "$source_tag")"
+          if [[ "$tagged_commit" != "$SOURCE_COMMIT" ]]; then
+            echo "Canonical tag $source_tag points to $tagged_commit, not $SOURCE_COMMIT; leaving main untagged."
+            exit 0
+          fi
+          cd mirror
+          if git ls-remote --exit-code --tags origin "refs/tags/$source_tag" >/dev/null 2>&1; then
+            echo "Mirror tag $source_tag already exists."
+            exit 0
+          fi
+          git tag -a "$source_tag" -m "TowerForge Codex plugin $source_tag"
+          git push origin "$source_tag"

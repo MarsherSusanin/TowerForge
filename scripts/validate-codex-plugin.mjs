@@ -8,6 +8,7 @@ const plugin = path.join(root, "plugins", "towerforge");
 const manifestPath = path.join(plugin, ".codex-plugin", "plugin.json");
 const marketplacePath = path.join(root, ".agents", "plugins", "marketplace.json");
 const distributionPath = path.join(root, "distribution", "codex-plugin");
+const mirrorSyncPath = path.join(distributionPath, ".github", "workflows", "sync.yml");
 const errors = [];
 
 function readJson(file) {
@@ -30,8 +31,14 @@ for (const relative of [manifest.skills, manifest.mcpServers, manifest.interface
   if (relative && !fs.existsSync(path.resolve(plugin, relative))) errors.push(`referenced plugin path does not exist: ${relative}`);
 }
 if (manifest.repository !== "https://github.com/Lindforge-Studios/towerforge-codex-plugin") errors.push("plugin repository must point to the public distribution mirror");
-for (const relative of ["README.md", "SECURITY.md", "CONTRIBUTING.md", ".github/workflows/verify.yml", "scripts/verify-release.mjs"]) {
+for (const relative of ["README.md", "SECURITY.md", "CONTRIBUTING.md", ".github/workflows/verify.yml", ".github/workflows/sync.yml", "scripts/verify-release.mjs"]) {
   if (!fs.existsSync(path.join(distributionPath, relative))) errors.push(`distribution template is missing: ${relative}`);
+}
+if (fs.existsSync(mirrorSyncPath)) {
+  const mirrorSync = fs.readFileSync(mirrorSyncPath, "utf8");
+  if (/secrets\.|deploy.?key|personal.?access.?token|\bPAT\b/i.test(mirrorSync)) errors.push("mirror sync must not use stored credentials");
+  if (!/permissions:\s*\n\s*contents:\s*write/.test(mirrorSync)) errors.push("mirror sync must request only repository contents write access");
+  if (!mirrorSync.includes("https://github.com/Lindforge-Studios/TowerForge.git")) errors.push("mirror sync must read the canonical public source");
 }
 if (!fs.existsSync(path.join(plugin, "runtime", "packages", "mcp", "server.mjs"))) errors.push("bundled MCP runtime is missing; run npm run plugin:build");
 if (!fs.existsSync(path.join(plugin, "runtime", "packages", "engine", "dist", "index.js"))) errors.push("bundled engine runtime is missing");

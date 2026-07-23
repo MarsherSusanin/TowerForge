@@ -23,9 +23,11 @@ production dependency files. The runtime invokes locally available Node.js 22 an
 packages at use time.
 
 The exporter records the exact TowerForge source commit, plugin/engine versions, agent guide and
-MCP protocol versions, and SHA-256 for every distributed file. Tag and manual workflows update the
-mirror using a write deploy key scoped only to that repository. Runtime changes are made only in
-TowerForge; the mirror accepts generated release commits rather than independent implementation.
+MCP protocol versions, and SHA-256 for every distributed file. The mirror owns a scheduled and
+manual pull workflow that reads public `TowerForge/main`, reproduces the export, and writes through
+the mirror's short-lived `GITHUB_TOKEN`. No credential with access to both repositories is stored.
+Runtime changes are made only in TowerForge; the mirror accepts generated release commits rather
+than independent implementation.
 
 Installed mode sets `TOWERFORGE_MCP_WORKSPACE_BOUND=1`. After MCP initialization, the server asks
 the client for filesystem roots. It performs a bounded, symlink-free `.tdproj` search only below
@@ -60,3 +62,5 @@ workspace capability, then migrate behind the same workspace-session boundary.
 CI rebuilds, validates, smokes, and diff-checks the generated runtime. Source package changes are
 not complete until the plugin bundle is regenerated. The separate public repository provides a
 small stable update origin and issue tracker without duplicating ownership of MCP or engine code.
+Scheduled mirror synchronization can be delayed by GitHub Actions, so release operators run the
+mirror workflow manually when an immediate update is required.
