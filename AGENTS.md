@@ -66,7 +66,7 @@ Run the relevant checks before declaring work complete:
 - MUST link the release to its git tag and tagged source tree.
 - MUST NOT recommend `xattr -d`, disabling Gatekeeper, or lowering system security. Direct macOS users only to System Settings > Privacy & Security > Open Anyway.
 - MUST follow `docs/releasing.md` for asset names, verification, publication, rollback, and incident handling.
-- MUST publish the Codex plugin mirror only from a clean committed source through the scoped deploy-key workflow. The mirror manifest MUST identify the exact source commit and SHA-256 of every distributed file.
+- MUST publish the Codex plugin mirror only from a clean committed source through the mirror-owned sync workflow. It MUST use only the mirror-scoped `GITHUB_TOKEN`, never a cross-repository PAT or deploy key. The mirror manifest MUST identify the exact source commit and SHA-256 of every distributed file.
 
 ## Definition of Done
 

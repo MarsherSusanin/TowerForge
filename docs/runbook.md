@@ -79,11 +79,15 @@ npm run plugin:smoke
 ```
 
 Commit the regenerated `plugins/towerforge/runtime` and `plugins/towerforge/assets`. CI rebuilds
-them and fails on any diff, preventing a stale marketplace bundle. A tag or manual
-`Publish Codex Plugin Mirror` workflow exports the plugin, records the exact TowerForge source
-commit and per-file SHA-256 values, then updates the public mirror through its repository-scoped
-deploy key. The source repository stores only its private half as the Actions secret
-`TOWERFORGE_CODEX_PLUGIN_DEPLOY_KEY`; the public half has write access only to the mirror.
+them and fails on any diff, preventing a stale marketplace bundle. A source tag or manual
+`Build Codex Plugin Export` workflow produces a verified diagnostic artifact with the exact
+TowerForge source commit and per-file SHA-256 values.
+
+The public mirror owns `Sync from TowerForge`. It runs every six hours or on manual dispatch,
+rebuilds from public `TowerForge/main`, and commits only a verified export. Publication uses the
+short-lived `GITHUB_TOKEN` scoped to the mirror itself; neither repository stores a PAT, SSH key,
+or credential that can write to both repositories. Run the mirror workflow manually when a release
+must appear immediately rather than waiting for the schedule.
 
 ## Grid And Tileset Authoring
 

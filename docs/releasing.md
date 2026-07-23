@@ -31,19 +31,23 @@ The release assembler rejects mismatched versions across root npm, desktop npm, 
 source repository. Canonical plugin code remains under `plugins/towerforge`, `packages/mcp`, and
 their dependencies in TowerForge.
 
-The `Publish Codex Plugin Mirror` workflow runs manually or for `vX.Y.Z` tags. It rebuilds and
+The source `Build Codex Plugin Export` workflow runs manually or for `vX.Y.Z` tags. It rebuilds and
 smokes the bundled runtime, exports the distribution outside the source tree, verifies every
-SHA-256, and pushes one generated release commit with a deploy key scoped only to the mirror. A tag
-publication additionally requires the plugin version to equal the source tag and creates the same
-annotated tag in the mirror without overwriting existing tags.
+SHA-256, and uploads a 14-day diagnostic artifact. It has read-only repository permissions.
+
+The mirror's `Sync from TowerForge` workflow runs every six hours and on manual dispatch. It reads
+public `TowerForge/main`, repeats the same gates, and pushes one generated release commit through
+the mirror-scoped, short-lived `GITHUB_TOKEN`. No PAT, deploy key, or cross-repository secret is
+stored. If the exported source commit is exactly tagged `vX.Y.Z` and the plugin version matches,
+the workflow creates the same annotated tag in the mirror without overwriting existing tags.
 
 The mirror `build-manifest.json` MUST contain the exact source commit, TowerForge/plugin/MCP
 versions, agent-guide and protocol versions, runtime requirements, and every distributed file's
 size and SHA-256. The mirror's own CI rejects missing, unexpected, symlinked, or modified files.
 
-To rotate publication credentials, create a new write deploy key on the mirror, replace only the
-`TOWERFORGE_CODEX_PLUGIN_DEPLOY_KEY` Actions secret in TowerForge, test a manual publication, and
-then remove the old deploy key. Never use a broad organization PAT for routine mirror publication.
+For an immediate plugin update, manually run `Sync from TowerForge` in the mirror after source CI
+passes. Keep the workflow permission at `contents: write` and do not add repository or organization
+secrets. Never use a broad organization PAT for routine mirror publication.
 
 ## macOS Unsigned Build
 

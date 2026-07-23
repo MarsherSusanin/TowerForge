@@ -20,6 +20,9 @@ describe("Codex plugin repository exporter", () => {
     expect(result.manifest.sourceCommit).toBe(sourceCommit);
     expect(result.manifest.files.length).toBeGreaterThan(100);
     expect(fs.existsSync(path.join(output, ".agents", "plugins", "marketplace.json"))).toBe(true);
+    const syncWorkflow = fs.readFileSync(path.join(output, ".github", "workflows", "sync.yml"), "utf8");
+    expect(syncWorkflow).toContain("contents: write");
+    expect(syncWorkflow).not.toMatch(/secrets\.|deploy.?key|personal.?access.?token|\bPAT\b/i);
     expect(fs.existsSync(path.join(output, "plugins", "towerforge", "runtime", "packages", "mcp", "server.mjs"))).toBe(true);
     expect(fs.readFileSync(path.join(output, "README.md"), "utf8")).toContain(sourceCommit);
     expect(verifyReleaseTree(output)).toEqual(expect.objectContaining({ ok: true, sourceCommit }));

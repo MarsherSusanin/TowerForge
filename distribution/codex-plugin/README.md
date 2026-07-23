@@ -53,4 +53,5 @@ source commit and per-file SHA-256 values in `build-manifest.json`.
 
 - Canonical source: [Lindforge-Studios/TowerForge](https://github.com/Lindforge-Studios/TowerForge)
 - Source commit: [`{{SOURCE_COMMIT}}`](https://github.com/Lindforge-Studios/TowerForge/commit/{{SOURCE_COMMIT}})
-- Distribution workflow: `Publish Codex Plugin Mirror` in the canonical repository
+- Distribution workflow: `Sync from TowerForge` in this mirror. It uses only this repository's
+  short-lived `GITHUB_TOKEN`; no cross-repository credential is stored.
