@@ -8,6 +8,9 @@
 | Run Studio | `npm run studio` | Opens `http://localhost:5174`, default project `examples/starter.tdproj`. |
 | Run Studio for another project | `node packages/studio/server.mjs --project /path/to/game.tdproj` | Set `PORT=<n>` when `5174` is busy. |
 | Run MCP server | `npm run mcp -- --project examples/starter.tdproj` | JSON-RPC over stdio for MCP-capable agents. |
+| Build Codex plugin | `npm run plugin:build` | Regenerates the self-contained runtime and brand assets under `plugins/towerforge`. |
+| Validate Codex plugin | `npm run plugin:validate` | Checks manifest, marketplace, component paths, and bundled runtime. |
+| Smoke Codex plugin | `npm run plugin:smoke` | Exercises initialize, workspace roots, project discovery, path rejection, and bundled validation. |
 | Validate | `npm run validate` | Uses engine validation through the Node project loader. |
 | Validate JSON | `npm run validate -- --json` | Machine-readable validation for CI and agents. |
 | Simulate | `npm run sim tutorial_01 60` | Runs an engine-backed headless smoke simulation. |
@@ -37,6 +40,50 @@
 Russian is the default Studio language. Switch between Russian and English under **Settings > Appearance > Language**; the choice is stored only on the current device as `towerforge:language`. In desktop builds the same setting also rebuilds the native menu. Project content is never translated or modified by this preference.
 
 The template/grid/renderer conformance gate is part of `npm run test` and `npm run test:e2e`: Classic, Maze, Idle, and Roguelike are built on hex and square grids with Canvas and Phaser. The 16-output matrix must boot, render nonblank tile pixels, expose difficulty/meta UI, and place a tower through exact pointer picking and keyboard focus plus Enter.
+
+## Codex Marketplace Plugin
+
+The canonical source and development marketplace live in this repository. Public installation uses
+the generated mirror `Lindforge-Studios/towerforge-codex-plugin`. In Codex
+**Add plugin marketplace**, use:
+
+- Source: `Lindforge-Studios/towerforge-codex-plugin`
+- Git ref: `main` during development, or a release tag that contains the plugin
+- Sparse paths: leave empty
+
+Then install `towerforge@towerforge`. The equivalent CLI flow is:
+
+```bash
+codex plugin marketplace add Lindforge-Studios/towerforge-codex-plugin --ref main
+codex plugin add towerforge@towerforge
+```
+
+Start a new Codex task after installation or update. Open a workspace that contains the target
+`.tdproj`. One discovered project is selected automatically; for several, use
+`list_workspace_projects` and `select_workspace_project`.
+
+The plugin requires Node.js 22+ as `node`, but does not run `npm install`, download dependencies,
+or require TowerForge credentials. Its MCP process is local. Codex still sends user prompts and
+the tool results needed for the task to the selected OpenAI service; do not describe the overall
+agent session as offline. The server itself has no network integration, accepts projects only from
+filesystem roots shared by the current workspace, rejects absolute `projectDir` arguments, skips
+symlinks, bounds discovery depth/count, and redacts local paths in tool results.
+
+After changing MCP, CLI, engine dist, renderer, or bundled themes, run:
+
+```bash
+npm run build:engine
+npm run plugin:build
+npm run plugin:validate
+npm run plugin:smoke
+```
+
+Commit the regenerated `plugins/towerforge/runtime` and `plugins/towerforge/assets`. CI rebuilds
+them and fails on any diff, preventing a stale marketplace bundle. A tag or manual
+`Publish Codex Plugin Mirror` workflow exports the plugin, records the exact TowerForge source
+commit and per-file SHA-256 values, then updates the public mirror through its repository-scoped
+deploy key. The source repository stores only its private half as the Actions secret
+`TOWERFORGE_CODEX_PLUGIN_DEPLOY_KEY`; the public half has write access only to the mirror.
 
 ## Grid And Tileset Authoring
 

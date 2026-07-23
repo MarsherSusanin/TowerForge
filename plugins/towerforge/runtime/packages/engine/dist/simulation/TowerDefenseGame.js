@@ -1,0 +1,2561 @@
+import { evaluateTowerScriptExpression } from "../scripting/expression.js";
+import { TOWER_SCRIPT_LIMITS } from "../scripting/schema-descriptor.js";
+import { coordKey } from "./hex.js";
+import { TOWER_TARGET_MODES } from "./types.js";
+const SCRIPT_GAME_EVENT_NAMES = new Set([
+    "towerPlaced", "towerSold", "towerMoved", "towerUpgraded", "towerDestroyed", "towerTargetModeChanged",
+    "towerFired", "towerResourcesGranted", "enemyHit", "enemyKilled", "enemyLeaked", "enemySpawnedOnDeath",
+    "enemyPhaseSpawned", "waveStarted", "waveCleared", "resourcesGranted", "abilityUsed", "objectiveCompleted",
+    "enemyEnteredTile", "terrainChanged", "objectiveFailed", "starEarned", "victory", "defeat"
+]);
+export class TowerDefenseGame {
+    content;
+    mission;
+    map;
+    coreHp;
+    resources;
+    waveIndex = 0;
+    startedWaveCount = 0;
+    waveState = "ready";
+    prepRemaining = 0;
+    outcome = "playing";
+    enemies = [];
+    towers = [];
+    lastEvents = [];
+    currencies;
+    difficulty;
+    currencyIds;
+    metaUpgradeLevels;
+    maxCoreHp;
+    towerDamageMultiplier;
+    towerFireRateMetaMultiplier;
+    enemyCounter = 0;
+    towerCounter = 0;
+    clearedWaveCount = 0;
+    killCount = 0;
+    leakCount = 0;
+    killCountByEnemyType = {};
+    completedObjectiveIds = new Set();
+    earnedStarIds = new Set();
+    spawnQueue = [];
+    missionElapsed = 0;
+    nextWaveStartAt = null;
+    abilityCooldowns = {};
+    temporaryWaterTiles = [];
+    runtimeTerrainOverrides = new Map();
+    sunlightPathKeys;
+    sunlightTilesSnapshot;
+    directFlightLine;
+    staticTilesSnapshot;
+    staticPathCenterlineSnapshot;
+    staticPathRoutesSnapshot;
+    staticSpawnCoordSnapshot;
+    staticCoreCoordSnapshot;
+    scriptValues = {};
+    scriptDiagnostics = [];
+    scriptHandlerLastRun = {};
+    scriptEventCursor = 0;
+    scriptActionsRemaining = 0;
+    scriptTerrainChangesRemaining = 0;
+    scriptSignalDepth = 0;
+    constructor(options) {
+        this.content = options.content;
+        // Currencies are content-defined; "coins" is always guaranteed as the primary (first) currency.
+        // Dedupe and reorder defensively so the engine is correct even on content built without the loader.
+        const declared = this.content.currencies?.length ? this.content.currencies : [{ id: "coins", label: "Coins" }];
+        const seen = new Set();
+        const ordered = [];
+        for (const currency of declared) {
+            if (currency && currency.id && !seen.has(currency.id)) {
+                seen.add(currency.id);
+                ordered.push(currency);
+            }
+        }
+        if (!seen.has("coins"))
+            ordered.unshift({ id: "coins", label: "Coins" });
+        const coinsIndex = ordered.findIndex((c) => c.id === "coins");
+        if (coinsIndex > 0)
+            ordered.unshift(ordered.splice(coinsIndex, 1)[0]);
+        this.currencies = ordered;
+        this.currencyIds = this.currencies.map((c) => c.id);
+        const missionId = options.missionId;
+        const mission = this.content.missions[missionId];
+        if (!mission) {
+            throw new Error(`Mission "${missionId}" not found in content registry.`);
+        }
+        this.mission = mission;
+        this.map = this.mission.mapFactory();
+        this.difficulty = this.content.difficulties.find((item) => item.id === options.difficultyId)
+            ?? this.content.difficulties.find((item) => item.id === this.content.defaultDifficultyId)
+            ?? { id: "normal", label: "Normal" };
+        this.metaUpgradeLevels = this.normalizeMetaUpgradeLevels(options.metaUpgradeLevels ?? {});
+        this.towerDamageMultiplier = Math.max(0, 1 + this.metaEffectTotal("towerDamage", "multiplierPerLevel"));
+        this.towerFireRateMetaMultiplier = Math.max(0.05, 1 + this.metaEffectTotal("towerFireRate", "multiplierPerLevel"));
+        this.directFlightLine = this.map.line(this.map.spawnCoord, this.map.coreCoord);
+        const sunlight = this.buildSunlightTilesSnapshot();
+        this.sunlightPathKeys = new Set(sunlight.map((tile) => this.routePathKey(tile.routeId, tile.pathOrder)));
+        this.sunlightTilesSnapshot = sunlight;
+        this.staticTilesSnapshot = [...this.map.tiles.values()].map(({ q, r, terrain }) => ({ q, r, terrain }));
+        this.staticPathCenterlineSnapshot = this.map.pathCenterline.map((coord) => ({ ...coord }));
+        this.staticPathRoutesSnapshot = this.map.pathRoutes.map((route) => ({
+            id: route.id,
+            pathCenterline: route.pathCenterline.map((coord) => ({ ...coord }))
+        }));
+        this.staticSpawnCoordSnapshot = { ...this.map.spawnCoord };
+        this.staticCoreCoordSnapshot = { ...this.map.coreCoord };
+        this.maxCoreHp = Math.max(1, this.mission.startingCoreHp * (this.difficulty.coreHpMultiplier ?? 1) + this.metaEffectTotal("coreHp", "amountPerLevel"));
+        this.coreHp = this.maxCoreHp;
+        this.resources = this.initialResources();
+        this.initializeScripts();
+        this.beginScriptTransaction();
+        this.runScriptEvent("gameStarted", { type: "gameStarted" });
+        this.processScriptEvents();
+    }
+    get coins() {
+        return this.resources.coins ?? 0;
+    }
+    set coins(value) {
+        this.resources.coins = value;
+    }
+    get towerTypes() {
+        return this.content.towers;
+    }
+    get enemyTypes() {
+        return this.content.enemies;
+    }
+    get waves() {
+        return this.mission.waves;
+    }
+    reset() {
+        this.coreHp = this.maxCoreHp;
+        this.resources = this.initialResources();
+        this.waveIndex = 0;
+        this.startedWaveCount = 0;
+        this.waveState = "ready";
+        this.prepRemaining = 0;
+        this.outcome = "playing";
+        for (const tower of this.towers) {
+            this.map.clearOccupied(tower.id);
+        }
+        this.enemies = [];
+        this.towers = [];
+        this.lastEvents = [];
+        this.enemyCounter = 0;
+        this.towerCounter = 0;
+        this.clearedWaveCount = 0;
+        this.killCount = 0;
+        this.leakCount = 0;
+        this.killCountByEnemyType = {};
+        this.completedObjectiveIds.clear();
+        this.earnedStarIds.clear();
+        this.spawnQueue = [];
+        this.missionElapsed = 0;
+        this.nextWaveStartAt = null;
+        this.abilityCooldowns = {};
+        this.temporaryWaterTiles = [];
+        this.runtimeTerrainOverrides.clear();
+        this.map.restoreAllTerrain();
+        this.initializeScripts();
+        this.beginScriptTransaction();
+        this.runScriptEvent("gameStarted", { type: "gameStarted" });
+        this.processScriptEvents();
+        for (const tile of this.map.tiles.values()) {
+            delete tile.occupiedBy;
+        }
+    }
+    startNextWave() {
+        if (this.outcome !== "playing") {
+            return this.fail("Mission already ended.", "reason.missionEnded");
+        }
+        if (this.startedWaveCount >= this.mission.waves.length) {
+            return this.fail("No waves left.", "reason.noWaves");
+        }
+        const earlyStartUnits = this.startedWaveCount > 0 ? this.getNextWaveRemaining() : 0;
+        const result = this.startWave(this.startedWaveCount, this.missionElapsed, earlyStartUnits);
+        if (result.ok)
+            this.finishScriptedAction();
+        return result;
+    }
+    canPlaceTower(typeId, coord) {
+        const type = this.towerTypes[typeId];
+        if (!type) {
+            return this.fail("Unknown tower type.", "reason.unknownTower");
+        }
+        if (this.outcome !== "playing") {
+            return this.fail("Mission already ended.", "reason.missionEnded");
+        }
+        if (!this.hasResources(type.cost)) {
+            return this.fail(`Need ${this.formatCost(type.cost)}.`, "reason.needCost", this.costReasonParams(type.cost));
+        }
+        return this.canOccupyTowerFootprint(typeId, coord);
+    }
+    canPlaceTowerAnywhere(typeId) {
+        const type = this.towerTypes[typeId];
+        if (!type) {
+            return this.fail("Unknown tower type.", "reason.unknownTower");
+        }
+        if (this.outcome !== "playing") {
+            return this.fail("Mission already ended.", "reason.missionEnded");
+        }
+        if (!this.hasResources(type.cost)) {
+            return this.fail(`Need ${this.formatCost(type.cost)}.`, "reason.needCost", this.costReasonParams(type.cost));
+        }
+        let firstReason = "No valid build space.";
+        let firstReasonKey = "reason.noBuildSpace";
+        let firstReasonParams;
+        for (const tile of this.map.tiles.values()) {
+            const result = this.canPlaceTower(typeId, tile);
+            if (result.ok) {
+                return { ok: true };
+            }
+            firstReason = result.reason ?? firstReason;
+            firstReasonKey = result.reasonKey ?? firstReasonKey;
+            firstReasonParams = result.reasonParams ?? firstReasonParams;
+        }
+        return { ok: false, reason: firstReason, reasonKey: firstReasonKey, reasonParams: firstReasonParams };
+    }
+    placeTower(typeId, coord) {
+        const check = this.canPlaceTower(typeId, coord);
+        if (!check.ok) {
+            return check;
+        }
+        const type = this.towerTypes[typeId];
+        if (!type) {
+            return this.fail("Unknown tower type.", "reason.unknownTower");
+        }
+        const towerId = `tower_${++this.towerCounter}`;
+        const attack = type.attack;
+        const tower = {
+            id: towerId,
+            typeId,
+            coord: this.cleanCoord(coord),
+            footprint: this.map.tilesWithin(coord, type.footprintRadius).map(({ q, r }) => ({ q, r })),
+            level: 1,
+            targetMode: attack.kind === "sniper"
+                ? (attack.targetPriority ?? "first")
+                : (attack.kind === "pipeline"
+                    ? (attack.targeting?.mode ?? "first")
+                    : (attack.kind === "single" || attack.kind === "antiair" || attack.kind === "splash" ? "first" : undefined)),
+            stacks: attack.kind === "single" ? attack.startingStacks : 0,
+            cooldown: 0,
+            investedResources: this.normalizeCost(type.cost),
+            hp: typeof type.maxHp === "number" && type.maxHp > 0 ? type.maxHp : undefined
+        };
+        this.spendResources(type.cost);
+        this.towers.push(tower);
+        this.map.setOccupied(tower.footprint, towerId);
+        const placedTile = this.map.getTile(coord);
+        this.lastEvents.push({
+            type: "towerPlaced",
+            towerId,
+            towerTypeId: typeId,
+            coord: this.cleanCoord(coord),
+            terrain: placedTile.terrain,
+            terrainMetadata: this.terrainMetadata(placedTile.terrain)
+        });
+        this.finishScriptedAction();
+        return { ok: true };
+    }
+    canMoveTower(towerId, coord) {
+        const tower = this.towers.find((item) => item.id === towerId);
+        if (!tower) {
+            return this.fail("No tower selected.", "reason.noTowerSelected");
+        }
+        if (this.outcome !== "playing") {
+            return this.fail("Mission already ended.", "reason.missionEnded");
+        }
+        const moveTowerCost = this.content.constants.moveTowerCost;
+        if (!this.hasResources(moveTowerCost)) {
+            return this.fail(`Need ${this.formatCost(moveTowerCost)}.`, "reason.needCost", this.costReasonParams(moveTowerCost));
+        }
+        const footprintCheck = this.canOccupyTowerFootprint(tower.typeId, coord, tower.id);
+        if (!footprintCheck.ok) {
+            return footprintCheck;
+        }
+        if (this.towerTypes[tower.typeId]?.attack.kind === "support" && !this.dependentsKeepSupportAfterMove(tower.id, coord)) {
+            return this.fail("Dependent towers would lose this support aura.", "reason.dependentsLoseAura");
+        }
+        return { ok: true };
+    }
+    moveTower(towerId, coord) {
+        const tower = this.towers.find((item) => item.id === towerId);
+        if (!tower) {
+            return this.fail("No tower selected.", "reason.noTowerSelected");
+        }
+        const check = this.canMoveTower(towerId, coord);
+        if (!check.ok) {
+            return check;
+        }
+        const from = this.cleanCoord(tower.coord);
+        const type = this.towerTypes[tower.typeId];
+        if (!type) {
+            return this.fail("Unknown tower type.", "reason.unknownTower");
+        }
+        const footprint = this.map.tilesWithin(coord, type.footprintRadius).map(({ q, r }) => ({ q, r }));
+        const moveTowerCost = this.content.constants.moveTowerCost;
+        this.spendResources(moveTowerCost);
+        this.map.clearOccupied(tower.id);
+        tower.coord = this.cleanCoord(coord);
+        tower.footprint = footprint;
+        this.map.setOccupied(footprint, tower.id);
+        this.lastEvents.push({ type: "towerMoved", towerId, from, to: this.cleanCoord(coord), cost: this.cloneResources(moveTowerCost) });
+        this.finishScriptedAction();
+        return { ok: true };
+    }
+    canUpgradeTower(towerId) {
+        const tower = this.towers.find((item) => item.id === towerId);
+        if (!tower) {
+            return this.fail("No tower selected.", "reason.noTowerSelected");
+        }
+        const cost = this.getTowerUpgradeCost(tower);
+        if (!cost) {
+            return this.fail("Cluster is already full.", "reason.clusterFull");
+        }
+        if (!this.hasResources(cost)) {
+            return this.fail(`Need ${this.formatCost(cost)}.`, "reason.needCost", this.costReasonParams(cost));
+        }
+        if (this.outcome !== "playing") {
+            return this.fail("Mission already ended.", "reason.missionEnded");
+        }
+        return { ok: true };
+    }
+    getTowerUpgradeCost(towerOrId) {
+        const tower = typeof towerOrId === "string" ? this.towers.find((item) => item.id === towerOrId) : towerOrId;
+        if (!tower) {
+            return null;
+        }
+        const type = this.towerTypes[tower.typeId];
+        if (!type) {
+            return null;
+        }
+        const attack = type.attack;
+        if (attack.kind === "single") {
+            return tower.stacks >= attack.maxStacks ? null : { coins: attack.upgradeCost };
+        }
+        const costs = "upgradeCosts" in attack ? attack.upgradeCosts : undefined;
+        if (!costs) {
+            return null;
+        }
+        return costs[tower.level - 1] ?? null;
+    }
+    upgradeTower(towerId) {
+        const tower = this.towers.find((item) => item.id === towerId);
+        if (!tower) {
+            return this.fail("No tower selected.", "reason.noTowerSelected");
+        }
+        const check = this.canUpgradeTower(towerId);
+        if (!check.ok) {
+            return check;
+        }
+        const cost = this.getTowerUpgradeCost(tower);
+        if (!cost) {
+            return this.fail("Cluster is already full.", "reason.clusterFull");
+        }
+        const type = this.towerTypes[tower.typeId];
+        if (!type) {
+            return this.fail("Unknown tower type.", "reason.unknownTower");
+        }
+        this.spendResources(cost);
+        this.addToBag(tower.investedResources, cost);
+        if (type.attack.kind === "single") {
+            tower.stacks += 1;
+        }
+        else {
+            tower.level += 1;
+        }
+        this.lastEvents.push({ type: "towerUpgraded", towerId, level: tower.level, stacks: tower.stacks });
+        this.finishScriptedAction();
+        return { ok: true };
+    }
+    getTowerSellRefund(towerOrId) {
+        const tower = typeof towerOrId === "string" ? this.towers.find((item) => item.id === towerOrId) : towerOrId;
+        if (!tower)
+            return null;
+        const ratio = this.mission.economy?.sellRefundRatio ?? 0.7;
+        const refund = this.cloneResources({});
+        for (const currencyId of this.currencyIds) {
+            const invested = Number(tower.investedResources?.[currencyId]) || 0;
+            refund[currencyId] = Math.floor(invested * ratio * 100 + 1e-9) / 100;
+        }
+        return refund;
+    }
+    canSellTower(towerId) {
+        const tower = this.towers.find((item) => item.id === towerId);
+        if (!tower)
+            return this.fail("No tower selected.", "reason.noTowerSelected");
+        if (this.outcome !== "playing")
+            return this.fail("Mission already ended.", "reason.missionEnded");
+        if (!this.dependentsKeepSupportAfterRemoval(towerId)) {
+            return this.fail("Dependent towers still need this support aura.", "reason.dependentsLoseAura");
+        }
+        return { ok: true };
+    }
+    sellTower(towerId) {
+        const tower = this.towers.find((item) => item.id === towerId);
+        if (!tower)
+            return this.fail("No tower selected.", "reason.noTowerSelected");
+        const check = this.canSellTower(towerId);
+        if (!check.ok)
+            return check;
+        const refund = this.getTowerSellRefund(tower) ?? this.cloneResources({});
+        this.addResources(refund);
+        this.destroyTower(towerId);
+        this.lastEvents.push({ type: "towerSold", towerId, towerTypeId: tower.typeId, refund });
+        this.finishScriptedAction();
+        return { ok: true };
+    }
+    setTowerTargetMode(towerId, mode) {
+        const tower = this.towers.find((item) => item.id === towerId);
+        if (!tower) {
+            return this.fail("No tower selected.", "reason.noTowerSelected");
+        }
+        if (!this.towerSupportsTargetMode(tower)) {
+            return this.fail("This tower has no selectable target mode.", "reason.targetModeUnsupported");
+        }
+        if (!TOWER_TARGET_MODES.includes(mode)) {
+            return this.fail("Unknown target mode.", "reason.targetModeUnknown", { mode });
+        }
+        tower.targetMode = mode;
+        this.lastEvents.push({ type: "towerTargetModeChanged", towerId, mode });
+        this.finishScriptedAction();
+        return { ok: true };
+    }
+    usePathWaterAbility(center) {
+        const ability = this.mission.abilities?.find((item) => item.id === "path_water");
+        if (!ability) {
+            return this.fail("Water spill is not available in this mission.", "reason.abilityUnavailable");
+        }
+        if (this.outcome !== "playing") {
+            return this.fail("Mission already ended.", "reason.missionEnded");
+        }
+        const remaining = this.abilityCooldowns.path_water ?? 0;
+        if (remaining > 0) {
+            return this.fail("Water spill is still recharging.", "reason.abilityCooldown", { seconds: Math.ceil(remaining) });
+        }
+        const targetTile = this.map.getTile(center);
+        if (!targetTile || this.map.getBaseTerrain(center) !== "path") {
+            return this.fail("Water can only be poured onto the path.", "reason.abilityPathOnly");
+        }
+        const effectCoords = this.map
+            .allPathCoords()
+            .filter((coord) => this.map.distance(coord, center) <= ability.radius)
+            .filter((coord) => this.map.getBaseTerrain(coord) === "path");
+        if (effectCoords.length === 0) {
+            return this.fail("Water can only be poured onto the path.", "reason.abilityPathOnly");
+        }
+        for (const coord of effectCoords) {
+            const result = this.applyTerrainOverride(coord, "water", ability.duration, "ability");
+            if (!result.ok)
+                return result;
+        }
+        this.syncTemporaryWaterTiles();
+        this.abilityCooldowns.path_water = ability.cooldown;
+        this.lastEvents.push({
+            type: "waterAbilityUsed",
+            abilityId: ability.id,
+            center: { ...center },
+            coords: effectCoords.map((coord) => ({ ...coord })),
+            duration: ability.duration
+        });
+        this.finishScriptedAction();
+        return { ok: true };
+    }
+    /**
+     * The `strike`/`freeze` engine presets, expressed as the same composable effects a custom
+     * ability declares via `MissionAbilityDefinition.effects`. Returns undefined for any other id
+     * (including `path_water`, which stays on its own bespoke tile-targeting handler below — its
+     * validation/failure modes are tile-specific, not enemy-targeted).
+     */
+    builtinAbilityEffects(abilityId, ability) {
+        if (abilityId === "strike") {
+            return [{ kind: "damage", amount: Math.max(0, ability.damage ?? 0) }];
+        }
+        if (abilityId === "freeze") {
+            return [{ kind: "status", status: { stun: ability.stunDuration ?? ability.duration } }];
+        }
+        return undefined;
+    }
+    applyAbilityEffect(enemy, effect) {
+        if (effect.kind === "damage") {
+            enemy.hp -= Math.max(0, effect.amount); // reward/removal handled by the next removeDeadEnemies() pass
+        }
+        else if (effect.kind === "status") {
+            this.applyStatusEffect(enemy, effect.status);
+        }
+    }
+    /**
+     * Trigger a mission ability at a target coord. `path_water` routes to its own handler (a
+     * tile effect, not enemy-targeted). Every other ability — `strike`/`freeze` presets or a
+     * custom author-declared one — resolves to an `effects[]` composition applied to every enemy
+     * within `radius` of `center`, via the shared applyAbilityEffect primitive. A custom ability
+     * needs no engine code: declare `effects` on it and it just works.
+     */
+    useAbility(abilityId, center) {
+        if (abilityId === "path_water") {
+            return this.usePathWaterAbility(center);
+        }
+        const ability = this.mission.abilities?.find((item) => item.id === abilityId);
+        if (!ability) {
+            return this.fail("This ability is not available in this mission.", "reason.abilityUnavailable");
+        }
+        if (this.outcome !== "playing") {
+            return this.fail("Mission already ended.", "reason.missionEnded");
+        }
+        const remaining = this.abilityCooldowns[abilityId] ?? 0;
+        if (remaining > 0) {
+            return this.fail("Ability is still recharging.", "reason.abilityCooldown", { seconds: Math.ceil(remaining) });
+        }
+        const effects = ability.effects ?? this.builtinAbilityEffects(abilityId, ability);
+        if (!effects || effects.length === 0) {
+            return this.fail("Unknown ability.", "reason.abilityUnavailable");
+        }
+        const targets = this.enemies.filter((enemy) => enemy.hp > 0 && this.map.distance(this.enemyCoord(enemy), center) <= ability.radius);
+        const enemyIds = [];
+        for (const enemy of targets) {
+            for (const effect of effects) {
+                this.applyAbilityEffect(enemy, effect);
+            }
+            enemyIds.push(enemy.id);
+        }
+        this.abilityCooldowns[abilityId] = ability.cooldown;
+        this.lastEvents.push({ type: "abilityUsed", abilityId, center: { ...center }, enemyIds, effects });
+        this.finishScriptedAction();
+        return { ok: true };
+    }
+    /**
+     * Dispatch an author-defined event into TowerScript. This is the only custom event bridge:
+     * callers provide JSON data, while scripts still receive no executable host capability.
+     */
+    emitScriptSignal(signal, payload = null) {
+        if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(signal)) {
+            return this.fail("Script signal must be a safe identifier.", "reason.invalidScriptSignal");
+        }
+        let serialized;
+        try {
+            serialized = JSON.stringify(payload);
+        }
+        catch {
+            return this.fail("Script signal payload must be JSON-compatible.", "reason.invalidScriptPayload");
+        }
+        if (serialized === undefined || serialized.length > TOWER_SCRIPT_LIMITS.externalSignalPayloadBytes) {
+            return this.fail("Script signal payload exceeds 64 KiB.", "reason.invalidScriptPayload");
+        }
+        const safePayload = JSON.parse(serialized);
+        this.beginScriptTransaction();
+        this.lastEvents.push({ type: "scriptSignal", scriptId: "external", signal, payload: safePayload });
+        this.runScriptEvent("signal", { type: "signal", signal, payload: safePayload, sourceScriptId: "external" });
+        this.processScriptEvents();
+        return { ok: true };
+    }
+    getTowerIdAt(coord) {
+        return this.map.occupiedTowerAt(coord);
+    }
+    tick(deltaUnits) {
+        this.lastEvents = [];
+        this.scriptEventCursor = 0;
+        this.beginScriptTransaction();
+        if (this.outcome !== "playing") {
+            return;
+        }
+        const delta = Math.max(0, Math.min(deltaUnits, 0.2));
+        this.updateAbilities(delta);
+        this.updateEnemyStatuses(delta);
+        if (this.startedWaveCount > 0) {
+            this.missionElapsed += delta;
+            this.applyPassiveIncome(delta);
+            this.startScheduledWaves();
+            this.spawnDueEnemies();
+            this.syncPrepRemaining();
+        }
+        this.moveEnemies(delta);
+        this.applySunlightRegeneration(delta);
+        this.applyHealAuras(delta);
+        this.applyDotDamage(delta);
+        this.updateTowerDisruptions(delta);
+        this.updateEnemyTowerAttacks(delta);
+        this.updateTowers(delta);
+        this.triggerEnemyPhaseSpawns();
+        this.removeDeadEnemies();
+        this.processScriptEvents();
+        if (this.outcome === "playing")
+            this.runScriptEvent("tick", { type: "tick", delta });
+        this.removeDeadEnemies();
+        this.processScriptEvents();
+        this.resolveWaveState();
+        this.processScriptEvents();
+    }
+    getSnapshot() {
+        return this.buildSnapshot(true);
+    }
+    getRenderSnapshot() {
+        return this.buildSnapshot(false);
+    }
+    buildSnapshot(copyStaticState) {
+        return {
+            mapId: this.map.id,
+            grid: { ...this.map.grid },
+            missionId: this.mission.id,
+            missionLabel: this.mission.label,
+            difficultyId: this.difficulty.id,
+            difficultyLabel: this.difficulty.label,
+            coreHp: this.coreHp,
+            maxCoreHp: this.maxCoreHp,
+            coins: this.coins,
+            resources: this.cloneResources(this.resources),
+            waveIndex: this.waveIndex,
+            totalWaves: this.mission.waves.length,
+            startedWaveCount: this.startedWaveCount,
+            clearedWaveCount: this.clearedWaveCount,
+            killCount: this.killCount,
+            leakCount: this.leakCount,
+            killCountByEnemyType: { ...this.killCountByEnemyType },
+            objectiveProgress: this.buildObjectiveProgress(),
+            stars: this.buildStarSnapshot(),
+            missionElapsed: this.missionElapsed,
+            waveState: this.waveState,
+            prepRemaining: this.prepRemaining,
+            nextWaveRemaining: this.getNextWaveRemaining(),
+            nextWaveDelayUnits: this.mission.prepTimeUnits,
+            enemies: this.enemies.map((enemy) => ({
+                ...enemy,
+                routeId: enemy.routeId,
+                phaseSpawnsTriggered: enemy.phaseSpawnsTriggered ? [...enemy.phaseSpawnsTriggered] : undefined,
+                statuses: enemy.statuses
+                    ? {
+                        ...(enemy.statuses.slow ? { slow: { ...enemy.statuses.slow } } : {}),
+                        ...(enemy.statuses.stun ? { stun: { ...enemy.statuses.stun } } : {}),
+                        ...(enemy.statuses.poison ? { poison: { ...enemy.statuses.poison } } : {})
+                    }
+                    : {}
+            })),
+            towers: this.towers.map((tower) => ({
+                ...tower,
+                coord: { ...tower.coord },
+                footprint: tower.footprint.map((coord) => ({ ...coord }))
+            })),
+            tiles: copyStaticState || this.runtimeTerrainOverrides.size > 0
+                ? [...this.map.tiles.values()].map((tile) => ({ ...tile }))
+                : this.staticTilesSnapshot,
+            abilities: this.buildAbilitySnapshot(),
+            temporaryWaterTiles: this.temporaryWaterTiles.map((tile) => ({ ...tile })),
+            terrainOverrides: [...this.runtimeTerrainOverrides.values()].map((entry) => ({ ...entry })),
+            sunlightTiles: copyStaticState
+                ? this.sunlightTilesSnapshot.map((tile) => ({ ...tile }))
+                : this.sunlightTilesSnapshot,
+            pathCenterline: copyStaticState
+                ? this.map.pathCenterline.map((coord) => ({ ...coord }))
+                : this.staticPathCenterlineSnapshot,
+            pathRoutes: copyStaticState
+                ? this.map.pathRoutes.map((route) => ({
+                    id: route.id,
+                    pathCenterline: route.pathCenterline.map((coord) => ({ ...coord }))
+                }))
+                : this.staticPathRoutesSnapshot,
+            spawnCoord: copyStaticState ? { ...this.map.spawnCoord } : this.staticSpawnCoordSnapshot,
+            coreCoord: copyStaticState ? { ...this.map.coreCoord } : this.staticCoreCoordSnapshot,
+            outcome: this.outcome,
+            scriptState: {
+                values: this.cloneScriptValues(),
+                diagnostics: this.scriptDiagnostics.map((diagnostic) => ({ ...diagnostic }))
+            },
+            lastEvents: [...this.lastEvents]
+        };
+    }
+    initializeScripts() {
+        this.scriptValues = {};
+        this.scriptDiagnostics = [];
+        this.scriptHandlerLastRun = {};
+        this.scriptEventCursor = 0;
+        this.scriptActionsRemaining = 0;
+        this.scriptSignalDepth = 0;
+        for (const scriptId of Object.keys(this.content.scripts ?? {}).sort())
+            this.scriptValues[scriptId] = {};
+    }
+    beginScriptTransaction() {
+        this.scriptActionsRemaining = TOWER_SCRIPT_LIMITS.actionsPerTransaction;
+        this.scriptTerrainChangesRemaining = TOWER_SCRIPT_LIMITS.terrainChangesPerTransaction;
+        this.scriptSignalDepth = 0;
+    }
+    finishScriptedAction() {
+        this.beginScriptTransaction();
+        this.processScriptEvents();
+    }
+    processScriptEvents() {
+        let processed = 0;
+        while (this.scriptEventCursor < this.lastEvents.length && processed < TOWER_SCRIPT_LIMITS.eventsPerTransaction) {
+            const event = this.lastEvents[this.scriptEventCursor++];
+            processed += 1;
+            if (!event || event.type === "scriptDiagnostic" || event.type === "scriptSignal")
+                continue;
+            if (SCRIPT_GAME_EVENT_NAMES.has(event.type)) {
+                this.runScriptEvent(event.type, event);
+            }
+        }
+        if (this.scriptEventCursor < this.lastEvents.length) {
+            this.recordScriptDiagnostic({
+                scriptId: "runtime",
+                event: "tick",
+                code: "budget_exceeded",
+                message: `TowerScript event processing exceeded ${TOWER_SCRIPT_LIMITS.eventsPerTransaction} events in one transaction.`
+            });
+            this.scriptEventCursor = this.lastEvents.length;
+        }
+    }
+    runScriptEvent(eventName, event) {
+        for (const script of Object.values(this.content.scripts ?? {}).sort((a, b) => a.id.localeCompare(b.id))) {
+            if (!script || script.enabled === false)
+                continue;
+            const handlers = script.handlers?.[eventName] ?? [];
+            if (!Array.isArray(handlers) || handlers.length === 0)
+                continue;
+            const seenContexts = new Set();
+            for (const binding of script.bindings ?? []) {
+                for (const self of this.scriptContexts(binding, eventName, event)) {
+                    const contextIdentity = `${self.scope}:${self.id}`;
+                    if (seenContexts.has(contextIdentity))
+                        continue;
+                    seenContexts.add(contextIdentity);
+                    const stateKey = contextIdentity;
+                    const context = {
+                        script,
+                        binding,
+                        self,
+                        state: this.scriptStateFor(script, stateKey),
+                        stateKey,
+                        event,
+                        eventName
+                    };
+                    handlers.forEach((handler, index) => this.runScriptHandler(context, handler, index));
+                }
+            }
+        }
+    }
+    runScriptHandler(context, handler, handlerIndex) {
+        const handlerId = handler.id ?? String(handlerIndex);
+        try {
+            if (context.eventName === "tick" && typeof handler.every === "number") {
+                const timerKey = `${context.script.id}:${context.stateKey}:${handlerId}`;
+                const lastRun = this.scriptHandlerLastRun[timerKey];
+                if (lastRun !== undefined && this.missionElapsed - lastRun + 0.000001 < handler.every)
+                    return;
+                this.scriptHandlerLastRun[timerKey] = this.missionElapsed;
+            }
+            const expressionBudget = { remaining: TOWER_SCRIPT_LIMITS.expressionOperationsPerHandler };
+            const root = this.scriptExpressionContext(context);
+            if (handler.when !== undefined && !evaluateTowerScriptExpression(handler.when, root, expressionBudget))
+                return;
+            for (const action of handler.actions ?? []) {
+                this.scriptActionsRemaining -= 1;
+                if (this.scriptActionsRemaining < 0)
+                    throw new Error("TowerScript action budget exceeded.");
+                this.applyScriptAction(action, context, root, expressionBudget);
+            }
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.recordScriptDiagnostic({
+                scriptId: context.script.id,
+                handlerId,
+                event: context.eventName,
+                code: /budget exceeded/i.test(message) ? "budget_exceeded" : /expression|\$get|\$op|context path/i.test(message) ? "invalid_expression" : "runtime_error",
+                message
+            });
+        }
+    }
+    scriptContexts(binding, eventName, event) {
+        const accepts = (id) => !binding.ids || binding.ids.includes(id);
+        if (binding.scope === "global")
+            return [{ scope: "global", id: "global", value: { id: "global" } }];
+        if (binding.scope === "mission") {
+            return accepts(this.mission.id)
+                ? [{
+                        scope: "mission",
+                        id: this.mission.id,
+                        value: {
+                            id: this.mission.id,
+                            label: this.mission.label,
+                            mapId: this.mission.mapId,
+                            waveSetId: this.mission.waveSetId,
+                            startingResources: { ...this.mission.startingResources },
+                            waveCount: this.mission.waves.length
+                        }
+                    }]
+                : [];
+        }
+        if (binding.scope === "map") {
+            return accepts(this.mission.mapId)
+                ? [{
+                        scope: "map",
+                        id: this.mission.mapId,
+                        value: {
+                            id: this.mission.mapId,
+                            width: this.map.width,
+                            height: this.map.height,
+                            grid: { ...this.map.grid },
+                            spawnCoord: { ...this.map.spawnCoord },
+                            coreCoord: { ...this.map.coreCoord },
+                            pathLength: this.map.pathCenterline.length,
+                            routeIds: this.map.pathRoutes.map((route) => route.id)
+                        }
+                    }]
+                : [];
+        }
+        if (binding.scope === "wave") {
+            return accepts(this.mission.waveSetId)
+                ? [{
+                        scope: "wave",
+                        id: this.mission.waveSetId,
+                        value: {
+                            id: this.mission.waveSetId,
+                            currentIndex: this.waveIndex,
+                            startedCount: this.startedWaveCount,
+                            clearedCount: this.clearedWaveCount,
+                            state: this.waveState,
+                            totalCount: this.mission.waves.length
+                        }
+                    }]
+                : [];
+        }
+        if (binding.scope === "ability") {
+            const abilityId = typeof event.abilityId === "string" ? event.abilityId : null;
+            if (!abilityId || !accepts(abilityId))
+                return [];
+            return [{ scope: "ability", id: abilityId, typeId: abilityId, value: { id: abilityId, ...(this.content.abilities[abilityId] ?? {}) } }];
+        }
+        if (binding.scope === "terrain") {
+            const coordValue = event.coord ?? event.center ?? event.to;
+            if (!coordValue || typeof coordValue !== "object")
+                return [];
+            const rawCoord = coordValue;
+            if (!Number.isInteger(rawCoord.q) || !Number.isInteger(rawCoord.r))
+                return [];
+            const coord = { q: Number(rawCoord.q), r: Number(rawCoord.r) };
+            const terrainId = typeof event.toTerrain === "string"
+                ? event.toTerrain
+                : typeof event.terrain === "string" ? event.terrain : this.map.getTile(coord)?.terrain;
+            if (!terrainId || !accepts(terrainId))
+                return [];
+            return [{
+                    scope: "terrain",
+                    id: `${coord.q},${coord.r}`,
+                    typeId: terrainId,
+                    value: { ...this.terrainMetadata(terrainId), coord }
+                }];
+        }
+        if (binding.scope === "tower") {
+            const candidates = [];
+            if (eventName === "tick") {
+                for (const tower of this.towers)
+                    if (accepts(tower.typeId))
+                        candidates.push({ scope: "tower", id: tower.id, typeId: tower.typeId, value: tower });
+                return candidates;
+            }
+            const towerIds = [event.towerId, ...(Array.isArray(event.towerIds) ? event.towerIds : [])].filter((value) => typeof value === "string");
+            for (const towerId of towerIds) {
+                const tower = this.towers.find((item) => item.id === towerId);
+                const typeId = tower?.typeId ?? (typeof event.towerTypeId === "string" ? event.towerTypeId : undefined);
+                if (typeId && accepts(typeId))
+                    candidates.push({ scope: "tower", id: towerId, typeId, value: tower ? tower : { id: towerId, typeId } });
+            }
+            return candidates;
+        }
+        if (binding.scope === "enemy") {
+            const candidates = [];
+            if (eventName === "tick") {
+                for (const enemy of this.enemies)
+                    if (accepts(enemy.typeId))
+                        candidates.push({ scope: "enemy", id: enemy.id, typeId: enemy.typeId, value: enemy });
+                return candidates;
+            }
+            const enemyIds = [
+                event.enemyId,
+                event.targetEnemyId,
+                ...(Array.isArray(event.enemyIds) ? event.enemyIds : [])
+            ].filter((value) => typeof value === "string");
+            for (const enemyId of enemyIds) {
+                const enemy = this.enemies.find((item) => item.id === enemyId);
+                const typeId = enemy?.typeId ?? (typeof event.enemyTypeId === "string" ? event.enemyTypeId : undefined);
+                if (typeId && accepts(typeId))
+                    candidates.push({ scope: "enemy", id: enemyId, typeId, value: enemy ? enemy : { id: enemyId, typeId } });
+            }
+            return candidates;
+        }
+        return [];
+    }
+    scriptStateFor(script, stateKey) {
+        const scriptStates = this.scriptValues[script.id] ??= {};
+        return scriptStates[stateKey] ??= this.cloneScriptJsonObject(script.initialState ?? {});
+    }
+    scriptExpressionContext(context) {
+        return {
+            event: context.event,
+            self: context.self.value,
+            state: context.state,
+            game: {
+                missionId: this.mission.id,
+                mapId: this.mission.mapId,
+                difficultyId: this.difficulty.id,
+                elapsed: this.missionElapsed,
+                waveIndex: this.waveIndex,
+                startedWaveCount: this.startedWaveCount,
+                clearedWaveCount: this.clearedWaveCount,
+                killCount: this.killCount,
+                leakCount: this.leakCount,
+                coreHp: this.coreHp,
+                maxCoreHp: this.maxCoreHp,
+                resources: this.resources,
+                enemyCount: this.enemies.length,
+                towerCount: this.towers.length,
+                outcome: this.outcome
+            }
+        };
+    }
+    applyScriptAction(action, context, root, budget) {
+        const evaluate = (expression) => evaluateTowerScriptExpression(expression, root, budget);
+        const numberValue = (expression, fallback = 0) => {
+            const value = evaluate(expression);
+            return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+        };
+        if (action.action === "grantResource") {
+            if (!this.currencyIds.includes(action.resourceId))
+                throw new Error(`Unknown runtime currency "${action.resourceId}".`);
+            const amount = numberValue(action.amount);
+            this.resources[action.resourceId] = Math.max(0, Math.min(1e12, (this.resources[action.resourceId] ?? 0) + amount));
+            return;
+        }
+        if (action.action === "damageCore") {
+            this.coreHp = Math.max(0, this.coreHp - Math.max(0, numberValue(action.amount)));
+            if (this.coreHp <= 0 && this.outcome === "playing") {
+                this.outcome = "defeat";
+                this.lastEvents.push({ type: "defeat" });
+            }
+            return;
+        }
+        if (action.action === "healCore") {
+            this.coreHp = Math.min(this.maxCoreHp, this.coreHp + Math.max(0, numberValue(action.amount)));
+            return;
+        }
+        if (action.action === "damageEnemy" || action.action === "healEnemy") {
+            const amount = Math.max(0, numberValue(action.amount));
+            for (const enemy of this.resolveScriptEnemies(action.target, context)) {
+                enemy.hp = action.action === "damageEnemy" ? enemy.hp - amount : Math.min(enemy.maxHp, enemy.hp + amount);
+            }
+            return;
+        }
+        if (action.action === "applyStatus") {
+            for (const enemy of this.resolveScriptEnemies(action.target, context))
+                this.applyStatusEffect(enemy, action.status);
+            return;
+        }
+        if (action.action === "setTowerCooldown") {
+            const value = Math.max(0, numberValue(action.value));
+            for (const tower of this.resolveScriptTowers(action.target, context))
+                tower.cooldown = value;
+            return;
+        }
+        if (action.action === "addTowerStacks") {
+            const amount = Math.trunc(numberValue(action.amount));
+            for (const tower of this.resolveScriptTowers(action.target, context))
+                tower.stacks = Math.max(0, Math.min(999, tower.stacks + amount));
+            return;
+        }
+        if (action.action === "spawnEnemy") {
+            const count = Math.max(0, Math.min(TOWER_SCRIPT_LIMITS.spawnedEnemiesPerAction, Math.trunc(action.count === undefined ? 1 : numberValue(action.count, 1))));
+            const progress = Math.max(0, numberValue(action.pathProgress ?? 0));
+            for (let index = 0; index < count; index += 1) {
+                const enemy = this.createEnemyState(action.enemyTypeId, progress, 0, action.routeId);
+                if (!enemy)
+                    throw new Error(`Unknown enemy type "${action.enemyTypeId}".`);
+                this.enemies.push(enemy);
+            }
+            return;
+        }
+        if (action.action === "setTileTerrain" || action.action === "restoreTileTerrain") {
+            this.scriptTerrainChangesRemaining -= 1;
+            if (this.scriptTerrainChangesRemaining < 0)
+                throw new Error("TowerScript terrain change budget exceeded.");
+            const coord = this.resolveScriptTileTarget(action.target, context, evaluate);
+            if (!coord)
+                throw new Error("TowerScript tile target did not resolve to an in-bounds integer coordinate.");
+            if (action.action === "restoreTileTerrain") {
+                this.restoreTerrainOverride(coord);
+                return;
+            }
+            const duration = action.duration === undefined ? undefined : numberValue(action.duration);
+            if (duration !== undefined && duration <= 0)
+                throw new Error("setTileTerrain duration must be greater than zero.");
+            const result = this.applyTerrainOverride(coord, action.terrainId, duration, "script");
+            if (!result.ok)
+                throw new Error(result.reason ?? "Unable to change tile terrain.");
+            return;
+        }
+        if (action.action === "setState") {
+            context.state[action.key] = evaluate(action.value);
+            this.assertScriptStateSize(context);
+            return;
+        }
+        if (action.action === "incrementState") {
+            const current = typeof context.state[action.key] === "number" ? context.state[action.key] : 0;
+            const next = current + (action.amount === undefined ? 1 : numberValue(action.amount, 1));
+            context.state[action.key] = Number.isFinite(next) ? Math.max(-1e12, Math.min(1e12, next)) : 0;
+            this.assertScriptStateSize(context);
+            return;
+        }
+        if (action.action === "emitSignal") {
+            if (this.scriptSignalDepth >= TOWER_SCRIPT_LIMITS.signalRecursionDepth)
+                throw new Error("TowerScript signal recursion budget exceeded.");
+            const payload = action.payload === undefined ? null : evaluate(action.payload);
+            this.lastEvents.push({ type: "scriptSignal", scriptId: context.script.id, signal: action.signal, payload });
+            this.scriptSignalDepth += 1;
+            this.runScriptEvent("signal", { type: "signal", signal: action.signal, payload, sourceScriptId: context.script.id });
+            this.scriptSignalDepth -= 1;
+        }
+    }
+    resolveScriptTileTarget(target, context, evaluate) {
+        if (target === "eventTile") {
+            const value = context.event.coord ?? context.event.center ?? context.event.to;
+            if (!value || typeof value !== "object")
+                return undefined;
+            const coord = value;
+            if (!Number.isInteger(coord.q) || !Number.isInteger(coord.r))
+                return undefined;
+            const resolved = { q: Number(coord.q), r: Number(coord.r) };
+            return this.map.isInside(resolved) ? resolved : undefined;
+        }
+        const q = evaluate(target.q);
+        const r = evaluate(target.r);
+        if (!Number.isInteger(q) || !Number.isInteger(r))
+            return undefined;
+        const coord = { q: Number(q), r: Number(r) };
+        return this.map.isInside(coord) ? coord : undefined;
+    }
+    applyTerrainOverride(coord, terrainId, duration, source) {
+        const terrain = this.content.terrainTypes[terrainId];
+        if (!terrain)
+            return this.fail(`Unknown terrain "${terrainId}".`, "reason.unknownTerrain", { terrainId });
+        if (!terrain.walkable && this.map.isPathCoord(coord)) {
+            return this.fail("An active route cannot be changed to non-walkable terrain.", "reason.routeMustRemainWalkable");
+        }
+        const tile = this.map.getTile(coord);
+        if (!tile)
+            return this.fail("Tile is outside the map.", "reason.tileOutsideMap");
+        const key = coordKey(coord);
+        if (!this.runtimeTerrainOverrides.has(key) && this.runtimeTerrainOverrides.size >= TOWER_SCRIPT_LIMITS.activeTerrainOverrides) {
+            return this.fail(`Active terrain override limit (${TOWER_SCRIPT_LIMITS.activeTerrainOverrides}) exceeded.`, "reason.terrainOverrideLimit");
+        }
+        const fromTerrain = tile.terrain;
+        const existing = this.runtimeTerrainOverrides.get(key);
+        const expiresIn = duration === undefined ? undefined : Math.max(duration, existing?.expiresIn ?? 0);
+        this.runtimeTerrainOverrides.set(key, { q: coord.q, r: coord.r, terrain: terrainId, source, ...(expiresIn === undefined ? {} : { expiresIn }) });
+        this.map.setTerrain(coord, terrainId);
+        if (fromTerrain !== terrainId) {
+            this.lastEvents.push({
+                type: "terrainChanged",
+                coord: { ...coord },
+                fromTerrain,
+                toTerrain: terrainId,
+                terrainMetadata: this.terrainMetadata(terrainId),
+                source
+            });
+        }
+        return { ok: true };
+    }
+    restoreTerrainOverride(coord) {
+        return this.restoreTerrainOverrideByKey(coordKey(coord));
+    }
+    restoreTerrainOverrideByKey(key) {
+        const existing = this.runtimeTerrainOverrides.get(key);
+        if (!existing)
+            return false;
+        const tile = this.map.getTile(existing);
+        const fromTerrain = tile?.terrain ?? existing.terrain;
+        this.runtimeTerrainOverrides.delete(key);
+        this.map.restoreTerrain(existing);
+        const toTerrain = this.map.getTile(existing)?.terrain ?? fromTerrain;
+        if (fromTerrain !== toTerrain) {
+            this.lastEvents.push({
+                type: "terrainChanged",
+                coord: { q: existing.q, r: existing.r },
+                fromTerrain,
+                toTerrain,
+                terrainMetadata: this.terrainMetadata(toTerrain),
+                source: "restore"
+            });
+        }
+        return true;
+    }
+    syncTemporaryWaterTiles() {
+        this.temporaryWaterTiles = [...this.runtimeTerrainOverrides.values()]
+            .filter((entry) => entry.source === "ability" && entry.terrain === "water" && typeof entry.expiresIn === "number")
+            .map((entry) => ({ q: entry.q, r: entry.r, expiresIn: entry.expiresIn }));
+    }
+    terrainMetadata(terrainId) {
+        return this.content.terrainTypes[terrainId] ?? {
+            id: terrainId,
+            label: terrainId,
+            buildable: false,
+            walkable: false,
+            groundSpeedMultiplier: 1,
+            tags: []
+        };
+    }
+    resolveScriptEnemies(target, context) {
+        if (target === "allEnemies")
+            return this.enemies.filter((enemy) => enemy.hp > 0);
+        const id = target === "self" && context.self.scope === "enemy"
+            ? context.self.id
+            : target === "eventEnemy" && typeof context.event.enemyId === "string" ? context.event.enemyId : null;
+        const enemy = id ? this.enemies.find((item) => item.id === id && item.hp > 0) : undefined;
+        return enemy ? [enemy] : [];
+    }
+    resolveScriptTowers(target, context) {
+        if (target === "allTowers")
+            return [...this.towers];
+        const id = target === "self" && context.self.scope === "tower"
+            ? context.self.id
+            : target === "eventTower" && typeof context.event.towerId === "string" ? context.event.towerId : null;
+        const tower = id ? this.towers.find((item) => item.id === id) : undefined;
+        return tower ? [tower] : [];
+    }
+    assertScriptStateSize(context) {
+        if (JSON.stringify(context.state).length > TOWER_SCRIPT_LIMITS.stateBytesPerBinding)
+            throw new Error(`TowerScript state for ${context.stateKey} exceeds 64 KiB.`);
+    }
+    recordScriptDiagnostic(diagnostic) {
+        this.scriptDiagnostics.push(diagnostic);
+        if (this.scriptDiagnostics.length > TOWER_SCRIPT_LIMITS.retainedDiagnostics)
+            this.scriptDiagnostics.shift();
+        this.lastEvents.push({ type: "scriptDiagnostic", diagnostic });
+    }
+    cloneScriptJsonObject(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    cloneScriptValues() {
+        return JSON.parse(JSON.stringify(this.scriptValues));
+    }
+    enemyCoord(enemy) {
+        const track = this.enemyTrack(enemy);
+        const index = Math.min(Math.round(enemy.pathProgress), track.length - 1);
+        return track[index] ?? { q: 0, r: 0 };
+    }
+    startWave(waveIndex, startedAt, earlyStartUnits = 0) {
+        const wave = this.mission.waves[waveIndex];
+        if (!wave) {
+            return this.fail("No waves left.", "reason.noWaves");
+        }
+        this.waveIndex = waveIndex;
+        this.startedWaveCount = Math.max(this.startedWaveCount, waveIndex + 1);
+        this.waveState = "spawning";
+        this.spawnQueue.push(...this.buildSpawnQueue(wave, startedAt));
+        this.spawnQueue.sort((a, b) => a.at - b.at);
+        this.nextWaveStartAt =
+            this.startedWaveCount < this.mission.waves.length ? startedAt + this.mission.prepTimeUnits : null;
+        this.syncPrepRemaining();
+        const waveStartIncome = this.normalizeCost(this.mission.economy?.perWaveStart ?? {});
+        if (this.bagHasValue(waveStartIncome)) {
+            this.addResources(waveStartIncome);
+            this.lastEvents.push({ type: "resourcesGranted", source: "waveStart", waveIndex, resources: waveStartIncome });
+        }
+        if (earlyStartUnits > 0) {
+            const bonus = this.scaleBag(this.mission.economy?.earlyStartBonusPerUnit ?? {}, earlyStartUnits);
+            if (this.bagHasValue(bonus)) {
+                this.addResources(bonus);
+                this.lastEvents.push({ type: "resourcesGranted", source: "earlyStart", waveIndex, resources: bonus });
+            }
+        }
+        this.lastEvents.push({ type: "waveStarted", waveIndex });
+        return { ok: true };
+    }
+    startScheduledWaves() {
+        while (this.nextWaveStartAt !== null &&
+            this.startedWaveCount < this.mission.waves.length &&
+            this.missionElapsed + 0.0001 >= this.nextWaveStartAt) {
+            const scheduledAt = this.nextWaveStartAt;
+            this.startWave(this.startedWaveCount, scheduledAt);
+        }
+    }
+    buildSpawnQueue(wave = this.mission.waves[this.waveIndex], baseAt = 0) {
+        const queue = [];
+        if (!wave) {
+            return queue;
+        }
+        for (const group of wave.groups) {
+            for (let i = 0; i < group.count; i += 1) {
+                queue.push({
+                    at: baseAt + group.startDelay + i * group.spawnInterval,
+                    enemyId: group.enemyId,
+                    routeId: group.routeId
+                });
+            }
+        }
+        return queue.sort((a, b) => a.at - b.at);
+    }
+    spawnDueEnemies() {
+        let consumed = 0;
+        while (consumed < this.spawnQueue.length && (this.spawnQueue[consumed]?.at ?? Infinity) <= this.missionElapsed + 0.0001) {
+            const item = this.spawnQueue[consumed];
+            if (item) {
+                const enemy = this.createEnemyState(item.enemyId, 0, 0, item.routeId);
+                if (enemy) {
+                    this.enemies.push(enemy);
+                }
+            }
+            consumed += 1;
+        }
+        if (consumed > 0) {
+            this.spawnQueue.splice(0, consumed);
+        }
+    }
+    createEnemyState(typeId, pathProgress, pathOffset, routeId) {
+        const type = this.enemyTypes[typeId];
+        if (!type) {
+            return null;
+        }
+        const resolvedRouteId = this.enemyTargetClassByType(typeId) === "ground" ? this.resolveRouteId(routeId) : undefined;
+        const trackEnd = Math.max(0, this.enemyTrackForType(typeId, resolvedRouteId).length - 1);
+        return {
+            id: `enemy_${++this.enemyCounter}`,
+            typeId,
+            hp: type.maxHp * (this.difficulty.enemyHpMultiplier ?? 1),
+            maxHp: type.maxHp * (this.difficulty.enemyHpMultiplier ?? 1),
+            pathProgress: Math.max(0, Math.min(pathProgress, Math.max(0, trackEnd - 0.001))),
+            dotRemaining: 0,
+            pathOffset,
+            routeId: resolvedRouteId,
+            phaseSpawnsTriggered: type.phaseSpawns?.length ? [] : undefined,
+            statuses: {}
+        };
+    }
+    updateAbilities(delta) {
+        for (const ability of this.mission.abilities ?? []) {
+            const remaining = this.abilityCooldowns[ability.id] ?? 0;
+            this.abilityCooldowns[ability.id] = Math.max(0, remaining - delta);
+        }
+        for (const [key, override] of this.runtimeTerrainOverrides) {
+            if (override.expiresIn === undefined)
+                continue;
+            override.expiresIn = Math.max(0, override.expiresIn - delta);
+            if (override.expiresIn <= 0)
+                this.restoreTerrainOverrideByKey(key);
+        }
+        this.syncTemporaryWaterTiles();
+    }
+    updateEnemyStatuses(delta) {
+        for (const enemy of this.enemies) {
+            const statuses = enemy.statuses;
+            if (!statuses) {
+                continue;
+            }
+            if (statuses.slow) {
+                statuses.slow.remaining = Math.max(0, statuses.slow.remaining - delta);
+                if (statuses.slow.remaining <= 0)
+                    delete statuses.slow;
+            }
+            if (statuses.stun) {
+                statuses.stun.remaining = Math.max(0, statuses.stun.remaining - delta);
+                if (statuses.stun.remaining <= 0)
+                    delete statuses.stun;
+            }
+            if (statuses.poison) {
+                // Damage-over-time; death + reward is handled by the later removeDeadEnemies() pass.
+                if (enemy.hp > 0)
+                    enemy.hp -= statuses.poison.dps * delta;
+                statuses.poison.remaining = Math.max(0, statuses.poison.remaining - delta);
+                if (statuses.poison.remaining <= 0)
+                    delete statuses.poison;
+            }
+        }
+    }
+    buildAbilitySnapshot() {
+        const abilities = {};
+        for (const ability of this.mission.abilities ?? []) {
+            const cooldownRemaining = Math.max(0, this.abilityCooldowns[ability.id] ?? 0);
+            abilities[ability.id] = {
+                id: ability.id,
+                label: ability.label,
+                cooldown: ability.cooldown,
+                cooldownRemaining,
+                duration: ability.duration,
+                radius: ability.radius,
+                ready: cooldownRemaining <= 0 && this.outcome === "playing"
+            };
+        }
+        return abilities;
+    }
+    buildSunlightTilesSnapshot() {
+        const sunlight = this.mission.sunlight;
+        if (!sunlight) {
+            return [];
+        }
+        const tiles = [];
+        for (const pathOrder of sunlight.pathOrders ?? []) {
+            const coord = this.map.pathCenterline[pathOrder];
+            if (coord) {
+                tiles.push({ ...coord, pathOrder, routeId: this.defaultRouteId() });
+            }
+        }
+        for (const tile of sunlight.pathTiles ?? []) {
+            const route = this.map.pathRouteById(tile.routeId);
+            const coord = route?.pathCenterline[tile.pathOrder];
+            if (coord && route) {
+                tiles.push({ ...coord, pathOrder: tile.pathOrder, routeId: route.id });
+            }
+        }
+        return tiles.sort((a, b) => {
+            const route = (a.routeId ?? "").localeCompare(b.routeId ?? "");
+            return route || a.pathOrder - b.pathOrder;
+        });
+    }
+    moveEnemies(delta) {
+        for (const enemy of this.enemies) {
+            // An enemy killed between ticks (by an ability) or earlier this tick is pending removal by
+            // removeDeadEnemies() — it must not keep advancing, or it can reach the core and "leak"
+            // (deal core damage + forfeit its kill reward) despite already being dead.
+            if (enemy.hp <= 0) {
+                continue;
+            }
+            const type = this.enemyTypes[enemy.typeId];
+            if (!type) {
+                continue;
+            }
+            const trackEnd = this.enemyTrack(enemy).length - 1;
+            const desiredOffset = this.enemyTargetClass(enemy) === "ground" ? this.enemyAvoidanceOffset(enemy) : 0;
+            enemy.pathOffset += (desiredOffset - enemy.pathOffset) * Math.min(1, delta * 6);
+            const avoidanceSpeedFactor = Math.abs(desiredOffset) > 0.05 ? 0.82 : 1;
+            const terrainSpeedFactor = this.enemyTerrainSpeedFactor(enemy);
+            const statusSpeedFactor = this.enemyStatusSpeedFactor(enemy);
+            const previousPathOrder = Math.floor(enemy.pathProgress);
+            enemy.pathProgress += type.speed * (this.difficulty.enemySpeedMultiplier ?? 1) * avoidanceSpeedFactor * terrainSpeedFactor * statusSpeedFactor * delta;
+            const track = this.enemyTrack(enemy);
+            const enteredThrough = Math.min(Math.floor(enemy.pathProgress), track.length - 1);
+            for (let pathOrder = previousPathOrder + 1; pathOrder <= enteredThrough; pathOrder += 1) {
+                const coord = track[pathOrder];
+                const tile = coord ? this.map.getTile(coord) : undefined;
+                if (!coord || !tile)
+                    continue;
+                this.lastEvents.push({
+                    type: "enemyEnteredTile",
+                    enemyId: enemy.id,
+                    enemyTypeId: enemy.typeId,
+                    coord: { ...coord },
+                    terrain: tile.terrain,
+                    terrainMetadata: this.terrainMetadata(tile.terrain),
+                    routeId: enemy.routeId,
+                    pathOrder
+                });
+            }
+            if (enemy.pathProgress >= trackEnd) {
+                enemy.hp = 0;
+                const coreDamage = type.coreDamage * (this.difficulty.coreDamageMultiplier ?? 1);
+                this.coreHp = Math.max(0, this.coreHp - coreDamage);
+                this.lastEvents.push({
+                    type: "enemyLeaked",
+                    enemyId: enemy.id,
+                    enemyTypeId: enemy.typeId,
+                    damage: coreDamage
+                });
+                this.leakCount += 1;
+                if (this.coreHp <= 0 && this.outcome === "playing") {
+                    this.outcome = "defeat";
+                    this.lastEvents.push({ type: "defeat" });
+                }
+            }
+        }
+    }
+    applyDotDamage(delta) {
+        for (const enemy of this.enemies) {
+            if (enemy.hp <= 0 || enemy.dotRemaining <= 0) {
+                continue;
+            }
+            if (this.isInsideAnyPulse(enemy)) {
+                continue;
+            }
+            enemy.dotRemaining = Math.max(0, enemy.dotRemaining - delta);
+            const sourceTowerTypeId = enemy.dotSourceTowerTypeId ?? this.firstPulseTowerTypeId();
+            const damagePerUnit = enemy.dotDamagePerUnit ?? this.pulseDotDamagePerUnit(sourceTowerTypeId);
+            const baseDamage = Math.max(0, damagePerUnit) * delta;
+            enemy.hp -= this.resolveEffectiveTowerDamage(sourceTowerTypeId ?? "", enemy, baseDamage, { aoe: true });
+            if (enemy.dotRemaining <= 0) {
+                delete enemy.dotDamagePerUnit;
+                delete enemy.dotSourceTowerTypeId;
+            }
+        }
+    }
+    isPulseTower(tower) {
+        return this.towerTypes[tower.typeId]?.attack.kind === "pulse";
+    }
+    firstPulseTowerTypeId() {
+        for (const [typeId, type] of Object.entries(this.towerTypes)) {
+            if (type.attack.kind === "pulse") {
+                return typeId;
+            }
+        }
+        return undefined;
+    }
+    pulseDotDamagePerUnit(towerTypeId) {
+        if (!towerTypeId) {
+            return 0;
+        }
+        const attack = this.towerTypes[towerTypeId]?.attack;
+        return attack?.kind === "pulse" ? attack.dotDamagePerUnit : 0;
+    }
+    applySunlightRegeneration(delta) {
+        const regenPerUnit = this.mission.sunlight?.regenPerUnit ?? 0;
+        if (regenPerUnit <= 0 || this.sunlightPathKeys.size === 0) {
+            return;
+        }
+        for (const enemy of this.enemies) {
+            if (enemy.hp <= 0 || enemy.hp >= enemy.maxHp || !this.isEnemyInSunlight(enemy)) {
+                continue;
+            }
+            enemy.hp = Math.min(enemy.maxHp, enemy.hp + regenPerUnit * delta);
+        }
+    }
+    applyHealAuras(delta) {
+        const healByTargetId = new Map();
+        for (const healer of this.enemies) {
+            if (healer.hp <= 0) {
+                continue;
+            }
+            const aura = this.enemyTypes[healer.typeId]?.healAura;
+            if (!aura || aura.radius <= 0 || aura.healPerUnit <= 0) {
+                continue;
+            }
+            const healerCoord = this.enemyCoord(healer);
+            for (const target of this.enemies) {
+                if (target.hp <= 0 || target.hp >= target.maxHp) {
+                    continue;
+                }
+                if (!aura.includeSelf && target.id === healer.id) {
+                    continue;
+                }
+                if (this.map.distance(healerCoord, this.enemyCoord(target)) > aura.radius) {
+                    continue;
+                }
+                const previous = healByTargetId.get(target.id);
+                const amount = aura.healPerUnit * delta;
+                if (previous && aura.stacks !== false) {
+                    previous.amount += amount;
+                }
+                else if (!previous) {
+                    healByTargetId.set(target.id, { amount, healerId: healer.id });
+                }
+            }
+        }
+        for (const [targetId, heal] of healByTargetId) {
+            const target = this.enemies.find((enemy) => enemy.id === targetId);
+            if (!target || target.hp <= 0 || target.hp >= target.maxHp) {
+                continue;
+            }
+            const previousHp = target.hp;
+            target.hp = Math.min(target.maxHp, target.hp + heal.amount);
+            const amount = target.hp - previousHp;
+            if (amount > 0.0001) {
+                this.lastEvents.push({
+                    type: "enemyHealed",
+                    healerEnemyId: heal.healerId,
+                    targetEnemyId: target.id,
+                    targetEnemyTypeId: target.typeId,
+                    amount
+                });
+            }
+        }
+    }
+    /** Boss pattern: enemies with `towerDisrupt` periodically silence towers within radius. */
+    updateTowerDisruptions(delta) {
+        if (this.towers.length === 0) {
+            return;
+        }
+        for (const enemy of this.enemies) {
+            if (enemy.hp <= 0) {
+                continue;
+            }
+            const disrupt = this.enemyTypes[enemy.typeId]?.towerDisrupt;
+            if (!disrupt || disrupt.interval <= 0 || disrupt.duration <= 0) {
+                continue;
+            }
+            enemy.disruptCooldown = (enemy.disruptCooldown ?? disrupt.interval) - delta;
+            if (enemy.disruptCooldown > 0) {
+                continue;
+            }
+            enemy.disruptCooldown = disrupt.interval;
+            const center = this.enemyCoord(enemy);
+            const disabledTowerIds = [];
+            for (const tower of this.towers) {
+                if (this.map.distance(center, tower.coord) <= disrupt.radius) {
+                    tower.disabledFor = Math.max(tower.disabledFor ?? 0, disrupt.duration);
+                    disabledTowerIds.push(tower.id);
+                }
+            }
+            if (disabledTowerIds.length > 0) {
+                this.lastEvents.push({ type: "towerDisrupted", enemyId: enemy.id, enemyTypeId: enemy.typeId, towerIds: disabledTowerIds, duration: disrupt.duration });
+            }
+        }
+    }
+    /** Boss pattern: enemies with `towerAttack` periodically damage the nearest tower with hp; destroy it at 0. */
+    updateEnemyTowerAttacks(delta) {
+        if (this.towers.length === 0) {
+            return;
+        }
+        const destroyedIds = [];
+        for (const enemy of this.enemies) {
+            if (enemy.hp <= 0) {
+                continue;
+            }
+            const attack = this.enemyTypes[enemy.typeId]?.towerAttack;
+            if (!attack || attack.interval <= 0 || attack.damage <= 0) {
+                continue;
+            }
+            enemy.towerAttackCooldown = (enemy.towerAttackCooldown ?? attack.interval) - delta;
+            if (enemy.towerAttackCooldown > 0) {
+                continue;
+            }
+            enemy.towerAttackCooldown = attack.interval;
+            const center = this.enemyCoord(enemy);
+            let target = null;
+            let best = Infinity;
+            for (const tower of this.towers) {
+                if (typeof tower.hp !== "number" || tower.hp <= 0)
+                    continue; // indestructible or already downed this tick
+                const dist = this.map.distance(center, tower.coord);
+                if (dist <= attack.range && dist < best) {
+                    best = dist;
+                    target = tower;
+                }
+            }
+            if (!target)
+                continue;
+            target.hp = (target.hp ?? 0) - attack.damage;
+            this.lastEvents.push({ type: "towerAttacked", enemyId: enemy.id, enemyTypeId: enemy.typeId, towerId: target.id, damage: attack.damage });
+            if (target.hp <= 0) {
+                destroyedIds.push(target.id);
+                this.lastEvents.push({ type: "towerDestroyed", towerId: target.id, towerTypeId: target.typeId, enemyId: enemy.id });
+            }
+        }
+        for (const id of destroyedIds)
+            this.destroyTower(id);
+    }
+    destroyTower(towerId) {
+        const index = this.towers.findIndex((tower) => tower.id === towerId);
+        if (index < 0)
+            return;
+        this.map.clearOccupied(towerId); // free the footprint tiles for rebuilding
+        this.towers.splice(index, 1);
+    }
+    updateTowers(delta) {
+        for (const tower of this.towers) {
+            const type = this.towerTypes[tower.typeId];
+            if (!type) {
+                continue;
+            }
+            if (tower.disabledFor && tower.disabledFor > 0) {
+                tower.disabledFor = Math.max(0, tower.disabledFor - delta); // silenced by an enemy disrupt pulse
+                continue;
+            }
+            tower.cooldown -= delta;
+            const fireRateMultiplier = this.towerFireRateMultiplier(tower);
+            if (type.attack.kind === "single") {
+                this.updateSingleTower(tower, type.attack.fireRate * fireRateMultiplier, type.attack.damagePerStack, type.attack.chain);
+            }
+            else if (type.attack.kind === "pulse") {
+                this.updatePulseTower(tower, this.towerPulseRate(tower) * fireRateMultiplier, type.attack.pulseDamage, type.attack.dotDuration, type.attack.dotDamagePerUnit);
+            }
+            else if (type.attack.kind === "sniper") {
+                this.updateSniperTower(tower, type.attack.interval / fireRateMultiplier, type.attack.damage);
+            }
+            else if (type.attack.kind === "antiair") {
+                this.updateAntiAirTower(tower, type.attack.fireRate * fireRateMultiplier, type.attack.damage);
+            }
+            else if (type.attack.kind === "splash") {
+                this.updateSplashTower(tower, fireRateMultiplier);
+            }
+            else if (type.attack.kind === "pipeline") {
+                this.updatePipelineTower(tower, type.attack, fireRateMultiplier);
+            }
+        }
+    }
+    updateSingleTower(tower, fireRate, damagePerStack, chain) {
+        const interval = 1 / fireRate;
+        let shots = 0;
+        while (tower.cooldown <= 0 && shots < 4) {
+            const target = this.findSingleTarget(tower);
+            if (!target) {
+                tower.cooldown = 0;
+                return;
+            }
+            const damage = tower.stacks * damagePerStack;
+            this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: target.id, damage });
+            const applied = this.applyTowerDamage(tower, target, damage);
+            if (chain && applied > 0) {
+                this.propagateChain(tower, target, damage, chain);
+            }
+            tower.cooldown += interval;
+            shots += 1;
+        }
+    }
+    /**
+     * Chain delivery: propagate a landed hit hop-by-hop to the nearest not-yet-hit ground enemy
+     * within `jumpRadius` of the LAST-hit enemy (not the origin — a true chain, not a fixed-radius
+     * splash), for up to `maxJumps` extra hits, each scaled by `damageFalloff^hop`. Deterministic:
+     * ties broken by enemy id. Reuses applyTowerDamage so resistances/armor/statusOnHit apply to
+     * every hop exactly as they would to a primary hit.
+     */
+    propagateChain(tower, originTarget, baseDamage, chain) {
+        const alreadyHit = new Set([originTarget.id]);
+        let current = originTarget;
+        for (let hop = 1; hop <= chain.maxJumps; hop += 1) {
+            const fromCoord = this.enemyCoord(current);
+            let next;
+            let bestDistance = Infinity;
+            for (const enemy of this.enemies) {
+                if (enemy.hp <= 0 || alreadyHit.has(enemy.id) || this.enemyTargetClass(enemy) !== "ground") {
+                    continue;
+                }
+                const distance = this.map.distance(fromCoord, this.enemyCoord(enemy));
+                if (distance > chain.jumpRadius) {
+                    continue;
+                }
+                if (!next || distance < bestDistance || (distance === bestDistance && enemy.id < next.id)) {
+                    next = enemy;
+                    bestDistance = distance;
+                }
+            }
+            if (!next) {
+                return;
+            }
+            alreadyHit.add(next.id);
+            const hopDamage = baseDamage * Math.pow(chain.damageFalloff, hop);
+            this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: next.id, damage: hopDamage });
+            this.applyTowerDamage(tower, next, hopDamage);
+            current = next;
+        }
+    }
+    updatePulseTower(tower, pulseRate, pulseDamage, dotDuration, dotDamagePerUnit) {
+        const interval = 1 / pulseRate;
+        let pulses = 0;
+        while (tower.cooldown <= 0 && pulses < 3) {
+            const targets = this.enemies.filter((enemy) => enemy.hp > 0 && this.enemyTargetClass(enemy) === "ground" && this.enemyInRange(tower, enemy, this.towerRange(tower)));
+            if (targets.length === 0) {
+                tower.cooldown = 0;
+                return;
+            }
+            for (const target of targets) {
+                const damage = this.applyTowerDamage(tower, target, pulseDamage, { aoe: true });
+                if (damage > 0) {
+                    target.dotRemaining = dotDuration;
+                    target.dotDamagePerUnit = dotDamagePerUnit;
+                    target.dotSourceTowerTypeId = tower.typeId;
+                }
+            }
+            this.lastEvents.push({ type: "areaPulse", towerId: tower.id, enemyIds: targets.map((target) => target.id) });
+            tower.cooldown += interval;
+            pulses += 1;
+        }
+    }
+    updateSniperTower(tower, interval, damage) {
+        let shots = 0;
+        while (tower.cooldown <= 0 && shots < 2) {
+            const target = this.findSniperTarget(tower);
+            if (!target) {
+                tower.cooldown = 0;
+                return;
+            }
+            this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: target.id, damage });
+            this.applyTowerDamage(tower, target, damage);
+            tower.cooldown += interval;
+            shots += 1;
+        }
+    }
+    updateAntiAirTower(tower, fireRate, damage) {
+        const interval = 1 / fireRate;
+        let volleys = 0;
+        while (tower.cooldown <= 0 && volleys < 3) {
+            const targets = this.findAntiAirTargets(tower);
+            if (targets.length === 0) {
+                tower.cooldown = 0;
+                return;
+            }
+            for (const target of targets) {
+                this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: target.id, damage });
+                this.applyTowerDamage(tower, target, damage);
+            }
+            tower.cooldown += interval;
+            volleys += 1;
+        }
+    }
+    updateSplashTower(tower, fireRateMultiplier = 1) {
+        const type = this.towerTypes[tower.typeId];
+        if (!type || type.attack.kind !== "splash") {
+            return;
+        }
+        const attack = type.attack;
+        const interval = this.slipperyJackInterval(tower) / fireRateMultiplier;
+        let shots = 0;
+        while (tower.cooldown <= 0 && shots < 3) {
+            const target = this.findSplashTarget(tower);
+            if (!target) {
+                tower.cooldown = 0;
+                return;
+            }
+            const targetCoord = this.enemyCoord(target);
+            const targets = this.enemies.filter((enemy) => enemy.hp > 0 &&
+                (attack.affectsClasses ?? ["ground"]).includes(this.enemyTargetClass(enemy)) &&
+                this.map.distance(this.enemyCoord(enemy), targetCoord) <= attack.splashRadius);
+            this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: target.id, damage: attack.damage });
+            for (const enemy of targets) {
+                this.applyTowerDamage(tower, enemy, enemy.id === target.id ? attack.damage : attack.splashDamage);
+                this.applySlow(enemy, attack.slowFactor, attack.slowDuration, attack.affectsClasses);
+            }
+            tower.cooldown += interval;
+            shots += 1;
+        }
+    }
+    updatePipelineTower(tower, attack, fireRateMultiplier) {
+        const levelIndex = Math.max(0, tower.level - 1);
+        const baseInterval = attack.intervalByLevel?.[Math.min(levelIndex, attack.intervalByLevel.length - 1)] ?? attack.interval;
+        const interval = baseInterval / Math.max(0.05, fireRateMultiplier);
+        let activations = 0;
+        while (tower.cooldown <= 0 && activations < 4) {
+            const targets = this.pipelineTargets(tower, attack);
+            if (targets.length === 0) {
+                tower.cooldown = 0;
+                return;
+            }
+            for (const target of targets) {
+                const expectedDamage = attack.effects.reduce((sum, effect) => {
+                    if (effect.kind !== "damage")
+                        return sum;
+                    const amount = effect.amountByLevel?.[Math.min(levelIndex, effect.amountByLevel.length - 1)] ?? effect.amount;
+                    return sum + amount * target.damageMultiplier;
+                }, 0);
+                this.lastEvents.push({ type: "towerFired", towerId: tower.id, enemyId: target.enemy.id, damage: expectedDamage });
+                for (const effect of attack.effects)
+                    this.applyPipelineEffect(tower, target.enemy, effect, target.damageMultiplier, levelIndex, attack.delivery.kind === "area" || attack.delivery.kind === "aura");
+            }
+            tower.cooldown += interval;
+            activations += 1;
+        }
+    }
+    pipelineTargets(tower, attack) {
+        const classes = attack.targeting?.classes?.length ? attack.targeting.classes : ["ground"];
+        const inRange = this.enemies
+            .filter((enemy) => enemy.hp > 0 && classes.includes(this.enemyTargetClass(enemy)) && this.enemyInRange(tower, enemy, this.towerRange(tower)))
+            .sort((left, right) => this.compareTargets(tower, left, right));
+        if (attack.delivery.kind === "aura")
+            return inRange.map((enemy) => ({ enemy, damageMultiplier: 1 }));
+        const primaryLimit = attack.delivery.kind === "single" ? 1 : Math.max(1, attack.targeting?.maxTargets ?? 1);
+        const primaries = inRange.slice(0, primaryLimit);
+        if (attack.delivery.kind === "single" || attack.delivery.kind === "multi") {
+            return primaries.map((enemy) => ({ enemy, damageMultiplier: 1 }));
+        }
+        const delivered = new Map();
+        for (const primary of primaries) {
+            delivered.set(primary.id, { enemy: primary, damageMultiplier: 1 });
+            if (attack.delivery.kind === "area") {
+                const multiplier = Math.max(0, attack.delivery.secondaryMultiplier ?? 1);
+                const center = this.enemyCoord(primary);
+                for (const enemy of this.enemies) {
+                    if (enemy.hp <= 0 || !classes.includes(this.enemyTargetClass(enemy)) || this.map.distance(center, this.enemyCoord(enemy)) > attack.delivery.radius)
+                        continue;
+                    const nextMultiplier = enemy.id === primary.id ? 1 : multiplier;
+                    const current = delivered.get(enemy.id);
+                    if (!current || nextMultiplier > current.damageMultiplier)
+                        delivered.set(enemy.id, { enemy, damageMultiplier: nextMultiplier });
+                }
+            }
+            else if (attack.delivery.kind === "chain") {
+                const delivery = attack.delivery;
+                let current = primary;
+                const visited = new Set([primary.id]);
+                for (let hop = 1; hop <= delivery.maxJumps; hop += 1) {
+                    const center = this.enemyCoord(current);
+                    const next = this.enemies
+                        .filter((enemy) => enemy.hp > 0 && !visited.has(enemy.id) && classes.includes(this.enemyTargetClass(enemy)) && this.map.distance(center, this.enemyCoord(enemy)) <= delivery.jumpRadius)
+                        .sort((left, right) => this.map.distance(center, this.enemyCoord(left)) - this.map.distance(center, this.enemyCoord(right)) || left.id.localeCompare(right.id))[0];
+                    if (!next)
+                        break;
+                    visited.add(next.id);
+                    const damageMultiplier = Math.pow(delivery.damageFalloff ?? 1, hop);
+                    const existing = delivered.get(next.id);
+                    if (!existing || damageMultiplier > existing.damageMultiplier)
+                        delivered.set(next.id, { enemy: next, damageMultiplier });
+                    current = next;
+                }
+            }
+        }
+        return [...delivered.values()];
+    }
+    applyPipelineEffect(tower, enemy, effect, deliveryMultiplier, levelIndex, aoe) {
+        if (effect.kind === "damage") {
+            const amount = effect.amountByLevel?.[Math.min(levelIndex, effect.amountByLevel.length - 1)] ?? effect.amount;
+            this.applyTowerDamage(tower, enemy, amount * deliveryMultiplier, {
+                aoe,
+                damageType: effect.damageType,
+                armorPiercing: effect.armorPiercing,
+                applyLegacyStatus: false
+            });
+        }
+        else if (effect.kind === "status") {
+            this.applyStatusEffect(enemy, effect.status);
+        }
+        else if (effect.kind === "resource") {
+            const resources = this.normalizeCost(effect.resources);
+            this.addResources(resources);
+            this.lastEvents.push({ type: "towerResourcesGranted", towerId: tower.id, enemyId: enemy.id, resources });
+        }
+    }
+    findSingleTarget(tower) {
+        return this.selectTargets(tower, "ground", 1)[0];
+    }
+    findSniperTarget(tower) {
+        return this.selectTargets(tower, "ground", 1)[0];
+    }
+    findAntiAirTargets(tower) {
+        const type = this.towerTypes[tower.typeId];
+        const attack = type?.attack.kind === "antiair" ? type.attack : undefined;
+        if (!attack) {
+            return [];
+        }
+        const limit = attack.maxTargetsByLevel[Math.min(tower.level, attack.maxTargetsByLevel.length) - 1] ?? 1;
+        return this.selectTargets(tower, "flying", limit);
+    }
+    findSplashTarget(tower) {
+        return this.selectTargets(tower, "ground", 1)[0];
+    }
+    towerSupportsTargetMode(tower) {
+        const kind = this.towerTypes[tower.typeId]?.attack.kind;
+        return kind === "single" || kind === "sniper" || kind === "antiair" || kind === "splash" || kind === "pipeline";
+    }
+    selectTargets(tower, targetClass, limit) {
+        const range = this.towerRange(tower);
+        return this.enemies
+            .filter((enemy) => enemy.hp > 0 && this.enemyTargetClass(enemy) === targetClass && this.enemyInRange(tower, enemy, range))
+            .sort((left, right) => this.compareTargets(tower, left, right))
+            .slice(0, Math.max(0, limit));
+    }
+    compareTargets(tower, left, right) {
+        const mode = tower.targetMode ?? "first";
+        const leftProgress = this.enemyRouteProgressRatio(left);
+        const rightProgress = this.enemyRouteProgressRatio(right);
+        const leftDistance = this.map.distance(tower.coord, this.enemyCoord(left));
+        const rightDistance = this.map.distance(tower.coord, this.enemyCoord(right));
+        let result = 0;
+        if (mode === "last")
+            result = leftProgress - rightProgress;
+        else if (mode === "closest")
+            result = leftDistance - rightDistance;
+        else if (mode === "furthest")
+            result = rightDistance - leftDistance;
+        else if (mode === "strongest" || mode === "largest_hp")
+            result = right.hp - left.hp || rightProgress - leftProgress;
+        else if (mode === "weakest")
+            result = left.hp - right.hp || rightProgress - leftProgress;
+        else if (mode === "fastest_ahead") {
+            result = Number(this.hasPierceOnlyArmor(right)) - Number(this.hasPierceOnlyArmor(left)) || rightProgress - leftProgress;
+        }
+        else
+            result = rightProgress - leftProgress;
+        return result || left.id.localeCompare(right.id);
+    }
+    enemyInRange(tower, enemy, range) {
+        return this.map.distance(tower.coord, this.enemyCoord(enemy)) <= range;
+    }
+    towerRange(tower) {
+        const type = this.towerTypes[tower.typeId];
+        if (!type) {
+            return 0;
+        }
+        const attack = type.attack;
+        const levelIndex = Math.max(0, tower.level - 1);
+        if (attack.kind === "sniper") {
+            return attack.rangeByLevel?.[Math.min(levelIndex, attack.rangeByLevel.length - 1)] ?? type.range;
+        }
+        if (attack.kind === "support") {
+            return attack.auraRadiusByLevel?.[Math.min(levelIndex, attack.auraRadiusByLevel.length - 1)] ?? attack.auraRadius;
+        }
+        if (attack.kind === "support_buff") {
+            return attack.auraRadius;
+        }
+        if (attack.kind === "pipeline") {
+            return attack.rangeByLevel?.[Math.min(levelIndex, attack.rangeByLevel.length - 1)] ?? type.range;
+        }
+        return type.range;
+    }
+    slipperyJackInterval(tower) {
+        const type = this.towerTypes[tower.typeId];
+        if (!type || type.attack.kind !== "splash") {
+            return 1;
+        }
+        const levelIndex = Math.max(0, tower.level - 1);
+        return type.attack.intervalByLevel?.[Math.min(levelIndex, type.attack.intervalByLevel.length - 1)] ?? type.attack.interval;
+    }
+    towerPulseRate(tower) {
+        const type = this.towerTypes[tower.typeId];
+        if (!type || type.attack.kind !== "pulse") {
+            return 1;
+        }
+        const levelIndex = Math.max(0, tower.level - 1);
+        return type.attack.pulseRateByLevel?.[Math.min(levelIndex, type.attack.pulseRateByLevel.length - 1)] ?? type.attack.pulseRate;
+    }
+    enemyTrack(enemy) {
+        return this.enemyTrackForType(enemy.typeId, enemy.routeId);
+    }
+    enemyTrackForType(typeId, routeId) {
+        return this.enemyTypes[typeId]?.movementKind === "direct_flying"
+            ? this.directFlightLine
+            : (this.map.pathRouteById(routeId)?.pathCenterline ?? this.map.pathCenterline);
+    }
+    enemyTargetClass(enemy) {
+        return this.enemyTargetClassByType(enemy.typeId);
+    }
+    enemyTargetClassByType(typeId) {
+        return this.enemyTypes[typeId]?.targetClass ?? "ground";
+    }
+    enemyTerrainSpeedFactor(enemy) {
+        const type = this.enemyTypes[enemy.typeId];
+        if (!type || type.movementKind === "direct_flying" || type.ignoresWaterSlow || this.enemyTargetClass(enemy) !== "ground") {
+            return 1;
+        }
+        const coord = this.enemyCoord(enemy);
+        const terrainId = this.map.getTile(coord)?.terrain;
+        const staticFactor = terrainId ? this.terrainMetadata(terrainId).groundSpeedMultiplier : 1;
+        const temporaryFactor = this.isTemporaryWaterTile(coord) ? this.content.constants.pathWaterGroundSpeedFactor : 1;
+        return Math.min(staticFactor, temporaryFactor);
+    }
+    enemyStatusSpeedFactor(enemy) {
+        if ((enemy.statuses?.stun?.remaining ?? 0) > 0) {
+            return 0; // stunned enemies are frozen in place
+        }
+        const slow = enemy.statuses?.slow;
+        if (!slow || slow.remaining <= 0) {
+            return 1;
+        }
+        return Math.min(1, Math.max(0.05, slow.factor));
+    }
+    isEnemyInSunlight(enemy) {
+        if (this.sunlightPathKeys.size === 0 || this.enemyTargetClass(enemy) !== "ground") {
+            return false;
+        }
+        const track = this.enemyTrack(enemy);
+        const order = Math.min(Math.round(enemy.pathProgress), track.length - 1);
+        return this.sunlightPathKeys.has(this.routePathKey(enemy.routeId, order));
+    }
+    aoeDamageAfterSunlight(enemy, damage) {
+        if (damage <= 0 || !this.isEnemyInSunlight(enemy)) {
+            return damage;
+        }
+        return damage * (this.mission.sunlight?.aoeDamageMultiplier ?? 1);
+    }
+    applyTowerDamage(tower, enemy, rawDamage, options = {}) {
+        const damage = this.resolveEffectiveTowerDamage(tower.typeId, enemy, rawDamage, options);
+        if (damage > 0) {
+            enemy.hp -= damage;
+            if (options.applyLegacyStatus !== false)
+                this.applyStatusOnHit(tower.typeId, enemy);
+            this.lastEvents.push({
+                type: "enemyHit",
+                towerId: tower.id,
+                enemyId: enemy.id,
+                enemyTypeId: enemy.typeId,
+                damage
+            });
+            return damage;
+        }
+        if (rawDamage > 0 && this.isDamageBlockedByArmor(tower.typeId, enemy, options.armorPiercing)) {
+            this.lastEvents.push({
+                type: "enemyArmorBlocked",
+                towerId: tower.id,
+                enemyId: enemy.id,
+                enemyTypeId: enemy.typeId,
+                rawDamage
+            });
+        }
+        return 0;
+    }
+    resolveEffectiveTowerDamage(towerTypeId, enemy, rawDamage, options = {}) {
+        let damage = rawDamage * this.towerDamageMultiplier;
+        damage = options.aoe ? this.aoeDamageAfterSunlight(enemy, damage) : damage;
+        if (damage <= 0) {
+            return 0;
+        }
+        // Elemental resistances: scale by the enemy's multiplier for this attack's (author-defined) damage type.
+        damage *= this.resistanceMultiplier(enemy, options.damageType ?? this.damageTypeOf(towerTypeId));
+        if (damage <= 0) {
+            return 0;
+        }
+        const armor = this.enemyTypes[enemy.typeId]?.armor;
+        if (!armor || armor.kind !== "pierce_only" || options.armorPiercing || this.piercesSniperArmor(towerTypeId)) {
+            return damage;
+        }
+        damage = Math.min(damage, this.armoredChipDamageForTower(towerTypeId, armor.chipDamageByTowerId));
+        return Math.max(0, damage);
+    }
+    /** The (author-defined) damage type a tower deals; defaults to "physical". */
+    damageTypeOf(towerTypeId) {
+        const attack = this.towerTypes[towerTypeId]?.attack;
+        return attack?.damageType ?? "physical";
+    }
+    /** Enemy's incoming-damage multiplier for a damage type (unlisted types = 1, clamped >= 0). */
+    resistanceMultiplier(enemy, damageType) {
+        const value = this.enemyTypes[enemy.typeId]?.resistances?.[damageType];
+        return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 1;
+    }
+    isDamageBlockedByArmor(towerTypeId, enemy, armorPiercing = false) {
+        const armor = this.enemyTypes[enemy.typeId]?.armor;
+        if (!armor || armor.kind !== "pierce_only" || armorPiercing || this.piercesSniperArmor(towerTypeId)) {
+            return false;
+        }
+        return this.armoredChipDamageForTower(towerTypeId, armor.chipDamageByTowerId) <= 0;
+    }
+    /** "pierce_only" armor is fully pierced by any sniper-kind weapon, regardless of its tower id. */
+    piercesSniperArmor(towerTypeId) {
+        return this.towerTypes[towerTypeId]?.attack.kind === "sniper";
+    }
+    armoredChipDamageForTower(towerTypeId, chipDamageByTowerId) {
+        const configured = chipDamageByTowerId?.[towerTypeId];
+        if (typeof configured === "number" && Number.isFinite(configured)) {
+            return Math.max(0, configured);
+        }
+        const attack = this.towerTypes[towerTypeId]?.attack;
+        return attack?.kind === "splash" ? Math.max(0, attack.armoredChipDamage) : 0;
+    }
+    hasPierceOnlyArmor(enemy) {
+        return this.enemyTypes[enemy.typeId]?.armor?.kind === "pierce_only";
+    }
+    applySlow(enemy, factor, duration, affectsClasses = ["ground"]) {
+        if (!affectsClasses.includes(this.enemyTargetClass(enemy)) || factor >= 1 || factor <= 0 || duration <= 0) {
+            return;
+        }
+        const existing = enemy.statuses?.slow;
+        enemy.statuses ??= {};
+        enemy.statuses.slow = {
+            factor: existing ? Math.min(existing.factor, factor) : factor,
+            remaining: Math.max(existing?.remaining ?? 0, duration)
+        };
+    }
+    /** Apply a tower's data-driven on-hit status effects. Content-agnostic: keyed on attack.statusOnHit. */
+    applyStatusOnHit(towerTypeId, enemy) {
+        const spec = this.towerTypes[towerTypeId]?.attack?.statusOnHit;
+        if (!spec)
+            return;
+        this.applyStatusEffect(enemy, spec);
+    }
+    /**
+     * Apply a status-effect spec to an enemy. The shared primitive behind both a tower's
+     * `attack.statusOnHit` (via applyStatusOnHit) and an ability's `{kind:"status"}` effect
+     * (via applyAbilityEffect) — one status vocabulary, two triggers.
+     */
+    applyStatusEffect(enemy, spec) {
+        if (spec.slow) {
+            this.applySlow(enemy, spec.slow.factor, spec.slow.duration, spec.slowAffectsClasses);
+        }
+        if (typeof spec.stun === "number" && spec.stun > 0) {
+            enemy.statuses ??= {};
+            enemy.statuses.stun = { remaining: Math.max(enemy.statuses.stun?.remaining ?? 0, spec.stun) };
+        }
+        if (spec.poison && spec.poison.dps > 0 && spec.poison.duration > 0) {
+            enemy.statuses ??= {};
+            const existing = enemy.statuses.poison;
+            enemy.statuses.poison = {
+                dps: Math.max(existing?.dps ?? 0, spec.poison.dps),
+                remaining: Math.max(existing?.remaining ?? 0, spec.poison.duration)
+            };
+        }
+    }
+    triggerEnemyPhaseSpawns() {
+        const spawned = [];
+        for (const parent of this.enemies) {
+            if (parent.hp <= 0) {
+                continue;
+            }
+            const type = this.enemyTypes[parent.typeId];
+            if (!type?.phaseSpawns?.length) {
+                continue;
+            }
+            parent.phaseSpawnsTriggered ??= [];
+            for (const phase of type.phaseSpawns) {
+                const key = `${phase.hpRatio}:${phase.enemyId}`;
+                if (parent.phaseSpawnsTriggered.includes(key) || parent.hp / parent.maxHp > phase.hpRatio) {
+                    continue;
+                }
+                parent.phaseSpawnsTriggered.push(key);
+                const children = this.createPhaseSpawnChildren(parent, phase);
+                if (children.length > 0) {
+                    spawned.push(...children);
+                    this.lastEvents.push({
+                        type: "enemyPhaseSpawned",
+                        parentEnemyId: parent.id,
+                        parentEnemyTypeId: parent.typeId,
+                        enemyTypeId: phase.enemyId,
+                        enemyIds: children.map((child) => child.id),
+                        hpRatio: phase.hpRatio
+                    });
+                }
+            }
+        }
+        if (spawned.length > 0) {
+            this.enemies.push(...spawned);
+        }
+    }
+    createPhaseSpawnChildren(parent, phase) {
+        const parentRatio = this.enemyRouteProgressRatio(parent);
+        const routeIds = phase.routeIds?.length ? phase.routeIds : [parent.routeId ?? this.defaultRouteId()];
+        const children = [];
+        for (let index = 0; index < phase.count; index += 1) {
+            const routeId = this.resolveRouteId(routeIds[index % routeIds.length]);
+            const track = this.enemyTrackForType(phase.enemyId, routeId);
+            const trackEnd = Math.max(0, track.length - 1);
+            const progress = Math.min(Math.max(0, parentRatio * trackEnd + (phase.progressOffset ?? 0)), Math.max(0, trackEnd - 0.001));
+            const offset = phase.pathOffsets?.[index] ?? (index % 2 === 0 ? -0.22 : 0.22);
+            const child = this.createEnemyState(phase.enemyId, progress, offset, routeId);
+            if (child) {
+                children.push(child);
+            }
+        }
+        return children;
+    }
+    towerFireRateMultiplier(tower) {
+        let best = this.towerFireRateMetaMultiplier;
+        for (const support of this.towers) {
+            if (support.id === tower.id) {
+                continue;
+            }
+            const supportType = this.towerTypes[support.typeId];
+            const attack = supportType?.attack;
+            if (attack?.kind !== "support_buff" || !attack.affectsTowerIds.includes(tower.typeId)) {
+                continue;
+            }
+            if (!this.supportBuffTouchesTower(support, tower)) {
+                continue;
+            }
+            const levelIndex = Math.max(0, support.level - 1);
+            const multiplier = attack.fireRateMultiplierByLevel[Math.min(levelIndex, attack.fireRateMultiplierByLevel.length - 1)] ?? 1;
+            best = Math.max(best, multiplier * this.towerFireRateMetaMultiplier);
+        }
+        return best;
+    }
+    supportBuffTouchesTower(support, target) {
+        const supportType = this.towerTypes[support.typeId];
+        const targetType = this.towerTypes[target.typeId];
+        const attack = supportType?.attack;
+        if (!supportType || !targetType || attack?.kind !== "support_buff") {
+            return false;
+        }
+        const edgeDistance = Math.max(0, this.map.distance(support.coord, target.coord) - supportType.footprintRadius - targetType.footprintRadius);
+        return edgeDistance <= this.towerRange(support);
+    }
+    enemyRouteProgressRatio(enemy) {
+        const track = this.enemyTrack(enemy);
+        return enemy.pathProgress / Math.max(1, track.length - 1);
+    }
+    defaultRouteId() {
+        return this.map.pathRoutes[0]?.id ?? "main";
+    }
+    resolveRouteId(routeId) {
+        return this.map.pathRouteById(routeId)?.id ?? this.defaultRouteId();
+    }
+    routePathKey(routeId, pathOrder) {
+        return `${this.resolveRouteId(routeId)}:${pathOrder}`;
+    }
+    isTemporaryWaterTile(coord) {
+        const key = coordKey(coord);
+        return this.temporaryWaterTiles.some((tile) => coordKey(tile) === key && tile.expiresIn > 0);
+    }
+    isInsideAnyPulse(enemy) {
+        return (this.enemyTargetClass(enemy) === "ground" &&
+            this.towers.some((tower) => this.isPulseTower(tower) && this.enemyInRange(tower, enemy, this.towerRange(tower))));
+    }
+    isInsideSupportAura(sourceTypeId, coord) {
+        const sourceType = this.towerTypes[sourceTypeId];
+        if (sourceType?.attack.kind !== "support") {
+            return false;
+        }
+        return this.towers.some((tower) => tower.typeId === sourceTypeId && this.map.distance(tower.coord, coord) <= this.towerRange(tower));
+    }
+    canOccupyTowerFootprint(typeId, coord, ignoreTowerId) {
+        const type = this.towerTypes[typeId];
+        if (!type) {
+            return this.fail("Unknown tower type.", "reason.unknownTower");
+        }
+        if (type.requiresAuraFrom && !this.isInsideSupportAura(type.requiresAuraFrom, coord)) {
+            return this.fail(`${type.label} needs a support aura.`, "reason.needsAura", { tower: typeId });
+        }
+        const footprint = this.map.tilesWithin(coord, type.footprintRadius);
+        if (footprint.length === 0) {
+            return this.fail("Outside map.", "reason.outsideMap");
+        }
+        const expectedFootprintSize = this.map.footprintSize(type.footprintRadius);
+        if (footprint.length < expectedFootprintSize) {
+            return this.fail("Tower does not fit.", "reason.noFit");
+        }
+        for (const tile of footprint) {
+            if (tile.terrain === "water") {
+                return this.fail("Cannot build on water.", "reason.water");
+            }
+            if (!this.content.terrainTypes[tile.terrain]?.buildable) {
+                return this.fail("Can only build outside the path.", "reason.path");
+            }
+            if (tile.occupiedBy && tile.occupiedBy !== ignoreTowerId) {
+                return this.fail("Another tower already occupies this tile.", "reason.occupied");
+            }
+        }
+        return { ok: true };
+    }
+    dependentsKeepSupportAfterMove(sourceTowerId, nextCoord) {
+        const sourceTower = this.towers.find((tower) => tower.id === sourceTowerId);
+        if (!sourceTower) {
+            return false;
+        }
+        const sourceType = this.towerTypes[sourceTower.typeId];
+        if (!sourceType || sourceType.attack.kind !== "support") {
+            return true;
+        }
+        const unlocked = new Set(sourceType.attack.unlocksTowerIds);
+        const otherSources = this.towers.filter((tower) => tower.typeId === sourceTower.typeId && tower.id !== sourceTowerId);
+        const movedRange = this.towerRange(sourceTower);
+        return this.towers.every((tower) => {
+            if (!unlocked.has(tower.typeId)) {
+                return true;
+            }
+            if (this.map.distance(nextCoord, tower.coord) <= movedRange) {
+                return true;
+            }
+            return otherSources.some((source) => this.map.distance(source.coord, tower.coord) <= this.towerRange(source));
+        });
+    }
+    dependentsKeepSupportAfterRemoval(sourceTowerId) {
+        const sourceTower = this.towers.find((tower) => tower.id === sourceTowerId);
+        if (!sourceTower)
+            return false;
+        const sourceType = this.towerTypes[sourceTower.typeId];
+        if (!sourceType || sourceType.attack.kind !== "support")
+            return true;
+        const unlocked = new Set(sourceType.attack.unlocksTowerIds);
+        const otherSources = this.towers.filter((tower) => tower.typeId === sourceTower.typeId && tower.id !== sourceTowerId);
+        return this.towers.every((tower) => {
+            if (tower.id === sourceTowerId || !unlocked.has(tower.typeId))
+                return true;
+            return otherSources.some((source) => this.map.distance(source.coord, tower.coord) <= this.towerRange(source));
+        });
+    }
+    applyPassiveIncome(delta) {
+        const passive = this.mission.economy?.passivePerTimeUnit;
+        if (!passive || delta <= 0)
+            return;
+        this.addResources(this.scaleBag(passive, delta));
+    }
+    awardClearedWaveIncome() {
+        while (this.clearedWaveCount < this.startedWaveCount) {
+            const waveIndex = this.clearedWaveCount;
+            const income = this.normalizeCost(this.mission.economy?.perWaveClear ?? {});
+            const interest = this.cloneResources({});
+            const rate = Math.max(0, this.mission.economy?.interestRate ?? 0);
+            const cap = this.mission.economy?.interestCap;
+            for (const currencyId of this.currencyIds) {
+                const raw = Math.max(0, (this.resources[currencyId] ?? 0) * rate);
+                const max = Number(cap?.[currencyId]);
+                interest[currencyId] = Number.isFinite(max) && max >= 0 ? Math.min(raw, max) : raw;
+            }
+            this.addResources(income);
+            this.addResources(interest);
+            this.clearedWaveCount += 1;
+            this.lastEvents.push({ type: "waveCleared", waveIndex, income, interest });
+        }
+    }
+    removeDeadEnemies() {
+        const survivors = [];
+        const spawned = [];
+        for (const enemy of this.enemies) {
+            if (enemy.hp > 0) {
+                survivors.push(enemy);
+                continue;
+            }
+            if (enemy.pathProgress < this.enemyTrack(enemy).length - 1) {
+                const type = this.enemyTypes[enemy.typeId];
+                if (!type) {
+                    continue;
+                }
+                const reward = this.scaleBag(this.normalizeCost(type.reward), this.difficulty.enemyRewardMultiplier ?? 1);
+                this.addResources(reward);
+                this.killCount += 1;
+                this.killCountByEnemyType[enemy.typeId] = (this.killCountByEnemyType[enemy.typeId] ?? 0) + 1;
+                this.lastEvents.push({
+                    type: "enemyKilled",
+                    enemyId: enemy.id,
+                    enemyTypeId: enemy.typeId,
+                    coins: reward.coins ?? 0,
+                    resources: reward
+                });
+                spawned.push(...this.spawnOnDeathChildren(enemy));
+            }
+        }
+        this.enemies = [...survivors, ...spawned];
+    }
+    spawnOnDeathChildren(parent) {
+        const spawn = this.enemyTypes[parent.typeId]?.spawnOnDeath;
+        if (!spawn || spawn.count <= 0) {
+            return [];
+        }
+        const childRouteId = this.enemyTargetClassByType(spawn.enemyId) === "ground" ? parent.routeId : undefined;
+        const track = this.enemyTrackForType(spawn.enemyId, childRouteId);
+        const trackEnd = Math.max(0, track.length - 1);
+        const childProgress = Math.min(parent.pathProgress + spawn.forwardPathSteps, Math.max(0, trackEnd - 0.001));
+        const children = [];
+        for (let index = 0; index < spawn.count; index += 1) {
+            const offset = spawn.pathOffsets?.[index] ?? 0;
+            const child = this.createEnemyState(spawn.enemyId, childProgress, offset, childRouteId);
+            if (child) {
+                children.push(child);
+            }
+        }
+        if (children.length > 0) {
+            this.lastEvents.push({
+                type: "enemySpawnedOnDeath",
+                parentEnemyId: parent.id,
+                parentEnemyTypeId: parent.typeId,
+                enemyTypeId: spawn.enemyId,
+                enemyIds: children.map((child) => child.id)
+            });
+        }
+        return children;
+    }
+    resolveWaveState() {
+        if (this.outcome !== "playing") {
+            return;
+        }
+        if (this.startedWaveCount === 0) {
+            this.waveState = "ready";
+            this.prepRemaining = 0;
+            return;
+        }
+        const battlefieldClear = this.spawnQueue.length === 0 && this.enemies.length === 0;
+        if (battlefieldClear)
+            this.awardClearedWaveIncome();
+        const allWavesClear = this.startedWaveCount >= this.mission.waves.length && battlefieldClear;
+        this.waveState = allWavesClear ? "complete" : battlefieldClear ? "between" : "spawning";
+        this.syncPrepRemaining();
+        const progress = this.buildObjectiveProgress();
+        for (const objective of progress) {
+            if (objective.complete && !this.completedObjectiveIds.has(objective.id)) {
+                this.completedObjectiveIds.add(objective.id);
+                this.lastEvents.push({ type: "objectiveCompleted", objectiveId: objective.id, kind: objective.kind });
+            }
+        }
+        const failed = (this.mission.objectives?.failure ?? []).find((condition) => this.failureConditionMet(condition));
+        if (failed) {
+            this.outcome = "defeat";
+            this.prepRemaining = 0;
+            this.lastEvents.push({ type: "objectiveFailed", objectiveId: failed.id, kind: failed.kind });
+            this.lastEvents.push({ type: "defeat" });
+            return;
+        }
+        if (progress.length > 0 && progress.every((objective) => objective.complete)) {
+            this.outcome = "victory";
+            this.prepRemaining = 0;
+            for (const star of this.mission.objectives?.stars ?? []) {
+                if (this.starConditionMet(star) && !this.earnedStarIds.has(star.id)) {
+                    this.earnedStarIds.add(star.id);
+                    this.lastEvents.push({ type: "starEarned", starId: star.id });
+                }
+            }
+            this.lastEvents.push({ type: "victory" });
+            return;
+        }
+    }
+    victoryObjectives() {
+        const authored = this.mission.objectives?.victory;
+        return authored?.length ? authored : [{ id: "clear_waves", label: "Clear all waves", kind: "clearWaves" }];
+    }
+    buildObjectiveProgress() {
+        return this.victoryObjectives().map((objective) => {
+            let current = 0;
+            let target = 1;
+            if (objective.kind === "clearWaves") {
+                current = this.clearedWaveCount;
+                target = this.mission.waves.length;
+            }
+            else if (objective.kind === "surviveSeconds") {
+                current = this.missionElapsed;
+                target = objective.seconds;
+            }
+            else if (objective.kind === "killCount") {
+                current = objective.enemyTypeId ? this.killCountByEnemyType[objective.enemyTypeId] ?? 0 : this.killCount;
+                target = objective.count;
+            }
+            else if (objective.kind === "accumulateResource") {
+                current = this.resources[objective.resourceId] ?? 0;
+                target = objective.amount;
+            }
+            return {
+                id: objective.id,
+                label: objective.label || this.objectiveLabel(objective.kind),
+                kind: objective.kind,
+                current,
+                target,
+                complete: current + 0.000001 >= target
+            };
+        });
+    }
+    objectiveLabel(kind) {
+        if (kind === "clearWaves")
+            return "Clear all waves";
+        if (kind === "surviveSeconds")
+            return "Survive";
+        if (kind === "killCount")
+            return "Defeat enemies";
+        return "Accumulate resources";
+    }
+    failureConditionMet(condition) {
+        if (condition.kind === "maxLeaks")
+            return this.leakCount > condition.maxLeaks;
+        return this.missionElapsed > condition.seconds + 0.000001;
+    }
+    starConditionMet(condition) {
+        if (condition.kind === "coreHpAtLeast")
+            return this.coreHp + 0.000001 >= condition.amount;
+        if (condition.kind === "maxLeaks")
+            return this.leakCount <= condition.maxLeaks;
+        if (condition.kind === "timeAtMost")
+            return this.missionElapsed <= condition.seconds + 0.000001;
+        return (this.resources[condition.resourceId] ?? 0) + 0.000001 >= condition.amount;
+    }
+    buildStarSnapshot() {
+        return (this.mission.objectives?.stars ?? []).map((star) => ({
+            id: star.id,
+            label: star.label,
+            achieved: this.outcome === "victory" && this.starConditionMet(star)
+        }));
+    }
+    syncPrepRemaining() {
+        this.prepRemaining = this.getNextWaveRemaining();
+    }
+    getNextWaveRemaining() {
+        if (this.startedWaveCount === 0 || this.nextWaveStartAt === null) {
+            return 0;
+        }
+        return Math.max(0, this.nextWaveStartAt - this.missionElapsed);
+    }
+    isPathBlockerType(typeId) {
+        return this.enemyTypes[typeId]?.isPathBlocker === true;
+    }
+    enemyAvoidanceOffset(enemy) {
+        if (enemy.hp <= 0 || this.isPathBlockerType(enemy.typeId)) {
+            return 0;
+        }
+        const stump = this.enemies
+            .filter((item) => item.hp > 0 && this.isPathBlockerType(item.typeId))
+            .map((item) => ({
+            enemy: item,
+            distance: Math.abs(item.pathProgress - enemy.pathProgress)
+        }))
+            .filter((item) => {
+            if (item.enemy.routeId !== enemy.routeId) {
+                return false;
+            }
+            const radius = this.enemyTypes[item.enemy.typeId]?.pathCollisionRadius ?? 1.1;
+            return item.distance <= radius + 0.8;
+        })
+            .sort((a, b) => a.distance - b.distance)[0];
+        if (!stump) {
+            return 0;
+        }
+        const numericId = Number(enemy.id.split("_")[1] ?? 0);
+        const side = numericId % 2 === 0 ? 1 : -1;
+        const stumpRadius = this.enemyTypes[stump.enemy.typeId]?.pathCollisionRadius ?? 1.1;
+        const strength = 1 - stump.distance / (stumpRadius + 0.8);
+        return side * Math.max(0, strength) * 0.68;
+    }
+    /** Build a full bag over the declared currency set, defaulting any missing currency to 0. */
+    cloneResources(resources) {
+        const bag = {};
+        for (const id of this.currencyIds) {
+            bag[id] = Number(resources?.[id]) || 0;
+        }
+        return bag;
+    }
+    normalizeMetaUpgradeLevels(input) {
+        const levels = {};
+        for (const [upgradeId, upgrade] of Object.entries(this.content.metaProgression.upgrades)) {
+            const requested = Number(input[upgradeId]) || 0;
+            levels[upgradeId] = Math.max(0, Math.min(upgrade.maxLevel, Math.floor(requested)));
+        }
+        return levels;
+    }
+    metaEffectTotal(kind, valueField) {
+        let total = 0;
+        for (const [upgradeId, upgrade] of Object.entries(this.content.metaProgression.upgrades)) {
+            const level = this.metaUpgradeLevels[upgradeId] ?? 0;
+            if (level <= 0)
+                continue;
+            for (const effect of upgrade.effects) {
+                if (effect.kind !== kind)
+                    continue;
+                const value = Number(effect[valueField]) || 0;
+                total += value * level;
+            }
+        }
+        return total;
+    }
+    initialResources() {
+        const resources = this.scaleBag(this.mission.startingResources, this.difficulty.startingResourceMultiplier ?? 1);
+        for (const [upgradeId, upgrade] of Object.entries(this.content.metaProgression.upgrades)) {
+            const level = this.metaUpgradeLevels[upgradeId] ?? 0;
+            if (level <= 0)
+                continue;
+            for (const effect of upgrade.effects) {
+                if (effect.kind !== "startingResource" || !this.currencyIds.includes(effect.resourceId))
+                    continue;
+                resources[effect.resourceId] = (resources[effect.resourceId] ?? 0) + effect.amountPerLevel * level;
+            }
+        }
+        return resources;
+    }
+    cleanCoord(coord) {
+        return { q: coord.q, r: coord.r };
+    }
+    normalizeCost(cost) {
+        return this.cloneResources(cost);
+    }
+    hasResources(cost) {
+        return this.currencyIds.every((id) => (this.resources[id] ?? 0) >= (Number(cost?.[id]) || 0));
+    }
+    spendResources(cost) {
+        for (const id of this.currencyIds) {
+            this.resources[id] = (this.resources[id] ?? 0) - (Number(cost?.[id]) || 0);
+        }
+    }
+    addResources(resources) {
+        for (const id of this.currencyIds) {
+            this.resources[id] = (this.resources[id] ?? 0) + (Number(resources?.[id]) || 0);
+        }
+    }
+    addToBag(target, resources) {
+        for (const id of this.currencyIds)
+            target[id] = (target[id] ?? 0) + (Number(resources?.[id]) || 0);
+    }
+    scaleBag(resources, factor) {
+        const bag = this.cloneResources({});
+        for (const id of this.currencyIds)
+            bag[id] = (Number(resources?.[id]) || 0) * factor;
+        return bag;
+    }
+    bagHasValue(resources) {
+        return this.currencyIds.some((id) => Math.abs(resources[id] ?? 0) > 0.000001);
+    }
+    formatCost(cost) {
+        const normalized = this.normalizeCost(cost);
+        const parts = [];
+        for (const currency of this.currencies) {
+            const amount = normalized[currency.id] ?? 0;
+            if (amount > 0)
+                parts.push(`${amount} ${currency.label}`);
+        }
+        return parts.join(" and ") || "resources";
+    }
+    fail(reason, reasonKey, reasonParams) {
+        return { ok: false, reason, reasonKey, reasonParams };
+    }
+    costReasonParams(cost) {
+        return this.normalizeCost(cost);
+    }
+}

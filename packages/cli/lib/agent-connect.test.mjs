@@ -18,7 +18,7 @@ describe("agent connect configurator", () => {
   it("covers the major clients and every snippet round-trips its format", () => {
     const clients = agentClientConfigs(projectDir, SERVER, "/usr/bin/node");
     const ids = clients.map((c) => c.id);
-    for (const expected of ["claude-code", "claude-code-cli", "claude-code-plugin", "codex", "claude-desktop", "cursor", "vscode"]) {
+    for (const expected of ["claude-code", "claude-code-cli", "claude-code-plugin", "codex-plugin", "codex", "claude-desktop", "cursor", "vscode"]) {
       expect(ids).toContain(expected);
     }
     for (const client of clients) {
@@ -45,6 +45,14 @@ describe("agent connect configurator", () => {
     expect(codex.snippet).toContain('command = "/usr/bin/node"');
     // The embedded quote in the path must arrive escaped, not raw (raw would break the TOML string).
     expect(codex.snippet).toContain('tower \\"forge\\"');
+  });
+
+  it("offers the workspace-bound Codex marketplace plugin as the preferred integration", () => {
+    const [plugin] = agentClientConfigs(projectDir, SERVER, "/usr/bin/node").filter((client) => client.id === "codex-plugin");
+    expect(plugin.snippet).toContain("Lindforge-Studios/towerforge-codex-plugin");
+    expect(plugin.snippet).not.toContain("--sparse");
+    expect(plugin.snippet).toContain("towerforge@towerforge");
+    expect(plugin.how).toContain("workspace-bound");
   });
 
   it("writes project-scoped configs merge-preserving foreign entries", () => {

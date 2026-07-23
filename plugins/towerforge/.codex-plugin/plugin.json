@@ -1,0 +1,45 @@
+{
+  "name": "towerforge",
+  "version": "0.2.0",
+  "description": "Build, validate, simulate, balance, script, and package TowerForge games from Codex.",
+  "author": {
+    "name": "Lindforge Studios",
+    "url": "https://lindforge.com"
+  },
+  "homepage": "https://github.com/Lindforge-Studios/towerforge-codex-plugin",
+  "repository": "https://github.com/Lindforge-Studios/towerforge-codex-plugin",
+  "license": "MIT",
+  "keywords": [
+    "towerforge",
+    "game-development",
+    "tower-defense",
+    "mcp",
+    "level-design",
+    "game-balance"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "TowerForge",
+    "shortDescription": "Design and ship TowerForge games with validated local tools",
+    "longDescription": "TowerForge connects Codex to the active local .tdproj workspace. Inspect schemas and content, author maps and TowerScript, validate changes, run deterministic simulations and balance reports, bind assets, and produce release builds through guarded project-aware tools.",
+    "developerName": "Lindforge Studios",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://lindforge.com",
+    "defaultPrompt": [
+      "Audit this TowerForge project and report release blockers",
+      "Balance the selected mission and validate the result",
+      "Create a map and tileset plan for this TowerForge game"
+    ],
+    "brandColor": "#69A96E",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/logo.png",
+    "logoDark": "./assets/logo-dark.svg",
+    "screenshots": []
+  }
+}

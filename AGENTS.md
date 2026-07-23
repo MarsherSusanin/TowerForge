@@ -10,6 +10,8 @@ Run the relevant checks before declaring work complete:
 
 - `npm run typecheck` for engine type safety.
 - `npm run build:engine` after engine or project-loader changes.
+- `npm run plugin:build`, `npm run plugin:validate`, and `npm run plugin:smoke` after MCP, CLI runtime, engine dist, renderer, theme-pack, or Codex plugin changes.
+- `npm run plugin:export -- --out <outside-repo-dir>` only from a clean committed source when preparing or diagnosing the public Codex plugin mirror.
 - `npm run validate` after content/schema/loader changes.
 - `npm run sim tutorial_01 60` after simulation, balance, map, or content changes.
 - `npm run balance -- --project examples/starter.tdproj` after balance-strategy, advisor, economy, template, or MCP balance-tool changes.
@@ -45,6 +47,7 @@ Run the relevant checks before declaring work complete:
 - MUST keep project-authored behavior in versioned TowerScript JSON. MUST NOT add `eval`, `Function`, arbitrary JavaScript/Lua execution, package imports, or raw host bridges; add typed deterministic events/actions instead.
 - MUST keep generic project-tree writes confined to `scripts/**/*.tower.json`; content, maps, and assets use their validation-aware editors/tools.
 - MUST update `ARCHITECTURE.md` or an ADR when changing package boundaries, project format, build outputs, or validation semantics.
+- MUST keep `Lindforge-Studios/TowerForge` as the source of truth for the Codex plugin. The `towerforge-codex-plugin` repository is a generated release mirror and MUST NOT acquire independent runtime source changes.
 
 ## Security / Secrets
 
@@ -63,6 +66,7 @@ Run the relevant checks before declaring work complete:
 - MUST link the release to its git tag and tagged source tree.
 - MUST NOT recommend `xattr -d`, disabling Gatekeeper, or lowering system security. Direct macOS users only to System Settings > Privacy & Security > Open Anyway.
 - MUST follow `docs/releasing.md` for asset names, verification, publication, rollback, and incident handling.
+- MUST publish the Codex plugin mirror only from a clean committed source through the scoped deploy-key workflow. The mirror manifest MUST identify the exact source commit and SHA-256 of every distributed file.
 
 ## Definition of Done
 

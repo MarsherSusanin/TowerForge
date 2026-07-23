@@ -47,6 +47,8 @@ Studio откроется по адресу `http://localhost:5174` и по ум
 | Создать проект | `npx towerforge create my-game --template classic --grid square`, сетки `hex`/`square`, шаблоны `classic`, `maze`, `idle`, `roguelike` |
 | Запустить Studio | `npm run studio` |
 | Запустить MCP-сервер | `npm run mcp -- --project examples/starter.tdproj` |
+| Собрать Codex plugin | `npm run plugin:build` |
+| Проверить Codex plugin | `npm run plugin:validate && npm run plugin:smoke` |
 | Подключить ИИ-клиент | `npx towerforge mcp:connect <project> [--client <id> --write]` или выбор клиента в **Настройки → Интеграция ИИ-агентов** |
 | Проверить проект | `npm run validate` |
 | Получить результат проверки в JSON | `npm run validate -- --json` |
@@ -114,6 +116,8 @@ python3 -m http.server 5175 --bind 127.0.0.1 --directory examples/starter.tdproj
 Правила агентов находятся в [AGENTS.md](AGENTS.md), операционные инструкции — в [docs/runbook.md](docs/runbook.md), политика релизов — в [docs/releasing.md](docs/releasing.md), архитектурные решения — в [docs/adr/](docs/adr/), примеры — в [docs/examples/](docs/examples/).
 
 Встроенный **Чат с ИИ** и внешние MCP-клиенты используют общий реестр инструментов и единую политику авторинга. Доменное описание схем объясняет агентам, когда применять универсальные эффекты, TowerScript, сложность и метапрогрессию или визуальные темы. Инструменты публикуют метаданные риска и предпочитают preview, revision guard, узкие изменения, проверку и rollback. В настройках доступны ChatGPT OAuth через Codex App Server, аккаунт Claude через Claude Agent SDK/runtime и прямые ключи Anthropic, OpenAI и OpenRouter. Правая панель чата поддерживает режимы вопроса, плана и действия, выбор модели и уровня рассуждений, изображения и локально извлечённые кадры видео.
+
+Для Codex доступен отдельный public marketplace [`towerforge-codex-plugin`](https://github.com/Lindforge-Studios/towerforge-codex-plugin). Его release bundle детерминированно собирается из [`plugins/towerforge`](plugins/towerforge) в этом репозитории. Плагин добавляет skill и локальный MCP runtime без API-ключа и TowerForge cloud account. Сервер ищет `.tdproj` только в файловых roots текущей Codex workspace, не принимает абсолютный `projectDir` от модели и удаляет локальные пути из ответов. Полная установка и модель безопасности описаны в [runbook](docs/runbook.md#codex-marketplace-plugin).
 
 ## Лицензия
 

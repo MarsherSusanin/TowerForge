@@ -18,6 +18,11 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run typecheck
       - run: npm run build:engine
+      - run: npm run plugin:build
+      - run: npm run plugin:validate
+      - run: npm run plugin:smoke
+      - run: git diff --exit-code -- plugins/towerforge/runtime plugins/towerforge/assets
+      - run: test -z "$(git status --porcelain --untracked-files=all -- plugins/towerforge/runtime plugins/towerforge/assets)"
       - run: npm test
       - run: npm run validate
       - run: npm run sim tutorial_01 60
